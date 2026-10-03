@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from . import ai, auth, catalog, chat, collab_sync
+from . import ai, auth, catalog, chat, collab_sync, decisions
 from .analysis import full_analysis, trace_requirement
 from .diff import diff_states, diff_to_text
 from .models import ProjectState
@@ -456,6 +456,13 @@ def create_app(store: Store | None = None) -> FastAPI:
                                body.actor, new_state)
         await hub.broadcast(Hub.key(pid, target), {"type": "versions", "actor": body.actor})
         return {"branch": target, "version": version["number"], "summary": summary, "state": new_state.model_dump()}
+
+    # ---- architecture decisions (ADRs), alternative evaluation (Jev), adopting a draft ----
+    async def broadcast_room(pid: str, branch: str, msg: dict[str, Any]) -> None:
+        await hub.broadcast(Hub.key(pid, branch), msg)
+
+    decisions.register_routes(app, store, project_or_404=project_or_404, sync_to_live_doc=sync_to_live_doc,
+                              broadcast=broadcast_room)
 
     # ---- internal: collab server ↔ API (shared-secret authenticated) ----
     def internal_auth(token: str | None) -> None:

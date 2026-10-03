@@ -35,6 +35,7 @@ is validated, versioned, conflict-checked and shown live to everyone.
 | Vibe coding | Implementation brief for Claude Code / Codex / Gemini CLI / Aider from the whole system, selected components, or a requirement (pulls in traced context, interfaces, stubs, acceptance criteria → tests) |
 | Remote MCP server | Streamable HTTP at `/mcp` with OAuth 2.1 (works with Claude Code, Claude.ai, Claude Desktop and other MCP clients) or personal access tokens; 21 tools, org-scoped, read-only or read & edit. Agent edits show up live on everyone's canvas |
 | Activity history | Who changed what, and when, per branch |
+| Architecture decisions | **Decisions** tab: ADRs (ADR-001, …) with status, context, decision, consequences, alternatives and linked requirements. **Compare drafts** scores 2–4 branches against the requirements/NFRs on cost, scalability, performance, security, reliability, operability and delivery speed (1–5 matrix + recommendation) using the [Jev](https://thejevai.com/docs) decision API (`JEV_API_KEY`), else the LLM, else an offline heuristic; the engine is always shown. Record the result as an ADR and **adopt** the chosen draft into `main` (safety version first, then a new version). REST under `/api/projects/{id}/decisions` and `/evaluate`; MCP `evaluate_alternatives` & co. |
 
 ## Quick start
 
@@ -83,6 +84,7 @@ offline logic, and the Ask assistant is disabled.
 | `ARCHFLOW_MODEL_FAST` | `gemini/gemini-3.8-flash` | Fast model |
 | `ARCHFLOW_ORG_RPM` | `60` | LLM requests per minute per org |
 | `LANGFUSE_PUBLIC_KEY` … | – | Enables LLM tracing |
+| `JEV_API_KEY` | – | Jev decision API for comparing drafts (falls back to the LLM, then an offline heuristic) |
 | `DATABASE_URL` | – | `postgresql://…` switches storage to Postgres |
 | `ARCHFLOW_DB` | `backend/data/archflow.db` | SQLite path when `DATABASE_URL` is unset |
 
@@ -118,11 +120,12 @@ expose the API over HTTPS (for example a Cloudflare Tunnel or ngrok to port 8000
 `ARCHFLOW_PUBLIC_URL=https://your-host` and `ARCHFLOW_MCP_ALLOWED_HOSTS=your-host` before connecting to
 `https://your-host/mcp`.
 
-Tools (23): `search_catalog`, `convert_cloud`, `whoami`, `list_projects`, `get_architecture`, `get_requirements`, `validate_architecture`,
+Tools (27): `search_catalog`, `convert_cloud`, `whoami`, `list_projects`, `get_architecture`, `get_requirements`, `validate_architecture`,
 `list_versions`, `get_architecture_diff`, `list_tasks`, `get_task_brief`, `generate_coding_prompt`,
 `create_project`, `add_component`, `update_component`, `remove_component`, `connect_components`,
 `disconnect_components`, `create_requirement`, `update_requirement`, `report_progress`, `commit_version`,
-`architecture_command`. Agent edits go through the same pipeline as the canvas and appear live, attributed
+`architecture_command`, plus architecture decisions: `list_decisions`, `get_decision`, `create_decision`,
+`evaluate_alternatives`. Agent edits go through the same pipeline as the canvas and appear live, attributed
 to "*user* via MCP". For coding work an agent can loop **list_tasks → get_task_brief → implement →
 report_progress** (status and PR link show up in the project activity).
 

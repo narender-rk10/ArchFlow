@@ -13,6 +13,7 @@ import type {
 import { ArchNodeComponent, TYPE_META, type ArchFlowNode, type DiffMark } from "./ArchNode";
 import { CommandBar, type LogEntry } from "./CommandBar";
 import { ConnectDialog } from "./ConnectDialog";
+import { DecisionsPanel } from "./DecisionsPanel";
 import { DesignChat } from "./DesignChat";
 import { PromptDialog } from "./Dialogs";
 import { Inspector } from "./Inspector";
@@ -32,7 +33,7 @@ interface Props {
 }
 
 const nodeTypes = { arch: ArchNodeComponent };
-type Tab = "design" | "requirements" | "issues" | "versions";
+type Tab = "design" | "requirements" | "issues" | "versions" | "decisions";
 const rand = () => Math.random().toString(36).slice(2, 6);
 
 export function Workspace(props: Props) {
@@ -458,10 +459,11 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
 
       <aside className="sidebar">
         <nav className="tabs">
-          {(["design", "requirements", "issues", "versions"] as Tab[]).map((t) => (
+          {(["design", "requirements", "issues", "versions", "decisions"] as Tab[]).map((t) => (
             <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
               {t === "design" ? "Design" : t === "requirements" ? `Requirements${state ? ` (${Object.keys(state.requirements).length})` : ""}`
-                : t === "issues" ? `Health${analysis ? ` (${analysis.health.issues.errors + analysis.health.issues.warnings})` : ""}` : "Versions"}
+                : t === "issues" ? `Health${analysis ? ` (${analysis.health.issues.errors + analysis.health.issues.warnings})` : ""}`
+                : t === "decisions" ? "Decisions" : "Versions"}
             </button>
           ))}
         </nav>
@@ -482,6 +484,10 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
         {tab === "versions" && (
           <VersionsPanel versions={versions} activity={activity} branch={branch} headVersion={headVersion} diff={diff}
             onCommit={commit} onDiff={showDiff} onRestore={restore} onBranchFrom={(v, name) => createBranch(name, v)} />
+        )}
+        {tab === "decisions" && (
+          <DecisionsPanel pid={pid} branches={branches} user={user} toast={toast}
+            onAdopted={(r) => { refreshMeta(); toast(`Adopted ${r.source} into ${r.branch} (${r.decisionId}) · v${r.version}`); }} />
         )}
       </aside>
 
