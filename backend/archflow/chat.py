@@ -496,7 +496,9 @@ def architecture_ops(state: ProjectState, option: dict[str, Any], requirements: 
     """Operations that put a chosen architecture (and its requirements) onto the canvas."""
     ops: list[dict[str, Any]] = []
     if replace:
-        ops += [{"op": "remove_node", "id": nid} for nid in state.nodes]
+        # Removing a top-level component also removes its internal (LLD) elements.
+        ops += [{"op": "remove_node", "id": nid} for nid, n in state.nodes.items()
+                if not n.parent_id or n.parent_id not in state.nodes]
 
     # Requirements: skip titles that already exist; pre-assign IDs so components can link to them.
     existing = {r.title.strip().lower(): r.id for r in state.requirements.values()}

@@ -67,6 +67,9 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
   const [newBranch, setNewBranch] = useState<string | null>(null);
   const [nodes, setNodes] = useState<ArchFlowNode[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
+  // Diagram level shown on the canvas: "" = system (HLD), else the id of the component whose internals are open.
+  const [level, setLevel] = useState("");
+  const [generating, setGenerating] = useState(false);
   const clipboard = useRef<{ nodes: ArchNode[]; edges: { source: string; target: string; protocol: string; label: string }[] } | null>(null);
   const wrapper = useRef<HTMLDivElement>(null);
 
@@ -81,6 +84,26 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
   const state = live.state;
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  // ---- HLD → LLD levels ----
+  const levelOf = useCallback((n: ArchNode) => (n.parent_id && state?.nodes[n.parent_id] ? n.parent_id : ""), [state]);
+  useEffect(() => { setLevel(""); }, [pid, branch]);
+  useEffect(() => { if (state && level && !state.nodes[level]) setLevel(""); }, [state, level]); // opened component was deleted
+  const childCount = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const n of Object.values(state?.nodes ?? {})) if (n.parent_id) m[n.parent_id] = (m[n.parent_id] ?? 0) + 1;
+    return m;
+  }, [state]);
+  const crumbs = useMemo(() => {
+    const out: ArchNode[] = [];
+    let cur = level ? state?.nodes[level] : undefined;
+    while (cur && out.length < 20) { out.unshift(cur); cur = cur.parent_id ? state?.nodes[cur.parent_id] : undefined; }
+    return out;
+  }, [state, level]);
+  const openLevel = useCallback((id: string) => {
+    setLevel(id);
+    window.setTimeout(() => flow.fitView({ padding: 0.2, duration: 300, maxZoom: 1.2 }), 60);
+  }, [flow]);
 
   const refreshMeta = useCallback(() => {
     api.versions(pid).then(setVersions).catch(() => {});
@@ -169,9 +192,10 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
     const mark = (id: string, sec?: Diff["nodes"]): DiffMark =>
       !sec ? null : sec.added.some((x) => x.id === id) ? "added" : sec.changed.some((x) => x.id === id) ? "changed" : null;
 
+    const visible = new Set(Object.values(state.nodes).filter((m) => levelOf(m) === level).map((m) => m.id));
     setNodes((prev) => {
       const prevMap = new Map(prev.map((n) => [n.id, n]));
-      const out: ArchFlowNode[] = Object.values(state.nodes).map((m) => {
+      const out: ArchFlowNode[] = Object.values(state.nodes).filter((m) => visible.has(m.id)).map((m) => {
         const p = prevMap.get(m.id);
         return {
           ...p, // keep React Flow internals (measured size, selection, dragging)
@@ -181,13 +205,14 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
           data: {
             model: m, dimmed: !!highlight && !highlight.has(m.id), highlighted: !!highlight?.has(m.id),
             diff: mark(m.id, d?.nodes), remote: remoteByNode[m.id], issues: issuesByNode[m.id],
+            childCount: childCount[m.id],
           },
         };
       });
       if (d) {
         for (const r of d.nodes.removed) {
           const m = d.from_state.nodes[r.id];
-          if (m) out.push({ id: `ghost:${m.id}`, type: "arch", position: m.position, draggable: false, selectable: false, connectable: false,
+          if (m && (m.parent_id ?? "") === level) out.push({ id: `ghost:${m.id}`, type: "arch", position: m.position, draggable: false, selectable: false, connectable: false,
             data: { model: m, diff: "removed" } });
         }
       }
@@ -196,7 +221,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
 
     setEdges((prev) => {
       const prevSel = new Map(prev.map((e) => [e.id, e.selected]));
-      const out: Edge[] = Object.values(state.edges).map((e) => {
+      const out: Edge[] = Object.values(state.edges).filter((e) => visible.has(e.source) && visible.has(e.target)).map((e) => {
         const dm = mark(e.id, d?.edges);
         const dim = !!highlight && !(highlight.has(e.source) && highlight.has(e.target));
         return {
@@ -208,7 +233,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
       if (d) {
         for (const r of d.edges.removed) {
           const e = d.from_state.edges[r.id];
-          if (!e) continue;
+          if (!e || (d.from_state.nodes[e.source]?.parent_id ?? "") !== level) continue;
           const src = state.nodes[e.source] ? e.source : `ghost:${e.source}`;
           const tgt = state.nodes[e.target] ? e.target : `ghost:${e.target}`;
           out.push({ id: `ghost:${e.id}`, source: src, target: tgt, label: e.protocol || undefined, selectable: false,
@@ -217,7 +242,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
       }
       return out;
     });
-  }, [state, diff, highlight, remoteByNode, issuesByNode]);
+  }, [state, diff, highlight, remoteByNode, issuesByNode, level, levelOf, childCount]);
 
 
   const selectedNodeIds = useMemo(() => nodes.filter((n) => n.selected && !n.id.startsWith("ghost:")).map((n) => n.id), [nodes]);
@@ -260,8 +285,11 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
       technology: generic ? "" : item.name, vendor: generic ? "" : item.vendor, catalog_id: generic ? "" : item.id,
       description: type === "note" ? "Select it and edit the text in the inspector" : "",
       position: { x: Math.round(p.x - 90), y: Math.round(p.y - 30) },
+      parent_id: level, // dropped into the diagram that is open
+      ...(type === "endpoint" ? { name: "GET /resource", props: { method: "GET", path: "/resource" } } : {}),
+      ...(type === "table" ? { name: "new_table", props: { columns: "id uuid pk, created_at timestamptz" } } : {}),
     } }]);
-  }, [flow, send]);
+  }, [flow, send, level]);
 
   const lastCursor = useRef(0);
   const onMouseMove = useCallback((e: React.MouseEvent) => {
@@ -269,8 +297,8 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
     if (now - lastCursor.current < 50) return;
     lastCursor.current = now;
     const p = flow.screenToFlowPosition({ x: e.clientX, y: e.clientY });
-    setCursor({ x: p.x, y: p.y });
-  }, [flow, setCursor]);
+    setCursor({ x: p.x, y: p.y, level });
+  }, [flow, setCursor, level]);
 
   // ---- copy / paste / duplicate ----
   const copySelection = useCallback(() => {
@@ -293,13 +321,14 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
       idMap[n.id] = `${n.id}-${rand()}`;
       return { op: "add_node", node: {
         id: idMap[n.id], name: n.name, type: n.type, technology: n.technology, description: n.description,
-        requirement_ids: n.requirement_ids, props: n.props, position: { x: n.position.x + 60, y: n.position.y + 60 } } };
+        requirement_ids: n.requirement_ids, props: n.props, parent_id: level,
+        position: { x: n.position.x + 60, y: n.position.y + 60 } } };
     });
     for (const e of clip.edges) ops.push({ op: "add_edge", edge: { ...e, source: idMap[e.source], target: idMap[e.target] } });
     send(ops);
     // next paste lands further offset
     clipboard.current = { ...clip, nodes: clip.nodes.map((n) => ({ ...n, position: { x: n.position.x + 60, y: n.position.y + 60 } })) };
-  }, [send]);
+  }, [send, level]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -344,6 +373,17 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
     }
   };
 
+  const generateLld = async (nodeId: string) => {
+    setGenerating(true);
+    try {
+      const r = await api.generateLld(pid, branch, nodeId, user.name);
+      const parts = Object.entries(r.counts).map(([t, k]) => `${k} ${t}${k === 1 ? "" : "s"}`).join(", ");
+      toast(`Generated the design of ${r.name}: ${parts}${r.engine === "offline" ? " (template)" : ""}`);
+      window.setTimeout(() => flow.fitView({ padding: 0.2, duration: 400, maxZoom: 1.2 }), 500); // after the live document updates
+    } catch (e) { toast(`⚠ ${(e as Error).message}`); }
+    finally { setGenerating(false); }
+  };
+
   // ---- versions ----
   const commit = async (message: string) => {
     try {
@@ -374,6 +414,8 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
   const focusIssue = (i: Issue) => {
     if (i.requirement_ids[0]) { setTraced(i.requirement_ids[0]); setTab("requirements"); }
     if (i.node_ids.length) {
+      const first = state?.nodes[i.node_ids[0]];
+      if (first && levelOf(first) !== level) setLevel(levelOf(first));
       const ids = new Set(i.node_ids);
       setNodes((ns) => ns.map((n) => ({ ...n, selected: ids.has(n.id) })));
       flow.fitView({ nodes: i.node_ids.map((id) => ({ id })), padding: 0.6, duration: 400, maxZoom: 1.2 });
@@ -497,6 +539,8 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
           nodes={nodes} edges={edges} nodeTypes={nodeTypes}
           onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onDelete={onDelete}
           onNodeDragStop={onNodeDragStop} onConnect={onConnect}
+          onNodeDoubleClick={(_, n) => { if (!n.id.startsWith("ghost:") && n.data.model.type !== "note") openLevel(n.id); }}
+          zoomOnDoubleClick={false}
           deleteKeyCode={["Delete", "Backspace"]} multiSelectionKeyCode={["Shift", "Meta", "Control"]}
           selectionKeyCode="Shift" colorMode={colorMode} fitView fitViewOptions={{ padding: 0.15 }} minZoom={0.1} maxZoom={2.5} proOptions={{ hideAttribution: true }}
         >
@@ -504,7 +548,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
           <Controls position="center-right" />
           <MiniMap position="top-right" pannable zoomable nodeColor={(n) => TYPE_META[(n.data as { model: ArchNode }).model.type]?.color ?? "#999"} />
           <ViewportPortal>
-            {others.filter((c) => c.cursor).map((c) => (
+            {others.filter((c) => c.cursor && (c.cursor.level ?? "") === level).map((c) => (
               <div key={c.clientId} className="remote-cursor" style={{ transform: `translate(${c.cursor!.x}px, ${c.cursor!.y}px)`, color: c.color }}>
                 <svg width="16" height="16" viewBox="0 0 16 16"><path d="M1 1 L6 15 L8 9 L14 7 Z" fill="currentColor" stroke="white" strokeWidth="1" /></svg>
                 <span style={{ background: c.color }}>{c.name}</span>
@@ -515,7 +559,29 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
         <Palette catalog={catalog} />
         {diff && <div className="diff-banner">Diff: v{diff.from} → working · {diff.data.total_changes} change(s) <button className="small" onClick={() => setDiff(null)}>Exit</button></div>}
         {traced && <div className="diff-banner">Tracing {traced} <button className="small" onClick={() => setTraced(null)}>Clear</button></div>}
-        {state && Object.keys(state.nodes).length === 0 && (
+        {level && (
+          <nav className="crumbs" aria-label="Diagram level">
+            <button className="link" onClick={() => openLevel("")}>System</button>
+            {crumbs.map((c, i) => (
+              <span key={c.id}>
+                <span className="muted"> › </span>
+                {i === crumbs.length - 1 ? <b>{c.name}</b> : <button className="link" onClick={() => openLevel(c.id)}>{c.name}</button>}
+              </span>
+            ))}
+            <span className="muted tiny">internals</span>
+          </nav>
+        )}
+        {state && level && !childCount[level] && (
+          <div className="empty-canvas lld-empty">
+            <h3>{state.nodes[level]?.name}: low-level design</h3>
+            <p className="muted">Generate components, API endpoints, tables and events from this component's connections
+              and requirements, or drag elements from the palette.</p>
+            <button className="primary" disabled={generating} onClick={() => generateLld(level)}>
+              {generating ? "Generating…" : "Generate low-level design"}
+            </button>
+          </div>
+        )}
+        {state && !level && Object.keys(state.nodes).length === 0 && (
           <div className="empty-canvas">
             <h3>Empty canvas</h3>
             <p className="muted">Drag components from the palette, or describe your system below — e.g.
@@ -529,6 +595,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
       <aside className="rightbar">
         {state && (
           <Inspector catalog={catalog} state={state} nodeIds={selectedNodeIds} edgeIds={selectedEdgeIds} send={send}
+            pid={pid} branch={branch} onOpenInternals={openLevel}
             onPrompt={() => setPromptFor({ nodeIds: selectedNodeIds, requirementIds: [] })} />
         )}
       </aside>

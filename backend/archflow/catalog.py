@@ -219,6 +219,11 @@ _GENERIC: list[tuple[str, str, str, str]] = [
     ("generic-external", "external", "External system", "Integration"),
     ("generic-security", "security", "Security", "Security"),
     ("generic-note", "note", "Note", "Annotations"),
+    # Low-level design elements, used inside a component's internal diagram.
+    ("generic-component", "component", "Component", "Low-level design"),
+    ("generic-endpoint", "endpoint", "API endpoint", "Low-level design"),
+    ("generic-table", "table", "DB table", "Low-level design"),
+    ("generic-event", "event", "Domain event", "Low-level design"),
 ]
 
 
@@ -318,6 +323,8 @@ def convert_ops(state, target: str) -> tuple[list[dict[str, Any]], list[str]]:
     ops: list[dict[str, Any]] = []
     skipped: list[str] = []
     for node in state.nodes.values():
+        if node.parent_id:
+            continue  # LLD elements (tables, endpoints, …) are not hosted services
         data = node.model_dump()
         entry = match(data)
         if not entry or entry["vendor"] == target or entry["vendor"] == "generic" or entry["kind"] in PORTABLE_KINDS:

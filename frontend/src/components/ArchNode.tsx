@@ -17,7 +17,17 @@ export const TYPE_META: Record<NodeType, { label: string; color: string; glyph: 
   external: { label: "External", color: "#8b8d98", glyph: "↗" },
   security: { label: "Security", color: "#dc3e42", glyph: "⛨" },
   note: { label: "Note", color: "#ffc53d", glyph: "✎" },
+  component: { label: "Component", color: "#3e63dd", glyph: "▣" },
+  endpoint: { label: "Endpoint", color: "#0d74ce", glyph: "⇢" },
+  table: { label: "Table", color: "#f76b15", glyph: "▦" },
+  event: { label: "Event", color: "#ffb224", glyph: "ϟ" },
 };
+
+/** Columns of a table node: "id uuid pk, total numeric" → [{name, type, key}]. */
+export function parseColumns(text: string | undefined) {
+  return (text ?? "").split(/[,\n]/).map((c) => c.trim().split(/\s+/)).filter((b) => b[0])
+    .map((b) => ({ name: b[0], type: b[1] ?? "", key: (b.slice(2).find((x) => /^(pk|fk|uk)$/i.test(x)) ?? "").toUpperCase() }));
+}
 
 export type DiffMark = "added" | "removed" | "changed" | null;
 
@@ -28,12 +38,13 @@ export interface ArchNodeData extends Record<string, unknown> {
   diff?: DiffMark;
   remote?: { name: string; color: string }[];
   issues?: number;
+  childCount?: number; // elements in this component's internal (LLD) diagram
 }
 
 export type ArchFlowNode = Node<ArchNodeData, "arch">;
 
 function ArchNodeView({ data, selected }: NodeProps<ArchFlowNode>) {
-  const { model, dimmed, highlighted, diff, remote, issues } = data;
+  const { model, dimmed, highlighted, diff, remote, issues, childCount } = data;
   const meta = TYPE_META[model.type] ?? TYPE_META.service;
   const ring = remote?.[0]?.color;
   const cls = ["arch-node", `t-${model.type}`, selected && "selected", dimmed && "dimmed", highlighted && "highlighted",
@@ -58,9 +69,27 @@ function ArchNodeView({ data, selected }: NodeProps<ArchFlowNode>) {
           <span className="vbadge" style={{ ["--vc" as string]: VENDOR_STYLE[model.vendor].color }}>{VENDOR_STYLE[model.vendor].short}</span>
         )}
         {!!issues && <span className="an-issues" title={`${issues} issue(s)`}>{issues}</span>}
+        {!!childCount && <span className="an-children" title={`${childCount} internal element(s) · double-click to open`}>↘ {childCount}</span>}
       </div>
-      <div className="an-name">{model.name}</div>
-      {model.technology && <div className="an-tech">{model.technology}</div>}
+      {model.type === "endpoint" ? (
+        <div className="an-endpoint">
+          <span className={`http-m m-${(model.props?.method || "GET").toLowerCase()}`}>{(model.props?.method || model.name.split(" ")[0] || "GET").toUpperCase()}</span>
+          <span className="mono">{model.props?.path || model.name.split(" ").slice(1).join(" ") || "/"}</span>
+        </div>
+      ) : (
+        <div className="an-name">{model.name}</div>
+      )}
+      {model.type === "table" && (() => {
+        const cols = parseColumns(model.props?.columns);
+        return cols.length > 0 && (
+          <ul className="an-cols mono">
+            {cols.slice(0, 6).map((c) => <li key={c.name}><span>{c.key && <b>{c.key} </b>}{c.name}</span><span className="muted">{c.type}</span></li>)}
+            {cols.length > 6 && <li className="muted">+{cols.length - 6} more</li>}
+          </ul>
+        );
+      })()}
+      {model.type === "event" && model.props?.channel && <div className="an-tech">on {model.props.channel}</div>}
+      {model.technology && model.type !== "table" && model.type !== "event" && <div className="an-tech">{model.technology}</div>}
       {model.requirement_ids.length > 0 && (
         <div className="an-reqs">
           {model.requirement_ids.slice(0, 4).map((r) => <span key={r} className="chip">{r}</span>)}

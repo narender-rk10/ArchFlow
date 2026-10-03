@@ -7,7 +7,7 @@ Operation shapes::
 
     {"op": "add_node", "node": {...Node fields...}}
     {"op": "update_node", "id": "<id or name>", "changes": {...}, "base_rev": 12}
-    {"op": "remove_node", "id": "<id or name>"}
+    {"op": "remove_node", "id": "<id or name>"}   # also removes its LLD children, recursively
     {"op": "add_edge", "edge": {"source": ..., "target": ..., "protocol": ...}}
     {"op": "update_edge", "id": ..., "changes": {...}, "base_rev": 12}
     {"op": "remove_edge", "id": ...}   # or {"op": "remove_edge", "source": ..., "target": ...}
@@ -18,6 +18,9 @@ Operation shapes::
 ``base_rev`` is the project revision the client last saw. If a field in ``changes`` was
 modified by someone else after that revision (and to a different value), the batch is
 rejected with a :class:`ConflictError` instead of silently overwriting.
+
+Diagram levels (C4 drill-down): a node's ``parent_id`` names the component whose internal diagram it belongs
+to ("" = top level). Connections must join two nodes of the same diagram.
 """
 
 from __future__ import annotations
@@ -98,12 +101,53 @@ def resolve_requirement(state: ProjectState, ref: str | None) -> Requirement | N
     return None
 
 
-def _auto_position(state: ProjectState) -> dict[str, float]:
-    if not state.nodes:
+def _auto_position(state: ProjectState, parent_id: str = "") -> dict[str, float]:
+    level = [n for n in state.nodes.values() if n.parent_id == parent_id]
+    if not level:
         return {"x": 0, "y": 0}
-    xs = [n.position.x for n in state.nodes.values()]
-    ys = [n.position.y for n in state.nodes.values()]
+    xs = [n.position.x for n in level]
+    ys = [n.position.y for n in level]
     return {"x": (min(xs) + max(xs)) / 2, "y": max(ys) + 160}
+
+
+def descendants(state: ProjectState, node_id: str) -> list[str]:
+    """Ids of every node inside ``node_id``'s LLD diagram, recursively (not including ``node_id``)."""
+    children: dict[str, list[str]] = {}
+    for n in state.nodes.values():
+        if n.parent_id:
+            children.setdefault(n.parent_id, []).append(n.id)
+    out: list[str] = []
+    seen = {node_id}
+    stack = list(children.get(node_id, []))
+    while stack:
+        nid = stack.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        out.append(nid)
+        stack.extend(children.get(nid, []))
+    return out
+
+
+def _diagram_label(state: ProjectState, parent_id: str) -> str:
+    parent = state.nodes.get(parent_id) if parent_id else None
+    return f"the internals of '{parent.name}'" if parent else "the top-level diagram"
+
+
+def _check_same_diagram(state: ProjectState, src: Node, tgt: Node) -> None:
+    if src.parent_id != tgt.parent_id:
+        raise OpError(f"cannot connect '{src.name}' → '{tgt.name}': they are in different diagrams "
+                      f"({_diagram_label(state, src.parent_id)} vs {_diagram_label(state, tgt.parent_id)}). "
+                      "Connections must stay within one diagram level.")
+
+
+def _check_parent(state: ProjectState, node_id: str, parent_id: str) -> None:
+    if not parent_id:
+        return
+    if parent_id not in state.nodes:
+        raise OpError(f"parent component '{parent_id}' not found")
+    if parent_id == node_id or parent_id in descendants(state, node_id):
+        raise OpError("a component cannot be placed inside itself")
 
 
 def _apply_changes(entity, changes: dict[str, Any], base_rev: int | None, new_rev: int,
@@ -158,8 +202,12 @@ def apply_ops(state: ProjectState, ops: list[dict[str, Any]]) -> tuple[ProjectSt
                 raise OpError(f"node '{raw['id']}' already exists")
             if not raw.get("id"):
                 raw["id"] = new_node_id(st, raw["name"])
+            parent = resolve_node(st, raw["parent_id"]) if raw.get("parent_id") else None
+            if raw.get("parent_id") and not parent:
+                raise OpError(f"parent component '{raw['parent_id']}' not found")
+            raw["parent_id"] = parent.id if parent else ""
             if not raw.get("position"):
-                raw["position"] = _auto_position(st)
+                raw["position"] = _auto_position(st, raw["parent_id"])
             raw["rev"] = new_rev
             try:
                 node = Node.model_validate(raw)
@@ -173,7 +221,15 @@ def apply_ops(state: ProjectState, ops: list[dict[str, Any]]) -> tuple[ProjectSt
             node = resolve_node(st, op.get("id"))
             if not node:
                 raise OpError(f"node '{op.get('id')}' not found")
-            updated, fields = _apply_changes(node, op.get("changes") or {}, op.get("base_rev"), new_rev, "node", conflicts)
+            changes = dict(op.get("changes") or {})
+            if changes.get("parent_id"):
+                parent = resolve_node(st, changes["parent_id"])
+                changes["parent_id"] = parent.id if parent else changes["parent_id"]
+            updated, fields = _apply_changes(node, changes, op.get("base_rev"), new_rev, "node", conflicts)
+            if "parent_id" in fields:
+                _check_parent(st, node.id, updated.parent_id)
+                if any(node.id in (e.source, e.target) for e in st.edges.values()):
+                    raise OpError(f"'{node.name}' has connections; remove them before moving it to another diagram")
             st.nodes[node.id] = updated
             if fields and fields != ["position"]:
                 summary.append(f"updated '{updated.name}' ({', '.join(fields)})")
@@ -184,17 +240,22 @@ def apply_ops(state: ProjectState, ops: list[dict[str, Any]]) -> tuple[ProjectSt
             node = resolve_node(st, op.get("id"))
             if not node:
                 raise OpError(f"node '{op.get('id')}' not found")
-            del st.nodes[node.id]
-            dropped = [eid for eid, e in st.edges.items() if node.id in (e.source, e.target)]
+            gone = {node.id, *descendants(st, node.id)}
+            for nid in gone:
+                del st.nodes[nid]
+            dropped = [eid for eid, e in st.edges.items() if e.source in gone or e.target in gone]
             for eid in dropped:
                 del st.edges[eid]
-            summary.append(f"removed '{node.name}'" + (f" and {len(dropped)} connection(s)" if dropped else ""))
+            inner = len(gone) - 1
+            summary.append(f"removed '{node.name}'" + (f" with {inner} internal element(s)" if inner else "")
+                           + (f" and {len(dropped)} connection(s)" if dropped else ""))
 
         elif kind == "add_edge":
             raw = dict(op.get("edge") or {})
             src, tgt = resolve_node(st, raw.get("source")), resolve_node(st, raw.get("target"))
             if not src or not tgt:
                 raise OpError(f"cannot connect '{raw.get('source')}' → '{raw.get('target')}': node not found")
+            _check_same_diagram(st, src, tgt)
             if any(e.source == src.id and e.target == tgt.id for e in st.edges.values()):
                 continue  # idempotent
             raw.update(source=src.id, target=tgt.id, rev=new_rev)
@@ -216,6 +277,10 @@ def apply_ops(state: ProjectState, ops: list[dict[str, Any]]) -> tuple[ProjectSt
                     if not n:
                         raise OpError(f"node '{changes[end]}' not found")
                     changes[end] = n.id
+            src = st.nodes.get(changes.get("source", edge.source))
+            tgt = st.nodes.get(changes.get("target", edge.target))
+            if src and tgt:
+                _check_same_diagram(st, src, tgt)
             updated, fields = _apply_changes(edge, changes, op.get("base_rev"), new_rev, "edge", conflicts)
             st.edges[edge.id] = updated
             if fields:

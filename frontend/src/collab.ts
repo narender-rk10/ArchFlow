@@ -4,7 +4,7 @@ import * as Y from "yjs";
 import { applyOps, coll, docToState, ORIGIN_LOCAL, ORIGIN_SERVER } from "@collab/ydoc";
 import type { Op, ProjectState, User } from "./types";
 
-export interface Peer { clientId: number; name: string; color: string; cursor?: { x: number; y: number }; selection?: string[] }
+export interface Peer { clientId: number; name: string; color: string; cursor?: { x: number; y: number; level?: string }; selection?: string[] }
 
 interface Session { doc: Y.Doc; provider: HocuspocusProvider; undo: Y.UndoManager }
 
@@ -94,7 +94,7 @@ export function useCollab(pid: string, branch: string, user: User) {
     if (!session.current) throw new Error("Not connected to the live document yet");
     return applyOps(session.current.doc, ops, ORIGIN_LOCAL);
   }, []);
-  const setCursor = useCallback((cursor: { x: number; y: number } | null) => {
+  const setCursor = useCallback((cursor: { x: number; y: number; level?: string } | null) => {
     session.current?.provider.awareness?.setLocalStateField("cursor", cursor ?? undefined);
   }, []);
   const setSelection = useCallback((ids: string[]) => {

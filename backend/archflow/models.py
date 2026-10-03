@@ -25,8 +25,14 @@ NodeType = Literal[
     "external",
     "security",
     "note",
+    # Low-level design (C4 levels 3-4): elements inside an HLD component's own diagram.
+    "component",  # internal module / class group
+    "endpoint",   # API operation; props: method, path
+    "table",      # database table; props: columns ("name type[ pk|fk]" comma-separated)
+    "event",      # domain event; props: channel
 ]
 NODE_TYPES: tuple[str, ...] = NodeType.__args__  # type: ignore[attr-defined]
+LLD_TYPES: tuple[str, ...] = ("component", "endpoint", "table", "event")
 
 Priority = Literal["low", "medium", "high", "critical"]
 ReqKind = Literal["functional", "non_functional"]
@@ -57,6 +63,9 @@ class Node(Versioned):
     position: Position = Field(default_factory=Position)
     requirement_ids: list[str] = Field(default_factory=list)
     props: dict[str, str] = Field(default_factory=dict)
+    # Diagram level: "" = the top-level (HLD) diagram; otherwise the id of the component whose internal
+    # (LLD) diagram this element belongs to. Connections only join elements of the same diagram.
+    parent_id: str = ""
 
 
 class Edge(Versioned):

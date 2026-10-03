@@ -85,8 +85,13 @@ def sanitize(raw: dict[str, Any]) -> tuple[ProjectState, list[str]]:
                 getattr(out, coll)[eid] = cls.model_validate(data)
             except ValidationError:
                 dropped.append(f"{coll}/{eid}")
-    # connections must point at existing components
-    for eid in [e for e, edge in out.edges.items() if edge.source not in out.nodes or edge.target not in out.nodes]:
+    # an element whose parent vanished (e.g. deleted concurrently) is shown on the top-level diagram
+    for node in out.nodes.values():
+        if node.parent_id and (node.parent_id not in out.nodes or node.parent_id == node.id):
+            node.parent_id = ""
+    # connections must point at existing components of the same diagram
+    for eid in [e for e, edge in out.edges.items() if edge.source not in out.nodes or edge.target not in out.nodes
+                or out.nodes[edge.source].parent_id != out.nodes[edge.target].parent_id]:
         del out.edges[eid]
         dropped.append(f"edges/{eid}")
     return out, dropped

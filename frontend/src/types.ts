@@ -1,6 +1,8 @@
 export const NODE_TYPES = [
   "client", "gateway", "service", "database", "cache", "queue", "storage",
   "agent", "llm", "mcp", "external", "security", "note",
+  // low-level design (inside a component's own diagram)
+  "component", "endpoint", "table", "event",
 ] as const;
 export type NodeType = (typeof NODE_TYPES)[number];
 
@@ -17,6 +19,8 @@ export interface ArchNode extends Versioned {
   position: { x: number; y: number };
   requirement_ids: string[];
   props: Record<string, string>;
+  /** "" = top-level (HLD) diagram; else the id of the component whose internal (LLD) diagram holds it. */
+  parent_id?: string;
 }
 
 export interface ArchEdge extends Versioned {
@@ -140,4 +144,18 @@ export interface Decision {
   id: string; title: string; status: DecisionStatus; context: string; decision: string; consequences: string;
   alternatives: DecisionAlternative[]; chosen: string; requirement_ids: string[]; node_ids: string[];
   evaluation: Evaluation | null; author: string; created_at: string; updated_at: string;
+}
+// ---- HLD → LLD drill-down ----
+export interface LldResult {
+  node_id: string; name: string; engine: "llm" | "offline"; counts: Record<string, number>;
+  connections: number; summary: string[]; rev: number;
+}
+export interface ComponentViews {
+  node_id: string; name: string; has_lld: boolean;
+  api: { endpoints: { id: string; method: string; path: string; description: string; requirement_ids: string[] }[]; openapi: string };
+  er: {
+    tables: { id: string; name: string; description: string; columns: { name: string; type: string; key: string }[] }[];
+    relations: { from: string; to: string; label: string }[]; mermaid: string;
+  };
+  sequence: { mermaid: string };
 }

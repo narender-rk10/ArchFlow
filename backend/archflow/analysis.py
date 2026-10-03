@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .models import ProjectState
+from .models import LLD_TYPES, ProjectState
 
 AMBIGUOUS_TERMS = {
     "fast": "Define a measurable latency, e.g. 'p95 response latency < 2 s'.",
@@ -59,32 +59,56 @@ def lint_requirements(state: ProjectState) -> list[dict[str, Any]]:
     return issues
 
 
+def diagram_of(state: ProjectState, node) -> str:
+    """The diagram a node is drawn on: its parent's id, or "" (top level) when it has none or the parent is gone."""
+    return node.parent_id if node.parent_id and node.parent_id in state.nodes else ""
+
+
+# LLD elements that legitimately stand alone in a diagram (e.g. a lookup table without foreign keys).
+_MAY_BE_UNCONNECTED = {"note", "table"}
+
+
 def validate_architecture(state: ProjectState) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
-    nodes, edges = state.nodes, state.edges
+    all_nodes, edges = state.nodes, state.edges
+    # System-level checks (data access, gateways, auth…) only look at the top-level (HLD) diagram.
+    nodes = {nid: n for nid, n in all_nodes.items() if not diagram_of(state, n)}
     connected = {e.source for e in edges.values()} | {e.target for e in edges.values()}
     incoming: dict[str, list[str]] = {}
     for e in edges.values():
         incoming.setdefault(e.target, []).append(e.source)
+    per_diagram: dict[str, int] = {}
+    for n in all_nodes.values():
+        if n.type != "note":
+            per_diagram[diagram_of(state, n)] = per_diagram.get(diagram_of(state, n), 0) + 1
+
+    # Orphans are judged per diagram: an element is compared only with the others on its own level.
+    for n in all_nodes.values():
+        if n.type in _MAY_BE_UNCONNECTED or n.id in connected:
+            continue
+        level = diagram_of(state, n)
+        if per_diagram.get(level, 0) > 1:
+            where = f" in the internals of '{all_nodes[level].name}'" if level else ""
+            issues.append(_issue("warning" if not level else "info", "orphan",
+                                 f"'{n.name}' is not connected to anything{where}.",
+                                 "Connect it or remove it.", node_ids=[n.id]))
 
     for n in nodes.values():
         if n.type == "note":
             continue
-        if n.id not in connected and len(nodes) > 1:
-            issues.append(_issue("warning", "orphan", f"'{n.name}' is not connected to anything.",
-                                 "Connect it or remove it.", node_ids=[n.id]))
         if n.type in ("database", "storage"):
             for src in incoming.get(n.id, []):
-                if nodes[src].type == "client":
+                if src in nodes and nodes[src].type == "client":
                     issues.append(_issue("error", "direct_db_access",
                                          f"Client '{nodes[src].name}' talks directly to '{n.name}'.",
                                          "Route data access through a service or API gateway.", node_ids=[src, n.id]))
-            readers = incoming.get(n.id, [])
+            readers = [r for r in incoming.get(n.id, []) if r in nodes]
             if len(readers) > 1 and all(nodes[r].type == "service" for r in readers):
                 issues.append(_issue("info", "shared_db", f"'{n.name}' is shared by {len(readers)} services.",
                                      "Shared databases couple services; consider ownership per service.",
                                      node_ids=[n.id, *readers]))
-        if n.type == "llm" and not any(nodes[s].type in ("agent", "service", "gateway") for s in incoming.get(n.id, [])):
+        if n.type == "llm" and not any(nodes[s].type in ("agent", "service", "gateway")
+                                       for s in incoming.get(n.id, []) if s in nodes):
             issues.append(_issue("warning", "llm_exposed", f"LLM '{n.name}' has no agent/service in front of it.",
                                  "Put an agent or service between users and the model for guardrails.", node_ids=[n.id]))
 
@@ -102,7 +126,7 @@ def validate_architecture(state: ProjectState) -> list[dict[str, Any]]:
         issues.append(_issue("info", "no_gateway", "No API gateway in front of backend services.",
                              "Consider a gateway for auth, rate limiting and routing."))
     for e in edges.values():
-        if e.source not in nodes or e.target not in nodes:
+        if e.source not in all_nodes or e.target not in all_nodes:
             issues.append(_issue("error", "dangling_edge", f"Connection {e.id} points to a missing component."))
     return issues
 
@@ -114,7 +138,9 @@ def traceability(state: ProjectState) -> dict[str, Any]:
             if rid in req_to_nodes:
                 req_to_nodes[rid].append(n.id)
     untraced = [rid for rid, ns in req_to_nodes.items() if not ns]
-    functional = [n for n in state.nodes.values() if n.type not in ("note",)]
+    # LLD elements inherit their justification from the HLD component they belong to.
+    functional = [n for n in state.nodes.values() if n.type not in ("note",) and not diagram_of(state, n)
+                  and n.type not in LLD_TYPES]
     unjustified = [n.id for n in functional if not n.requirement_ids]
     return {"requirement_to_nodes": req_to_nodes, "untraced_requirements": untraced, "unjustified_nodes": unjustified}
 
@@ -146,7 +172,10 @@ def health(state: ProjectState) -> dict[str, Any]:
         "requirements_approved": round(100 * approved / n_req) if reqs else 0,
         "traceability": round(100 * traced / n_req) if reqs else 0,
         "architecture_score": arch_score,
-        "counts": {"requirements": len(reqs), "components": len(state.nodes), "connections": len(state.edges)},
+        "counts": {"requirements": len(reqs),
+                   "components": sum(1 for n in state.nodes.values() if not diagram_of(state, n)),
+                   "lld_elements": sum(1 for n in state.nodes.values() if diagram_of(state, n)),
+                   "connections": len(state.edges)},
         "issues": {
             "errors": sum(1 for i in lint + arch if i["severity"] == "error"),
             "warnings": sum(1 for i in lint + arch if i["severity"] == "warning"),
