@@ -1,4 +1,5 @@
 import type { Activity, Analysis, ArchOption, Branch, ChatCard, ChatTurn, ApiToken, Catalog, Diff, Op, Org, Project, ProjectState, Version } from "./types";
+import type { Decision, Evaluation } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, public data: any) {
@@ -69,4 +70,16 @@ export const api = {
       "POST", `/projects/${pid}/chat/apply`, { option, requirements, mode, actor, branch_name }, b(branch)),
   ask: (pid: string, branch: string, question: string) =>
     call<{ answer: string }>("POST", `/projects/${pid}/ai/ask`, { question }, b(branch)),
+  // ---- architecture decisions ----
+  decisions: (pid: string) => call<Decision[]>("GET", `/projects/${pid}/decisions`),
+  decision: (pid: string, id: string) => call<Decision>("GET", `/projects/${pid}/decisions/${id}`),
+  createDecision: (pid: string, data: Partial<Decision> & { title: string; actor: string }) =>
+    call<Decision>("POST", `/projects/${pid}/decisions`, data),
+  updateDecision: (pid: string, id: string, changes: Partial<Decision> & { actor: string }) =>
+    call<Decision>("PATCH", `/projects/${pid}/decisions/${id}`, changes),
+  adoptDecision: (pid: string, id: string, target_branch: string, actor: string) =>
+    call<{ version: number; safety_version: number; branch: string; source_branch: string; decision: Decision }>(
+      "POST", `/projects/${pid}/decisions/${id}/adopt`, { target_branch, actor }),
+  evaluate: (pid: string, branches: string[], actor: string, create_decision = false) =>
+    call<Evaluation & { decision?: Decision }>("POST", `/projects/${pid}/evaluate`, { branches, actor, create_decision }),
 };

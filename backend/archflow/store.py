@@ -109,6 +109,27 @@ CREATE TABLE IF NOT EXISTS activity (
     rev INTEGER NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS decisions (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,                -- ADR-001, ADR-002, ... (sequential per project)
+    seq INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'proposed'
+        CHECK (status IN ('proposed', 'accepted', 'rejected', 'superseded')),
+    context TEXT NOT NULL DEFAULT '',
+    decision TEXT NOT NULL DEFAULT '',
+    consequences TEXT NOT NULL DEFAULT '',
+    alternatives TEXT NOT NULL DEFAULT '[]',     -- JSON [{name, branch?, summary, pros, cons}]
+    chosen TEXT NOT NULL DEFAULT '',             -- alternative name or branch
+    requirement_ids TEXT NOT NULL DEFAULT '[]',  -- JSON
+    node_ids TEXT NOT NULL DEFAULT '[]',         -- JSON
+    evaluation TEXT,                             -- JSON, nullable
+    author TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, id),
+    UNIQUE (project_id, seq)
+);
 """
 
 # Indexes are created after in-place migrations, since they may reference migrated columns.
@@ -119,6 +140,31 @@ CREATE INDEX IF NOT EXISTS idx_activity_branch ON activity(project_id, branch, i
 """
 
 PROJECT_COLS = "id, name, description, created_at, org_id"
+
+# ---- architecture decision records (shared by both stores) ----
+DECISION_STATUSES = ("proposed", "accepted", "rejected", "superseded")
+DECISION_FIELDS = ("title", "status", "context", "decision", "consequences", "alternatives", "chosen",
+                   "requirement_ids", "node_ids", "evaluation")
+DECISION_JSON_FIELDS = ("alternatives", "requirement_ids", "node_ids", "evaluation")
+DECISION_COLS = ("id, title, status, context, decision, consequences, alternatives, chosen, requirement_ids, "
+                 "node_ids, evaluation, author, created_at, updated_at")
+
+
+def decision_id(seq: int) -> str:
+    return f"ADR-{seq:03d}"
+
+
+def check_decision_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Keep only updatable decision fields and validate status; raises ValueError."""
+    out = {k: v for k, v in fields.items() if k in DECISION_FIELDS}
+    if "status" in out and out["status"] not in DECISION_STATUSES:
+        raise ValueError(f"status must be one of {', '.join(DECISION_STATUSES)}")
+    if "title" in out and not str(out["title"] or "").strip():
+        raise ValueError("title must not be empty")
+    for k in ("alternatives", "requirement_ids", "node_ids"):
+        if k in out and out[k] is None:
+            out[k] = []
+    return out
 
 
 def now() -> str:
@@ -432,6 +478,58 @@ class Store:
             "ORDER BY id DESC LIMIT ?", (pid, branch, limit)
         )
         return [{**dict(r), "summary": json.loads(r["summary"])} for r in rows]
+
+    # ---- architecture decision records ----------------------------------
+    @staticmethod
+    def _decision(row) -> dict[str, Any] | None:
+        if not row:
+            return None
+        d = dict(row)
+        for k in DECISION_JSON_FIELDS:
+            d[k] = json.loads(d[k]) if d[k] is not None else None
+        return d
+
+    def create_decision(self, pid: str, title: str, *, author: str = "anonymous", **fields: Any) -> dict[str, Any]:
+        data = check_decision_fields({"title": title, **fields})
+        data.setdefault("status", "proposed")
+        ts = now()
+        with self.lock, self._conn:
+            seq = self._conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM decisions WHERE project_id=?", (pid,)).fetchone()[0]
+            did = decision_id(seq)
+            self._conn.execute(
+                "INSERT INTO decisions (project_id, id, seq, title, status, context, decision, consequences, "
+                "alternatives, chosen, requirement_ids, node_ids, evaluation, author, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (pid, did, seq, data["title"].strip(), data["status"], data.get("context", ""),
+                 data.get("decision", ""), data.get("consequences", ""), json.dumps(data.get("alternatives", [])),
+                 data.get("chosen", ""), json.dumps(data.get("requirement_ids", [])),
+                 json.dumps(data.get("node_ids", [])),
+                 json.dumps(data["evaluation"]) if data.get("evaluation") is not None else None, author, ts, ts),
+            )
+        return self.get_decision(pid, did)
+
+    def list_decisions(self, pid: str) -> list[dict[str, Any]]:
+        rows = self._all(f"SELECT {DECISION_COLS} FROM decisions WHERE project_id=? ORDER BY seq", (pid,))
+        return [self._decision(r) for r in rows]
+
+    def get_decision(self, pid: str, did: str) -> dict[str, Any] | None:
+        return self._decision(self._one(
+            f"SELECT {DECISION_COLS} FROM decisions WHERE project_id=? AND id=?", (pid, did)))
+
+    def update_decision(self, pid: str, did: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        """Update the given fields (see DECISION_FIELDS); returns the decision, or None if it does not exist."""
+        data = check_decision_fields(fields)
+        if data:
+            sets, params = [], []
+            for k, v in data.items():
+                sets.append(f"{k}=?")
+                params.append(json.dumps(v) if k in DECISION_JSON_FIELDS and v is not None else v)
+            with self.lock, self._conn:
+                self._conn.execute(
+                    f"UPDATE decisions SET {', '.join(sets)}, updated_at=? WHERE project_id=? AND id=?",
+                    (*params, now(), pid, did))
+        return self.get_decision(pid, did)
 
 
 def default_store():

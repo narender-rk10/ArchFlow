@@ -117,3 +117,27 @@ export interface ChatTurn {
   answer?: { option_ids: string[]; other?: string };
   applied?: { option: string; branch: string; version: number };
 }
+
+// ---- architecture decisions (ADRs) and alternative evaluation ----
+export type DecisionStatus = "proposed" | "accepted" | "rejected" | "superseded";
+export interface DecisionAlternative { name: string; branch?: string | null; summary: string; pros: string[]; cons: string[] }
+export interface Evaluation {
+  engine: "jev" | "llm" | "heuristic";
+  recommended: string;
+  alternatives: string[];
+  criteria: string[];
+  criteria_labels: Record<string, string>;
+  scores: Record<string, Record<string, number>>;
+  totals: Record<string, number>;
+  rationale: string;
+  confidence: number | null;
+  notes: string[];
+  requirement_ids?: string[];
+  probabilities?: Record<string, number>;
+  raw?: unknown;
+}
+export interface Decision {
+  id: string; title: string; status: DecisionStatus; context: string; decision: string; consequences: string;
+  alternatives: DecisionAlternative[]; chosen: string; requirement_ids: string[]; node_ids: string[];
+  evaluation: Evaluation | null; author: string; created_at: string; updated_at: string;
+}

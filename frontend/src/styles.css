@@ -341,3 +341,36 @@ table.tokens th, table.tokens td { text-align: left; padding: 5px 6px; border-bo
   border: 1px solid color-mix(in srgb, var(--vc) 55%, transparent); background: color-mix(in srgb, var(--vc) 12%, transparent); text-transform: none; }
 select.convert { font-size: 12.5px; padding: 4px 6px; }
 @media (max-width: 900px) { .palette { width: auto; flex-direction: column; } }
+
+/* ---------- architecture decisions (ADRs) + compare drafts ---------- */
+.adr-list { list-style: none; margin: 0; padding: 0; }
+.adr-list li { padding: 8px 12px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
+.adr-list li:hover { background: var(--panel-2); }
+.adr-title { font-weight: 500; }
+.status.adr-s-proposed { background: color-mix(in srgb, var(--warn) 22%, var(--panel)); }
+.status.adr-s-accepted { background: color-mix(in srgb, var(--ok) 22%, var(--panel)); }
+.status.adr-s-rejected { background: color-mix(in srgb, var(--danger) 18%, var(--panel)); }
+.status.adr-s-superseded { color: var(--muted); text-decoration: line-through; }
+.adr-compare { margin: 0 12px 8px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); display: flex; flex-direction: column; gap: 8px; }
+.adr-branches { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow-y: auto; }
+.adr-result { display: flex; flex-direction: column; gap: 6px; }
+.adr-result p { margin: 0; }
+.adr-matrix-wrap { display: flex; flex-direction: column; gap: 4px; overflow-x: auto; }
+.adr-matrix { width: 100%; border-collapse: collapse; font-size: 12px; background: var(--panel); border-radius: 6px; }
+.adr-matrix th, .adr-matrix td { padding: 4px 6px; border-bottom: 1px solid var(--border); text-align: center; }
+.adr-matrix th:first-child, .adr-matrix td:first-child { text-align: left; color: var(--muted); }
+.adr-matrix th { font-weight: 600; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.adr-matrix th.rec { color: var(--primary); }
+.adr-matrix td.best { background: color-mix(in srgb, var(--ok) 18%, var(--panel)); font-weight: 600; }
+.adr-matrix tfoot td { border-bottom: none; font-weight: 600; }
+.adr-engine { font-size: 10.5px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); }
+.adr-engine.e-jev { color: var(--primary); border-color: var(--primary); }
+.adr-engine.e-llm { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, var(--border)); }
+.adr-engine.e-heuristic { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, var(--border)); }
+.adr-form { display: flex; flex-direction: column; gap: 8px; padding: 0 12px; }
+.adr-alts { list-style: none; margin: 0; padding: 0; }
+.adr-alts li { padding: 6px 12px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 3px; }
+.adr-alts li.chosen { box-shadow: inset 3px 0 var(--primary); background: color-mix(in srgb, var(--primary) 6%, var(--panel)); }
+.adr-reqs { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; margin-top: 8px; }
+.adr-adopt { margin: 12px; padding: 10px; border-radius: 8px; border: 1px solid color-mix(in srgb, var(--primary) 40%, var(--border)); display: flex; flex-direction: column; gap: 6px; }
+.adr-adopt p { margin: 0; }

@@ -12,6 +12,7 @@ organization; tools refuse projects from other orgs, and editing tools require t
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 from . import auth, catalog
+from . import decisions as decisions_mod
 from .analysis import full_analysis, trace_requirement
 from .diff import diff_states, diff_to_text
 from .models import NODE_TYPES, ProjectState
@@ -341,5 +343,65 @@ def build_remote_mcp(services: Services) -> MCPServer:
         out = await services.ai_command(project_id, branch, instruction, [], p.actor)
         out.pop("state", None)
         return out
+
+    # ---- architecture decisions (ADRs) ----
+    @mcp.tool()
+    def list_decisions(project_id: str) -> list[dict[str, Any]]:
+        """Architecture decision records (ADR-001, ...) of a project with status and chosen alternative."""
+        project_for(Principal(), project_id)
+        return [{k: d[k] for k in ("id", "title", "status", "chosen", "author", "created_at", "updated_at")}
+                for d in store.list_decisions(project_id)]
+
+    @mcp.tool()
+    def get_decision(project_id: str, decision_id: str) -> dict[str, Any]:
+        """One decision record: context, decision, consequences, alternatives, linked requirements and evaluation."""
+        project_for(Principal(), project_id)
+        d = store.get_decision(project_id, decision_id)
+        if not d:
+            raise ToolError(f"decision {decision_id} not found")
+        return d
+
+    @mcp.tool()
+    async def create_decision(project_id: str, title: str, context: str = "", decision: str = "",
+                              consequences: str = "", status: str = "proposed",
+                              alternatives: list[dict[str, Any]] | None = None, chosen: str = "",
+                              requirement_ids: list[str] | None = None,
+                              component_ids: list[str] | None = None) -> dict[str, Any]:
+        """Record an architecture decision (ADR). status: proposed | accepted | rejected | superseded.
+        alternatives: [{name, branch?, summary, pros: [..], cons: [..]}]; chosen: an alternative name or branch."""
+        p = Principal()
+        p.require_write()
+        project_for(p, project_id)
+        try:
+            alts = [decisions_mod.Alternative.model_validate(a).model_dump() for a in alternatives or []]
+            return decisions_mod.create_decision(store, project_id, {
+                "title": title, "status": status, "context": context, "decision": decision,
+                "consequences": consequences, "alternatives": alts, "chosen": chosen,
+                "requirement_ids": requirement_ids or [], "node_ids": component_ids or []}, p.actor)
+        except ValueError as exc:  # includes pydantic.ValidationError
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool()
+    async def evaluate_alternatives(project_id: str, branches: list[str], create_decision: bool = True,
+                                    title: str = "") -> dict[str, Any]:
+        """Compare 2–4 draft branches against the project's requirements (Jev decision API, else an LLM, else
+        an offline heuristic; 'engine' says which). Scores cost, scalability, performance, security, reliability,
+        operability and delivery speed 1–5 and recommends one. With create_decision, records a proposed ADR."""
+        p = Principal()
+        if create_decision:
+            p.require_write()
+        project, _ = project_for(p, project_id)
+        try:
+            result = await asyncio.to_thread(decisions_mod.evaluate_branches, store, project_id, branches,
+                                             "main", project.get("org_id"))
+        except KeyError as exc:
+            raise ToolError(f"branch '{exc.args[0]}' not found") from exc
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        result.pop("raw", None)
+        if create_decision:
+            d = decisions_mod.decision_from_evaluation(store, project_id, result, p.actor, title or None)
+            result["decision"] = {"id": d["id"], "title": d["title"], "status": d["status"], "chosen": d["chosen"]}
+        return result
 
     return mcp

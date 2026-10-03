@@ -26,7 +26,8 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from .models import ProjectState
-from .store import DEFAULT_ORG_ID, DEFAULT_ORG_NAME
+from .store import (DECISION_COLS, DECISION_JSON_FIELDS, DEFAULT_ORG_ID, DEFAULT_ORG_NAME, check_decision_fields,
+                    decision_id)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 MIGRATION_LOCK_KEY = 0x41524346  # "ARCF": pg_advisory_lock key for the migration runner
@@ -378,3 +379,45 @@ class PostgresStore:
             "ORDER BY id DESC LIMIT %s", (pid, branch, limit)
         )
         return [_row(r) for r in rows]
+
+    # ---- architecture decision records ----------------------------------
+    def create_decision(self, pid: str, title: str, *, author: str = "anonymous", **fields: Any) -> dict[str, Any]:
+        data = check_decision_fields({"title": title, **fields})
+        data.setdefault("status", "proposed")
+        with self.lock, self._conn() as conn, conn.transaction():
+            # Serialize ADR numbering per project across processes.
+            conn.execute("SELECT 1 FROM projects WHERE id=%s FOR UPDATE", (pid,))
+            seq = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM decisions WHERE project_id=%s", (pid,)).fetchone()["n"]
+            did = decision_id(seq)
+            conn.execute(
+                "INSERT INTO decisions (project_id, id, seq, title, status, context, decision, consequences, "
+                "alternatives, chosen, requirement_ids, node_ids, evaluation, author) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (pid, did, seq, data["title"].strip(), data["status"], data.get("context", ""),
+                 data.get("decision", ""), data.get("consequences", ""), Jsonb(data.get("alternatives", [])),
+                 data.get("chosen", ""), Jsonb(data.get("requirement_ids", [])), Jsonb(data.get("node_ids", [])),
+                 Jsonb(data["evaluation"]) if data.get("evaluation") is not None else None, author),
+            )
+        return self.get_decision(pid, did)
+
+    def list_decisions(self, pid: str) -> list[dict[str, Any]]:
+        rows = self._all(f"SELECT {DECISION_COLS} FROM decisions WHERE project_id=%s ORDER BY seq", (pid,))
+        return [_row(r) for r in rows]
+
+    def get_decision(self, pid: str, did: str) -> dict[str, Any] | None:
+        return _row(self._one(f"SELECT {DECISION_COLS} FROM decisions WHERE project_id=%s AND id=%s", (pid, did)))
+
+    def update_decision(self, pid: str, did: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        """Update the given fields (see DECISION_FIELDS); returns the decision, or None if it does not exist."""
+        data = check_decision_fields(fields)
+        if data:
+            sets, params = [], []
+            for k, v in data.items():
+                sets.append(f"{k}=%s")
+                params.append(Jsonb(v) if k in DECISION_JSON_FIELDS and v is not None else v)
+            with self._conn() as conn:
+                conn.execute(
+                    f"UPDATE decisions SET {', '.join(sets)}, updated_at = now() WHERE project_id=%s AND id=%s",
+                    (*params, pid, did))
+        return self.get_decision(pid, did)
