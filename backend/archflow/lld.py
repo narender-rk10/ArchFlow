@@ -422,10 +422,19 @@ def _layout(elements: list[dict[str, Any]]) -> None:
     cols: dict[int, list[dict[str, Any]]] = {}
     for e in elements:
         cols.setdefault(int(e.get("col", TYPE_COLUMN.get(e["type"], 1))), []).append(e)
+    def rendered_height(e: dict[str, Any]) -> int:
+        # Tables render one line per column, so they need more vertical room than other elements.
+        cols_text = (e.get("props") or {}).get("columns", "") if e.get("type") == "table" else ""
+        n = len([c for c in cols_text.split(",") if c.strip()])
+        return ROW_Y if not n else max(ROW_Y, 70 + 15 * n)
+
     for col, items in cols.items():
-        height = (len(items) - 1) * ROW_Y
-        for i, e in enumerate(items):
-            e["position"] = {"x": col * COL_X, "y": round(i * ROW_Y - height / 2)}
+        heights = [rendered_height(e) for e in items]
+        total = sum(heights)
+        y = -total / 2
+        for e, h in zip(items, heights):
+            e["position"] = {"x": col * COL_X, "y": round(y)}
+            y += h
 
 
 def design_ops(state: ProjectState, node: Node, design: dict[str, Any], replace: bool = False) -> list[dict[str, Any]]:

@@ -402,3 +402,7 @@ select.convert { font-size: 12.5px; padding: 4px 6px; }
 .view-src { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 11px; line-height: 1.4;
   max-height: 260px; overflow: auto; white-space: pre; margin: 0; }
 @media (max-width: 900px) { .crumbs { left: 10px; top: 54px; max-width: calc(100% - 20px); } }
+
+/* five sidebar tabs: shrink to fit instead of overflowing */
+.sidebar .tabs { overflow: hidden; }
+.sidebar .tabs button { min-width: 0; padding: 10px 2px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

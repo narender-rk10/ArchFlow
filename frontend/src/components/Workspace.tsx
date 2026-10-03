@@ -89,6 +89,13 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
   const levelOf = useCallback((n: ArchNode) => (n.parent_id && state?.nodes[n.parent_id] ? n.parent_id : ""), [state]);
   useEffect(() => { setLevel(""); }, [pid, branch]);
   useEffect(() => { if (state && level && !state.nodes[level]) setLevel(""); }, [state, level]); // opened component was deleted
+  // Re-fit the view whenever you move between diagram levels (after the new level's nodes render).
+  const firstLevel = useRef(true);
+  useEffect(() => {
+    if (firstLevel.current) { firstLevel.current = false; return; }
+    const t = window.setTimeout(() => flow.fitView({ padding: 0.2, duration: 300 }), 80);
+    return () => window.clearTimeout(t);
+  }, [level, flow]);
   const childCount = useMemo(() => {
     const m: Record<string, number> = {};
     for (const n of Object.values(state?.nodes ?? {})) if (n.parent_id) m[n.parent_id] = (m[n.parent_id] ?? 0) + 1;
@@ -503,7 +510,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
         <nav className="tabs">
           {(["design", "requirements", "issues", "versions", "decisions"] as Tab[]).map((t) => (
             <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
-              {t === "design" ? "Design" : t === "requirements" ? `Requirements${state ? ` (${Object.keys(state.requirements).length})` : ""}`
+              {t === "design" ? "Design" : t === "requirements" ? `Reqs${state ? ` (${Object.keys(state.requirements).length})` : ""}`
                 : t === "issues" ? `Health${analysis ? ` (${analysis.health.issues.errors + analysis.health.issues.warnings})` : ""}`
                 : t === "decisions" ? "Decisions" : "Versions"}
             </button>
