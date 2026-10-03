@@ -1,0 +1,57 @@
+# Local infrastructure for ArchFlow.
+#   docker compose up -d postgres redis
+#   DATABASE_URL=postgresql://archflow:<POSTGRES_PASSWORD>@localhost:5432/archflow
+# Without DATABASE_URL the backend uses SQLite (backend/data/archflow.db), so this file is optional for dev.
+# Tuned for small machines: tiny shared_buffers / connection limit.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: archflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
+      POSTGRES_DB: archflow
+    command: postgres -c shared_buffers=64MB -c max_connections=50
+    shm_size: 128mb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U archflow -d archflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save "" --appendonly no --maxmemory 64mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Placeholders: application images are not built yet.
+  # api:
+  #   build: ./backend
+  #   env_file: .env
+  #   environment:
+  #     DATABASE_URL: postgresql://archflow:${POSTGRES_PASSWORD}@postgres:5432/archflow
+  #     REDIS_URL: redis://redis:6379/0
+  #   ports: ["8000:8000"]
+  #   depends_on:
+  #     postgres: { condition: service_healthy }
+  #     redis: { condition: service_healthy }
+  #
+  # web:
+  #   build: ./frontend
+  #   ports: ["5173:80"]
+  #   depends_on: [api]
+
+volumes:
+  pgdata:

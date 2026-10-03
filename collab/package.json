@@ -1,0 +1,24 @@
+{
+  "name": "archflow-collab",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "ArchFlow real-time collaboration server (Hocuspocus + Yjs)",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "test": "tsx src/selftest.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hocuspocus/extension-database": "^4.7.0",
+    "@hocuspocus/server": "^4.7.0",
+    "tsx": "^4.23.15",
+    "yjs": "^13.6.33"
+  },
+  "devDependencies": {
+    "@hocuspocus/provider": "^4.7.0",
+    "@types/node": "^26.6.3",
+    "typescript": "^5.9.3"
+  }
+}

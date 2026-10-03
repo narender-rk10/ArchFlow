@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "archflow": {
+      "command": "uv",
+      "args": ["run", "--directory", "backend", "archflow-mcp"],
+      "env": { "ARCHFLOW_URL": "http://localhost:8000", "ARCHFLOW_ACTOR": "claude-code" }
+    }
+  }
+}
