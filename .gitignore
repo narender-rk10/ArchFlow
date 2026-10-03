@@ -16,3 +16,6 @@ frontend/dist/
 .DS_Store
 Thumbs.db
 .env
+
+# Claude Code local state (agent worktrees, settings)
+.claude/
