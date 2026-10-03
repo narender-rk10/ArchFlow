@@ -1,4 +1,5 @@
 import type { Activity, Analysis, ArchOption, Branch, ChatCard, ChatTurn, ApiToken, Catalog, Diff, Op, Org, Project, ProjectState, Version } from "./types";
+import type { ComponentViews, LldResult } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, public data: any) {
@@ -69,4 +70,8 @@ export const api = {
       "POST", `/projects/${pid}/chat/apply`, { option, requirements, mode, actor, branch_name }, b(branch)),
   ask: (pid: string, branch: string, question: string) =>
     call<{ answer: string }>("POST", `/projects/${pid}/ai/ask`, { question }, b(branch)),
+  generateLld: (pid: string, branch: string, nodeId: string, actor: string, replace = false) =>
+    call<LldResult>("POST", `/projects/${pid}/nodes/${encodeURIComponent(nodeId)}/lld`, { actor, replace }, b(branch)),
+  views: (pid: string, branch: string, nodeId: string) =>
+    call<ComponentViews>("GET", `/projects/${pid}/nodes/${encodeURIComponent(nodeId)}/views`, undefined, b(branch)),
 };

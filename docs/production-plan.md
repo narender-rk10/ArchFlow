@@ -136,6 +136,13 @@ Google-Docs-style editing needs a CRDT, not the MVP's last-write-plus-conflict-c
 - Any HLD node can open its own LLD diagram (`diagrams.parent_node_id`); breadcrumbs navigate between levels.
 - LLD can be generated from requirements (top-down) or from the code graph (bottom-up), and compared to
   detect drift.
+- **Status (MVP):** each node has a `parent_id` ("" = HLD; otherwise the component whose diagram holds it)
+  instead of a separate `diagrams` table; new node types `component`, `endpoint` (props `method`, `path`),
+  `table` (props `columns`) and `event`. Ops (Python `ops.py` and the Yjs mirror `collab/src/ydoc.ts`) reject
+  cross-diagram connections and delete a component's internals with it. `lld.py` generates the top-down LLD
+  (LLM with JSON schema, template fallback) via `POST /api/projects/{pid}/nodes/{id}/lld` and MCP
+  `generate_lld`; `GET …/nodes/{id}/views` derives the endpoint list/OpenAPI text, ER data and Mermaid
+  sequence/ER diagrams. Bottom-up generation from code and drift detection are not built yet.
 
 ### 3.5 LLM layer: LiteLLM Router, Gemini primary
 

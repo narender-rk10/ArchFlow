@@ -341,3 +341,31 @@ table.tokens th, table.tokens td { text-align: left; padding: 5px 6px; border-bo
   border: 1px solid color-mix(in srgb, var(--vc) 55%, transparent); background: color-mix(in srgb, var(--vc) 12%, transparent); text-transform: none; }
 select.convert { font-size: 12.5px; padding: 4px 6px; }
 @media (max-width: 900px) { .palette { width: auto; flex-direction: column; } }
+
+/* ---------- HLD → LLD drill-down ---------- */
+.crumbs {
+  position: absolute; top: 10px; left: 252px; z-index: 6; display: flex; align-items: center; gap: 2px; font-size: 12.5px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px; box-shadow: var(--shadow);
+  max-width: calc(100% - 520px); overflow: hidden; white-space: nowrap;
+}
+.crumbs .tiny { margin-left: 8px; }
+.empty-canvas.lld-empty button { pointer-events: auto; justify-self: center; }
+.an-children { margin-left: auto; font-size: 10px; font-weight: 600; color: var(--primary); border: 1px solid color-mix(in srgb, var(--primary) 45%, transparent);
+  border-radius: 999px; padding: 0 6px; background: color-mix(in srgb, var(--primary) 10%, transparent); }
+.an-issues + .an-children { margin-left: 4px; }
+.an-endpoint { display: flex; align-items: center; gap: 6px; margin-top: 3px; font-size: 12.5px; font-weight: 600; overflow: hidden; }
+.an-endpoint .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.http-m { font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 4px; color: #fff; background: #8b8d98; font-family: ui-monospace, Menlo, monospace; }
+.http-m.m-get { background: #0d74ce; }
+.http-m.m-post { background: #30a46c; }
+.http-m.m-put, .http-m.m-patch { background: #d97706; }
+.http-m.m-delete { background: #dc3e42; }
+.an-cols { list-style: none; margin: 4px 0 0; padding: 4px 0 0; border-top: 1px dashed var(--border); font-size: 10.5px; }
+.an-cols li { display: flex; justify-content: space-between; gap: 8px; line-height: 1.35; }
+.an-cols b { color: var(--accent); font-weight: 700; }
+.lld-views { border-top: 1px solid var(--border); padding-top: 8px; }
+.view-tabs { display: flex; align-items: center; gap: 4px; margin: 4px 0 6px; }
+.view-endpoints { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+.view-src { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 11px; line-height: 1.4;
+  max-height: 260px; overflow: auto; white-space: pre; margin: 0; }
+@media (max-width: 900px) { .crumbs { left: 10px; top: 54px; max-width: calc(100% - 20px); } }

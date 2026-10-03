@@ -12,6 +12,7 @@ organization; tools refuse projects from other orgs, and editing tools require t
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -23,11 +24,11 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import auth, catalog
+from . import auth, catalog, lld
 from .analysis import full_analysis, trace_requirement
 from .diff import diff_states, diff_to_text
 from .models import NODE_TYPES, ProjectState
-from .ops import OpError, ConflictError
+from .ops import OpError, ConflictError, resolve_node
 from .templates import TEMPLATES, build_template
 from .vibe import TARGETS, build_prompt
 
@@ -108,7 +109,9 @@ def build_remote_mcp(services: Services) -> MCPServer:
         return {
             "rev": state.rev,
             "components": [{"id": n.id, "name": n.name, "type": n.type, "technology": n.technology,
-                            "description": n.description, "requirement_ids": n.requirement_ids} for n in state.nodes.values()],
+                            "description": n.description, "requirement_ids": n.requirement_ids,
+                            "parent_id": n.parent_id, **({"props": n.props} if n.props else {})}
+                           for n in state.nodes.values()],
             "connections": [{"id": e.id, "source": e.source, "target": e.target, "protocol": e.protocol, "label": e.label}
                             for e in state.edges.values()],
             "requirements": [r.model_dump(exclude={"rev", "field_revs"}) for r in state.requirements.values()],
@@ -232,12 +235,15 @@ def build_remote_mcp(services: Services) -> MCPServer:
     async def add_component(project_id: str, name: str, type: str = "service", technology: str = "",
                             description: str = "", requirement_ids: list[str] | None = None,
                             x: float | None = None, y: float | None = None, catalog_id: str = "",
-                            branch: str = "main") -> dict[str, Any]:
+                            branch: str = "main", parent: str = "") -> dict[str, Any]:
         """Add a component. type: client, gateway, service, database, cache, queue, storage, agent, llm, mcp,
-        external, security or note. Position is chosen automatically if x/y are omitted. catalog_id (from
-        search_catalog) fills in type, technology and vendor for a concrete service such as aws-lambda."""
+        external, security or note; inside a component's low-level design also component, endpoint, table or
+        event. Position is chosen automatically if x/y are omitted. catalog_id (from search_catalog) fills in
+        type, technology and vendor for a concrete service such as aws-lambda. parent (id or name) places it in
+        that component's internal diagram; connections only join elements of the same diagram."""
         node: dict[str, Any] = {"name": name, "type": type if type in NODE_TYPES else "service", "technology": technology,
-                                "description": description, "requirement_ids": requirement_ids or []}
+                                "description": description, "requirement_ids": requirement_ids or [],
+                                "parent_id": parent}
         entry = catalog.BY_ID.get(catalog_id)
         if entry:
             node.update(type=entry["type"], vendor=entry["vendor"], catalog_id=entry["id"],
@@ -322,6 +328,33 @@ def build_remote_mcp(services: Services) -> MCPServer:
             raise ToolError(str(exc)) from exc
         out = await edit(project_id, branch, ops) if ops else {"ok": True, "changes": []}
         return {**out, "skipped": skipped}
+
+    @mcp.tool()
+    async def generate_lld(project_id: str, component: str, branch: str = "main", replace: bool = False) -> dict[str, Any]:
+        """Generate the low-level design (C4 component level) inside a component (by id or name): internal
+        components, API endpoints, DB tables and domain events, connected. The elements get parent_id = the
+        component's id. Set replace=true to regenerate an existing design."""
+        p = Principal()
+        p.require_write()
+        _, state = project_for(p, project_id, branch)
+        try:
+            ops, info = await asyncio.to_thread(lld.build, state, component, replace, p.org_id)
+        except KeyError as exc:
+            raise ToolError(f"component '{component}' not found") from exc
+        except lld.LLDError as exc:
+            raise ToolError(str(exc)) from exc
+        out = await edit(project_id, branch, ops)
+        return {**out, **info}
+
+    @mcp.tool()
+    def get_component_views(project_id: str, component: str, branch: str = "main") -> dict[str, Any]:
+        """Views derived from a component's design: its API endpoints (plus OpenAPI text), data model (tables,
+        relations, Mermaid erDiagram) and the main request flow as a Mermaid sequenceDiagram."""
+        _, state = project_for(Principal(), project_id, branch)
+        node = resolve_node(state, component)
+        if not node:
+            raise ToolError(f"component '{component}' not found")
+        return lld.views(state, node)
 
     @mcp.tool()
     async def commit_version(project_id: str, message: str, branch: str = "main") -> dict[str, Any]:

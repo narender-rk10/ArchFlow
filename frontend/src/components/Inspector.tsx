@@ -2,6 +2,7 @@ import { NODE_TYPES, type Catalog, type Op, type ProjectState } from "../types";
 import { VENDOR_STYLE } from "./Palette";
 import { Field } from "./Field";
 import { TYPE_META } from "./ArchNode";
+import { LldViews } from "./LldViews";
 
 interface Props {
   catalog: Catalog | null;
@@ -10,9 +11,13 @@ interface Props {
   edgeIds: string[];
   send: (ops: Op[]) => void;
   onPrompt: () => void;
+  // HLD → LLD drill-down (optional so the inspector also works without it)
+  pid?: string;
+  branch?: string;
+  onOpenInternals?: (nodeId: string) => void;
 }
 
-export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt }: Props) {
+export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pid, branch, onOpenInternals }: Props) {
   if (nodeIds.length === 1 && edgeIds.length === 0) {
     const n = state.nodes[nodeIds[0]];
     if (!n) return null;
@@ -54,6 +59,20 @@ export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt }: 
         <Field label="Technology" value={n.technology} rev={state.rev} placeholder="e.g. FastAPI, PostgreSQL"
           onCommit={(v, b) => upd("technology", v, b)} />
         <Field label="Description" value={n.description} rev={state.rev} multiline onCommit={(v, b) => upd("description", v, b)} />
+        {n.type === "endpoint" && (<>
+          <Field label="HTTP method" value={n.props?.method ?? "GET"} rev={state.rev} options={["GET", "POST", "PUT", "PATCH", "DELETE"]}
+            onCommit={(v, b) => send([{ op: "update_node", id: n.id, changes: { props: { ...n.props, method: v }, name: `${v} ${n.props?.path ?? "/"}` }, base_rev: b }])} />
+          <Field label="Path" value={n.props?.path ?? ""} rev={state.rev} placeholder="/orders/{id}"
+            onCommit={(v, b) => send([{ op: "update_node", id: n.id, changes: { props: { ...n.props, path: v }, name: `${n.props?.method ?? "GET"} ${v}` }, base_rev: b }])} />
+        </>)}
+        {n.type === "table" && (
+          <Field label="Columns (name type [pk|fk], comma-separated)" value={n.props?.columns ?? ""} rev={state.rev} multiline
+            placeholder="id uuid pk, customer_id uuid fk, total numeric"
+            onCommit={(v, b) => upd("props", { ...n.props, columns: v }, b)} />
+        )}
+        {n.type === "event" && (
+          <Field label="Channel / topic" value={n.props?.channel ?? ""} rev={state.rev} onCommit={(v, b) => upd("props", { ...n.props, channel: v }, b)} />
+        )}
         <div className="field">
           <span>Implements requirements</span>
           <div className="req-links">
@@ -70,9 +89,15 @@ export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt }: 
           </div>
         </div>
         <div className="insp-actions">
+          {onOpenInternals && n.type !== "note" && (
+            <button onClick={() => onOpenInternals(n.id)} title="Open this component's internal (low-level) diagram">
+              Open internals ↘{(() => { const k = Object.values(state.nodes).filter((x) => x.parent_id === n.id).length; return k ? ` (${k})` : ""; })()}
+            </button>
+          )}
           <button onClick={onPrompt}>⚙ Build this (coding prompt)</button>
           <button className="danger" onClick={() => send([{ op: "remove_node", id: n.id }])}>Delete</button>
         </div>
+        {pid && branch && !n.parent_id && n.type !== "note" && <LldViews pid={pid} branch={branch} nodeId={n.id} rev={state.rev} />}
         <p className="muted small">rev {n.rev} · connections {Object.values(state.edges).filter((e) => e.source === n.id || e.target === n.id).length}</p>
       </div>
     );

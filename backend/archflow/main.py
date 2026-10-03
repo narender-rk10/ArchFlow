@@ -18,11 +18,11 @@ from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from . import ai, auth, catalog, chat, collab_sync
+from . import ai, auth, catalog, chat, collab_sync, lld
 from .analysis import full_analysis, trace_requirement
 from .diff import diff_states, diff_to_text
 from .models import ProjectState
-from .ops import ConflictError, OpError, apply_ops
+from .ops import ConflictError, OpError, apply_ops, resolve_node
 from .store import Store, default_store
 from .templates import TEMPLATES, build_template
 from .mcp_remote import Services, build_remote_mcp
@@ -113,6 +113,11 @@ class ChatApplyIn(BaseModel):
 
 class AskIn(BaseModel):
     question: str
+
+
+class LLDIn(BaseModel):
+    actor: str = "anonymous"
+    replace: bool = False
 
 
 # --------------------------------------------------------------------------- realtime hub
@@ -371,6 +376,32 @@ def create_app(store: Store | None = None) -> FastAPI:
         if req_id not in state.requirements:
             raise HTTPException(404, "requirement not found")
         return trace_requirement(state, req_id)
+
+    # ---- HLD → LLD drill-down ----
+    def node_or_404(state: ProjectState, node_id: str):
+        node = resolve_node(state, node_id)
+        if not node:
+            raise HTTPException(404, "component not found")
+        return node
+
+    @app.post("/api/projects/{pid}/nodes/{node_id}/lld")
+    async def generate_lld(pid: str, node_id: str, body: LLDIn, branch: str = "main"):
+        """Generate the component's internal (low-level) diagram; applied as ordinary ops, so it syncs live."""
+        state = state_or_404(pid, branch)
+        node = node_or_404(state, node_id)
+        try:
+            ops, info = await asyncio.to_thread(lld.build, state, node.id, body.replace,
+                                                project_or_404(pid).get("org_id"))
+        except lld.LLDError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        new_state, summary = await commit_ops(pid, branch, ops, f"{body.actor} (low-level design)")
+        return {**info, "summary": summary, "rev": new_state.rev}
+
+    @app.get("/api/projects/{pid}/nodes/{node_id}/views")
+    def node_views(pid: str, node_id: str, branch: str = "main"):
+        """Read-only views derived from the model: API list, ER data, Mermaid sequence and ER diagrams."""
+        state = state_or_404(pid, branch)
+        return lld.views(state, node_or_404(state, node_id))
 
     # ---- vibe coding ----
     @app.get("/api/prompt-targets")

@@ -181,7 +181,8 @@ def _state_for_prompt(state: ProjectState) -> str:
     compact = {
         "components": [{"id": n.id, "name": n.name, "type": n.type, "technology": n.technology,
                         "x": round(n.position.x), "y": round(n.position.y), "requirement_ids": n.requirement_ids,
-                        **({"description": n.description} if n.description else {})} for n in state.nodes.values()],
+                        **({"description": n.description} if n.description else {}),
+                        **({"parent_id": n.parent_id} if n.parent_id else {})} for n in state.nodes.values()],
         "connections": [{"source": e.source, "target": e.target, "protocol": e.protocol, **({"label": e.label} if e.label else {})}
                         for e in state.edges.values()],
         "requirements": [r.model_dump(exclude={"rev", "field_revs"}) for r in state.requirements.values()],
@@ -353,7 +354,8 @@ def _offline_one(state: ProjectState, cmd: str, selection: list[str], res: Comma
         if any(e.source == a.id and e.target == b.id for e in state.edges.values()):
             res.ops.append({"op": "remove_edge", "source": a.id, "target": b.id})
         res.ops += [
-            {"op": "add_node", "node": {"name": new, "type": ntype, "technology": tech, "position": pos}},
+            {"op": "add_node", "node": {"name": new, "type": ntype, "technology": tech, "position": pos,
+                                        "parent_id": a.parent_id}},
             {"op": "add_edge", "edge": {"source": a.id, "target": new}},
             {"op": "add_edge", "edge": {"source": new, "target": b.id}},
         ]
@@ -368,6 +370,7 @@ def _offline_one(state: ProjectState, cmd: str, selection: list[str], res: Comma
         node: dict[str, Any] = {"name": new, "type": ntype, "technology": tech}
         if anchor:
             node["position"] = {"x": anchor.position.x + 320, "y": anchor.position.y + 40}
+            node["parent_id"] = anchor.parent_id  # same diagram level as the anchor
         res.ops.append({"op": "add_node", "node": node})
         if anchor:
             res.ops.append({"op": "add_edge", "edge": {"source": anchor.id, "target": new}})

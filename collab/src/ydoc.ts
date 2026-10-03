@@ -21,7 +21,8 @@ export type Op = Record<string, unknown> & { op: string };
 export const ORIGIN_LOCAL = "archflow:local";
 export const ORIGIN_SERVER = "archflow:server";
 
-const NODE_DEFAULTS = { type: "service", technology: "", vendor: "", catalog_id: "", description: "", position: { x: 0, y: 0 }, requirement_ids: [], props: {} };
+// parent_id: "" = top-level (HLD) diagram, else the id of the component whose internal (LLD) diagram holds it.
+const NODE_DEFAULTS = { type: "service", technology: "", vendor: "", catalog_id: "", description: "", position: { x: 0, y: 0 }, requirement_ids: [], props: {}, parent_id: "" };
 const EDGE_DEFAULTS = { protocol: "", label: "" };
 const REQ_DEFAULTS = {
   description: "", kind: "functional", category: "", priority: "medium", actors: [], acceptance_criteria: [], status: "draft",
@@ -116,42 +117,132 @@ function findNode(doc: Y.Doc, ref: unknown): string | null {
 
 export class OpError extends Error {}
 
+/** Ids of every node inside `id`'s internal diagram, recursively (not including `id`). */
+export function descendantIds(parents: Map<string, string>, id: string): string[] {
+  const kids = new Map<string, string[]>();
+  parents.forEach((p, nid) => { if (p) kids.set(p, [...(kids.get(p) ?? []), nid]); });
+  const out: string[] = [];
+  const seen = new Set([id]);
+  const stack = [...(kids.get(id) ?? [])];
+  while (stack.length) {
+    const nid = stack.pop()!;
+    if (seen.has(nid)) continue;
+    seen.add(nid);
+    out.push(nid);
+    stack.push(...(kids.get(nid) ?? []));
+  }
+  return out;
+}
+
+const nodeParents = (doc: Y.Doc) => {
+  const m = new Map<string, string>();
+  coll(doc, "nodes").forEach((n, id) => m.set(id, String(n.get("parent_id") ?? "")));
+  return m;
+};
+
 /**
  * Check a batch before touching the document: Yjs transactions cannot be rolled back, so atomicity
  * comes from validating everything first (including references to components added earlier in the batch).
+ * Mirrors backend/archflow/ops.py, including the diagram-level rules: a connection joins two elements of the
+ * same diagram (same parent_id), and a parent must exist and cannot be placed inside itself.
  */
 export function validateOps(doc: Y.Doc, ops: Op[]): void {
-  const names = new Set<string>();
-  coll(doc, "nodes").forEach((n, id) => { names.add(id); names.add(String(n.get("name") ?? "").toLowerCase()); });
-  const has = (ref: unknown) => typeof ref === "string" && (names.has(ref) || names.has(ref.trim().toLowerCase()));
+  // A simulation of the nodes and connections as the batch proceeds.
+  const sim = new Map<string, { name: string; parent: string }>();
+  coll(doc, "nodes").forEach((n, id) => sim.set(id, { name: String(n.get("name") ?? ""), parent: String(n.get("parent_id") ?? "") }));
+  const links = new Map<string, [string, string]>();
+  coll(doc, "edges").forEach((e, id) => links.set(id, [String(e.get("source")), String(e.get("target"))]));
+  const resolve = (ref: unknown): string | null => {
+    if (typeof ref !== "string") return null;
+    if (sim.has(ref)) return ref;
+    const want = ref.trim().toLowerCase();
+    for (const [id, n] of sim) if (n.name.toLowerCase() === want) return id;
+    return null;
+  };
+  const where = (parent: string) => (parent ? `the internals of '${sim.get(parent)?.name ?? parent}'` : "the top-level diagram");
+  const sameDiagram = (s: string, t: string) => {
+    const a = sim.get(s)!, b = sim.get(t)!;
+    if (a.parent !== b.parent) {
+      throw new OpError(`cannot connect '${a.name}' → '${b.name}': they are in different diagrams `
+        + `(${where(a.parent)} vs ${where(b.parent)}). Connections must stay within one diagram level.`);
+    }
+  };
+  const parents = () => new Map([...sim].map(([id, n]) => [id, n.parent] as [string, string]));
+  let fresh = 0;
   for (const op of ops) {
     switch (op.op) {
       case "add_node": {
         const n = op.node as Record<string, unknown> | undefined;
         if (!n?.name) throw new OpError("add_node requires a name");
-        if (n.id) names.add(String(n.id));
-        names.add(String(n.name).toLowerCase());
+        let parent = "";
+        if (n.parent_id) {
+          parent = resolve(n.parent_id) ?? "";
+          if (!parent) throw new OpError(`parent component '${String(n.parent_id)}' not found`);
+        }
+        const id = n.id && !sim.has(String(n.id)) ? String(n.id) : `\u0000new-${fresh++}`;
+        sim.set(id, { name: String(n.name), parent });
         break;
       }
-      case "update_node":
-        if (!has(op.id)) throw new OpError(`node '${String(op.id)}' not found`);
+      case "update_node": {
+        const id = resolve(op.id);
+        if (!id) throw new OpError(`node '${String(op.id)}' not found`);
         if (!op.changes || typeof op.changes !== "object") throw new OpError("update_node requires changes");
+        const ch = op.changes as Record<string, unknown>;
+        const cur = sim.get(id)!;
+        if ("parent_id" in ch) {
+          let parent = "";
+          if (ch.parent_id) {
+            parent = resolve(ch.parent_id) ?? "";
+            if (!parent) throw new OpError(`parent component '${String(ch.parent_id)}' not found`);
+            if (parent === id || descendantIds(parents(), id).includes(parent)) throw new OpError("a component cannot be placed inside itself");
+          }
+          if (parent !== cur.parent && [...links.values()].some(([s, t]) => s === id || t === id)) {
+            throw new OpError(`'${cur.name}' has connections; remove them before moving it to another diagram`);
+          }
+          cur.parent = parent;
+        }
+        if (typeof ch.name === "string") cur.name = ch.name;
         break;
+      }
+      case "remove_node": {
+        const id = resolve(op.id);
+        if (!id) break; // already gone (e.g. removed concurrently)
+        const gone = new Set([id, ...descendantIds(parents(), id)]);
+        gone.forEach((g) => sim.delete(g));
+        for (const [eid, [s, t]] of [...links]) if (gone.has(s) || gone.has(t)) links.delete(eid);
+        break;
+      }
       case "add_edge": {
         const e = op.edge as Record<string, unknown> | undefined;
-        if (!e || !has(e.source) || !has(e.target)) throw new OpError("cannot connect: component not found");
+        const s = resolve(e?.source), t = resolve(e?.target);
+        if (!e || !s || !t) throw new OpError("cannot connect: component not found");
+        sameDiagram(s, t);
+        links.set(e.id ? String(e.id) : `\u0000new-${fresh++}`, [s, t]);
         break;
       }
-      case "update_edge":
-        if (!coll(doc, "edges").has(String(op.id))) throw new OpError(`edge '${String(op.id)}' not found`);
+      case "update_edge": {
+        const ends = links.get(String(op.id));
+        if (!ends) throw new OpError(`edge '${String(op.id)}' not found`);
+        const ch = (op.changes ?? {}) as Record<string, unknown>;
+        const s = "source" in ch ? resolve(ch.source) : ends[0], t = "target" in ch ? resolve(ch.target) : ends[1];
+        if (!s || !t) throw new OpError("cannot connect: component not found");
+        sameDiagram(s, t);
+        links.set(String(op.id), [s, t]);
         break;
+      }
+      case "remove_edge": {
+        if (op.id) { links.delete(String(op.id)); break; }
+        const s = resolve(op.source), t = resolve(op.target);
+        for (const [eid, [a, b]] of [...links]) if (a === s && b === t) links.delete(eid);
+        break;
+      }
       case "add_requirement":
         if (!(op.requirement as Record<string, unknown> | undefined)?.title) throw new OpError("add_requirement requires a title");
         break;
       case "update_requirement":
         if (!coll(doc, "requirements").has(String(op.id))) throw new OpError(`requirement '${String(op.id)}' not found`);
         break;
-      case "remove_node": case "remove_edge": case "remove_requirement":
+      case "remove_requirement":
         break;
       default:
         throw new OpError(`unknown op '${op.op}'`);
@@ -171,22 +262,27 @@ export function applyOps(doc: Y.Doc, ops: Op[], origin: unknown = ORIGIN_LOCAL):
           const n = { ...(op.node as Record<string, unknown>) };
           if (!n.name) throw new OpError("add_node requires a name");
           const id = n.id && !nodes.has(String(n.id)) ? String(n.id) : uniqueId(nodes, slug(String(n.name)));
-          setFields(nodes, id, { ...NODE_DEFAULTS, ...n, id });
+          const parent_id = n.parent_id ? findNode(doc, n.parent_id) ?? "" : "";
+          setFields(nodes, id, { ...NODE_DEFAULTS, ...n, id, parent_id });
           summary.push(`added '${n.name}'`);
           break;
         }
         case "update_node": {
           const id = findNode(doc, op.id);
           if (!id) throw new OpError(`node '${String(op.id)}' not found`);
-          setFields(nodes, id, op.changes as Record<string, unknown>);
+          const changes = { ...(op.changes as Record<string, unknown>) };
+          if (changes.parent_id) changes.parent_id = findNode(doc, changes.parent_id) ?? changes.parent_id;
+          setFields(nodes, id, changes);
           break;
         }
         case "remove_node": {
           const id = findNode(doc, op.id);
           if (!id) break;  // already gone (e.g. removed concurrently)
-          edges.forEach((e, eid) => { if (e.get("source") === id || e.get("target") === id) edges.delete(eid); });
-          nodes.delete(id);
-          summary.push(`removed '${id}'`);
+          // A component's internal (LLD) diagram goes with it.
+          const gone = new Set([id, ...descendantIds(nodeParents(doc), id)]);
+          edges.forEach((e, eid) => { if (gone.has(String(e.get("source"))) || gone.has(String(e.get("target")))) edges.delete(eid); });
+          gone.forEach((g) => nodes.delete(g));
+          summary.push(`removed '${id}'` + (gone.size > 1 ? ` with ${gone.size - 1} internal element(s)` : ""));
           break;
         }
         case "add_edge": {
