@@ -447,7 +447,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
           ) : (
             <form className="row gap" onSubmit={(e) => { e.preventDefault(); createBranch(newBranch.trim(), null); setNewBranch(null); }}>
               <input autoFocus value={newBranch} onChange={(e) => setNewBranch(e.target.value)} aria-label="New branch name" />
-              <button className="small primary" disabled={!/^[A-Za-z0-9._/-]{1,60}$/.test(newBranch.trim())}>Create</button>
+              <button className="small primary" disabled={!/^(?=.{1,60}$)[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(newBranch.trim())}>Create</button>
               <button type="button" className="small" onClick={() => setNewBranch(null)}>✕</button>
             </form>
           )}

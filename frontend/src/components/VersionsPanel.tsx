@@ -71,7 +71,7 @@ export function VersionsPanel({ versions, activity, branch, headVersion, diff, o
             {branchFor === v.number && (
               <form className="row gap" onSubmit={(e) => { e.preventDefault(); onBranchFrom(v.number, branchName.trim()); setBranchFor(null); }}>
                 <input value={branchName} onChange={(e) => setBranchName(e.target.value)} />
-                <button className="small primary" disabled={!/^[A-Za-z0-9._/-]{1,60}$/.test(branchName.trim())}>Create</button>
+                <button className="small primary" disabled={!/^(?=.{1,60}$)[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(branchName.trim())}>Create</button>
               </form>
             )}
           </li>

@@ -63,7 +63,7 @@ class RestoreIn(BaseModel):
 
 
 class BranchIn(BaseModel):
-    name: str = Field(pattern=r"^[A-Za-z0-9._/-]{1,60}$")
+    name: str = Field(max_length=60, pattern=r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
     from_version: int | None = None
     from_branch: str = "main"
 
@@ -107,7 +107,7 @@ class ChatApplyIn(BaseModel):
     option: dict[str, Any]
     requirements: list[dict[str, Any]] = []
     mode: str = Field("replace", pattern="^(replace|merge|branch)$")
-    branch_name: str | None = Field(None, pattern=r"^[A-Za-z0-9._/-]{1,60}$")
+    branch_name: str | None = Field(None, max_length=60, pattern=r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
     actor: str = "anonymous"
 
 
@@ -537,7 +537,7 @@ def create_app(store: Store | None = None) -> FastAPI:
         return {"changed": bool(summary), "rev": merged.rev, "dropped": dropped}
 
     # ---- realtime ----
-    @app.websocket("/ws/{pid}/{branch}")
+    @app.websocket("/ws/{pid}/{branch:path}")
     async def ws_endpoint(ws: WebSocket, pid: str, branch: str, name: str = "anonymous", color: str = "#888"):
         await ws.accept()
         if not store.get_project(pid) or store.get_state(pid, branch) is None:
