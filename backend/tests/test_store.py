@@ -218,6 +218,24 @@ def test_transaction_read_modify_write(store, org):
         assert state is None
 
 
+def test_code_graphs(store, org):
+    pid = store.create_project("C", org_id=org["id"])["id"]
+    assert store.latest_code_graph(pid) is None and store.list_code_graphs(pid) == []
+    blob = b"\x78\x9c" + bytes(range(50))  # opaque bytes round-trip
+    first = store.add_code_graph(pid, source="upload", repo_url=None, commit_sha=None, created_by="alice",
+                                 summary={"stats": {"files": 1}}, graph=blob)
+    second = store.add_code_graph(pid, source="git", repo_url="https://github.com/a/b", commit_sha="abc1234",
+                                  created_by="bob", summary={"stats": {"files": 2}}, graph=b"zz")
+    assert first["id"].startswith("cg-") and "graph" not in first and first["summary"] == {"stats": {"files": 1}}
+    assert [g["id"] for g in store.list_code_graphs(pid)] == [second["id"], first["id"]]
+    latest = store.latest_code_graph(pid, with_graph=True)
+    assert latest["id"] == second["id"] and latest["graph"] == b"zz" and latest["commit_sha"] == "abc1234"
+    assert store.get_code_graph(pid, first["id"], with_graph=True)["graph"] == blob
+    assert store.get_code_graph("p-other", first["id"]) is None  # scoped by project
+    store.delete_project(pid)
+    assert store.list_code_graphs(pid) == []  # cascades
+
+
 # ---------------------------------------------------------------- postgres specifics
 def test_pg_transaction_rolls_back_on_error(pg_store):
     pid = pg_store.create_project("RB")["id"]

@@ -92,6 +92,8 @@ def impact(graph: dict[str, Any], recon: dict[str, Any], code_state: ProjectStat
     matches = drift_mod.match(designed, code_state)
     designed_ids: list[str] = [did for did, (cid, _) in matches.items() if cid in code_ids]
     for n in designed.nodes.values():  # explicit traceability on the designed component
+        if drift_mod.GROUP.get(n.type) in drift_mod.INFRA_GROUPS:
+            continue  # a datastore's code_paths say where it is USED; it is affected only via matching above
         paths = drift_mod._paths(n)
         if paths and n.id not in designed_ids and any(
                 p == f or f.startswith(p + "/") for p in paths for f in touched):

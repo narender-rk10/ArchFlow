@@ -84,13 +84,14 @@ def validate_repo_url(url: str, resolver=resolve_host) -> tuple[str, str, str]:
         raise SourceError("invalid port") from exc
     if port not in (None, 443):
         raise SourceError("only the default https port is allowed")
-    if not host or not _HOST_RE.match(host) or host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
-        raise SourceError("repository host is not allowed")
     try:  # literal IPs must be public too
         ipaddress.ip_address(host)
         literal = True
     except ValueError:
         literal = False
+    if not literal and (not host or not _HOST_RE.match(host) or host == "localhost"
+                        or host.endswith((".localhost", ".local", ".internal"))):
+        raise SourceError("repository host is not allowed")
     addrs = [host] if literal else resolver(host)
     if not addrs:
         raise SourceError(f"cannot resolve host '{host}'")
@@ -107,8 +108,11 @@ def repo_web_base(url: str | None) -> str | None:
     """The browsable base of a GitHub/GitLab repository URL (without .git), else None."""
     if not url:
         return None
-    m = re.match(r"^https://(github\.com|gitlab\.com)/([^/]+(?:/[^/]+)+?)(?:\.git)?/?$", url)
-    return f"https://{m.group(1)}/{m.group(2)}" if m else None
+    m = re.match(r"^https://(github\.com|gitlab\.com)/([^/]+(?:/[^/]+)+)/?$", url)
+    if not m:
+        return None
+    path = m.group(2)[:-4] if m.group(2).endswith(".git") else m.group(2)
+    return f"https://{m.group(1)}/{path}"
 
 
 def _dir_size(path: Path, cap: int) -> int:
