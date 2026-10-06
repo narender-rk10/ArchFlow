@@ -12,6 +12,7 @@ import zlib
 from typing import Any
 
 from . import FORMAT
+from .detect import merge_compose
 
 MAX_FILES = 100_000
 MAX_SYMBOLS = 200_000
@@ -118,7 +119,8 @@ def _clean_detections(det: dict[str, Any]) -> dict[str, Any]:
     out = {
         "languages": {_s(k, 40): int(v) for k, v in list(langs.items())[:60] if isinstance(v, int)},
         "manifests": lst("manifests"), "compose_services": lst("compose_services"), "dockerfiles": lst("dockerfiles"),
-        "k8s": lst("k8s"), "terraform": lst("terraform"), "infrastructure": lst("infrastructure", 100),
+        "k8s": lst("k8s"), "terraform": lst("terraform"), "proxy_routes": lst("proxy_routes", 50),
+        "infrastructure": lst("infrastructure", 100),
         "frameworks": lst("frameworks", 100), "entry_points": lst("entry_points", 300),
     }
     for it in out["infrastructure"]:
@@ -131,6 +133,11 @@ def _clean_detections(det: dict[str, Any]) -> dict[str, Any]:
     for c in out["compose_services"]:
         if c.get("build") is not None:
             c["build"] = clean_path(c.get("build"))
+        if c.get("dockerfile"):
+            c["dockerfile"] = clean_path(c.get("dockerfile"))
+    for r in out["proxy_routes"]:
+        r["path"] = clean_path(r.get("path"))
+        r["targets"] = [_s(t, 120) for t in (r.get("targets") or [])[:30] if isinstance(t, str)]
     return out
 
 
@@ -138,6 +145,7 @@ def summarize(graph: dict[str, Any]) -> dict[str, Any]:
     """Compact overview for listings, the UI and MCP."""
     det = graph.get("detections") or {}
     comms = sorted(graph.get("communities") or [], key=lambda c: -c.get("size", 0))
+    compose = merge_compose(det.get("compose_services", []))  # also merges graphs stored before merging existed
     return {
         "stats": graph.get("stats") or {},
         "generator": graph.get("generator") or {},
@@ -150,8 +158,10 @@ def summarize(graph: dict[str, Any]) -> dict[str, Any]:
                        for f in det.get("frameworks", [])],
         "entry_points": det.get("entry_points", [])[:30],
         "manifests": [{"path": m.get("path"), "kind": m.get("kind"), "name": m.get("name")} for m in det.get("manifests", [])],
-        "compose_services": [{"name": c.get("name"), "image": c.get("image"), "build": c.get("build")}
-                             for c in det.get("compose_services", [])],
+        "compose_services": [{"name": c.get("name"), "image": c.get("image"), "build": c.get("build"),
+                              "files": c.get("files", []), "dev_tool": bool(c.get("dev_tool"))} for c in compose],
+        "dev_tools": [{"name": c.get("name"), "image": c.get("image"), "files": c.get("files", [])}
+                      for c in compose if c.get("dev_tool")],
         "dockerfiles": len(det.get("dockerfiles", [])),
         "k8s": len(det.get("k8s", [])),
         "terraform": len(det.get("terraform", [])),

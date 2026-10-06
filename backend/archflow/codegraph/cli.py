@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
           f"{st['communities']} communities")
     if s["infrastructure"]:
         print("Detected: " + ", ".join(i["label"] for i in s["infrastructure"]))
-    print("Upload it in ArchFlow: Code → Upload graph. No source code is included.")
+    print("Upload it in ArchFlow: Code -> Upload graph. No source code is included.")  # ASCII: Windows consoles
     return 0
 
 

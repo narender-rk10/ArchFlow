@@ -75,8 +75,8 @@ def code_components(recon: dict[str, Any], graph: dict[str, Any], files: list[st
     out = []
     for n in recon["nodes"]:
         if n.get("_unit") is not None:
-            d = n["_unit"]
-            if any(not d or f == d or f.startswith(d + "/") for f in files):
+            dirs = n.get("_dirs") or [n["_unit"]]  # the unit plus the libraries folded into it
+            if any(not d or f == d or f.startswith(d + "/") for d in dirs for f in files):
                 out.append(n["id"])
         elif n.get("_infra"):
             if infra_files.get(n["_infra"], set()) & set(files):
