@@ -34,8 +34,9 @@ is validated, versioned, conflict-checked and shown live to everyone.
 | Architecture validation | Orphans, client→DB access, shared databases, unguarded LLMs, missing auth or PII controls, missing gateway |
 | Health dashboard | Requirements completeness/approval, traceability %, architecture score, issue counts |
 | Vibe coding | Implementation brief for Claude Code / Codex / Gemini CLI / Aider from the whole system, selected components, or a requirement (pulls in traced context, interfaces, stubs, acceptance criteria → tests) |
-| Remote MCP server | Streamable HTTP at `/mcp` with OAuth 2.1 (works with Claude Code, Claude.ai, Claude Desktop and other MCP clients) or personal access tokens; 29 tools, org-scoped, read-only or read & edit. Agent edits show up live on everyone's canvas |
+| Remote MCP server | Streamable HTTP at `/mcp` with OAuth 2.1 (works with Claude Code, Claude.ai, Claude Desktop and other MCP clients) or personal access tokens; 33 tools, org-scoped, read-only or read & edit. Agent edits show up live on everyone's canvas |
 | Activity history | Who changed what, and when, per branch |
+| Code ↔ architecture | **Code** button: analyse a public Git repository (or upload a graph made locally by `archflow-codegraph`) with [Graphify](https://pypi.org/project/graphifyy/) — tree-sitter code graph of files, symbols, calls and imports, Leiden communities, god nodes, import cycles — plus deterministic detections (languages, manifests, docker-compose, Dockerfiles, Kubernetes, Terraform, databases/caches/queues/LLM providers from imported libraries, entry points). **Reconstruct architecture** opens a `draft/from-code-<sha>` branch with services, clients and infrastructure, connections and catalog matches; components keep their code paths (linked to the repo at that commit in the inspector). **Drift** compares any branch with the code (in code but not designed, designed but not in code, undeclared connections, technology mismatches) and feeds the Issues tab; **change impact** maps changed files → dependent symbols → components → requirements. REST under `/api/projects/{id}/codegraph`, MCP `analyze_repository`, `get_code_summary`, `get_drift`, `get_change_impact` |
 | Architecture decisions | **Decisions** tab: ADRs (ADR-001, …) with status, context, decision, consequences, alternatives and linked requirements. **Compare drafts** scores 2–4 branches against the requirements/NFRs on cost, scalability, performance, security, reliability, operability and delivery speed (1–5 matrix + recommendation) using the [Jev](https://thejevai.com/docs) decision API (`JEV_API_KEY`), else the LLM, else an offline heuristic; the engine is always shown. Record the result as an ADR and **adopt** the chosen draft into `main` (safety version first, then a new version). REST under `/api/projects/{id}/decisions` and `/evaluate`; MCP `evaluate_alternatives` & co. |
 
 ## Quick start
@@ -90,6 +91,43 @@ offline logic, and the Ask assistant is disabled.
 | `ARCHFLOW_DB` | `backend/data/archflow.db` | SQLite path when `DATABASE_URL` is unset |
 
 See `.env.example` for the full list.
+
+### Repository analysis (optional)
+
+Analysing repositories needs the optional `codegraph` extra, which installs Graphify (`graphifyy==0.9.77`,
+tree-sitter parsers for ~30 languages). Everything else works without it; the analyse endpoint then answers 503
+with install instructions, while uploaded graphs, reconstruction, drift and impact keep working.
+
+```bash
+cd backend
+uv sync --extra codegraph          # then restart the API
+```
+
+Analyse code that must not leave your machine with the CLI and upload only the graph (**Code → Private code? …**,
+or `POST /api/projects/{id}/codegraph/upload`). The file contains paths, symbol names, relations and detected
+infrastructure — no source code:
+
+```bash
+uv run archflow-codegraph ../path/to/repo -o archflow-codegraph.json
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ARCHFLOW_CODEGRAPH_TIMEOUT` | `600` | Seconds the analysis worker process may run |
+| `ARCHFLOW_ALLOW_LOCAL_REPOS` | off | `1` lets developers analyse server-local directories (`local_path`); self-hosted/dev only |
+| `ARCHFLOW_CODEGRAPH_MAX_REPO_MB` / `_CLONE_TIMEOUT` | `500` / `180` | Clone size cap and time limit |
+| `ARCHFLOW_CODEGRAPH_MAX_UPLOAD_MB` | `25` | Upload size limit |
+| `ARCHFLOW_CODEGRAPH_JOBS` / `_PROCS` | `1` / `2` | Concurrent analyses / parser processes per analysis |
+
+Security: only `https://` URLs without credentials on port 443 are accepted; the host is resolved and **every**
+address must be public (loopback, private, link-local — including the cloud metadata address — CGNAT, multicast
+and reserved ranges are refused), and git is pinned to the vetted address (`http.curloptResolve`) with redirects
+off, so DNS rebinding cannot redirect the clone. Clones are shallow (`--depth 1`, no tags, submodules, hooks,
+LFS or symlinks), killed at the time/size limit and deleted right after parsing. Parsing runs in a separate
+worker process (`python -m archflow.codegraph.worker`), never in the API process, and repository code is never
+executed. Only the normalized graph is stored (zlib-compressed, table `code_graphs`). Jobs run in an in-process
+thread pool with an in-memory status registry — `codegraph/jobs.py` documents the seam for a durable queue.
+Analysing, uploading and reconstructing need the developer role; viewers can read summaries, drift and impact.
 
 ### Running on Postgres
 
@@ -214,6 +252,8 @@ backend/archflow/
   secrets_box.py AES-GCM encryption of org secrets
   main.py        REST + WebSocket API
   mcp_server.py  MCP server
+  codegraph/     repository analysis: Graphify adapter (the only module importing it), worker process, CLI,
+                 detections, sources (clone/SSRF guard), jobs, reconstruction, drift, impact, routes
 frontend/src/
   components/Workspace.tsx   canvas, sync, orchestration
   components/*               nodes, palette, inspector, panels, command bar, dialogs
@@ -238,7 +278,7 @@ In rough order of leverage:
 2. **Branch merge** with three-way diff and AI-assisted conflict resolution.
 3. **Architecture alternatives + JEV evaluation**: generate options A/B/C as branches and score them.
 4. **Comments, @mentions and approval workflows** on any object; per-project role overrides, SSO.
-5. **Repository analysis**: reconstruct architecture from code, drift detection, PR architecture review.
+5. **Repository analysis**: done for public repos and uploaded graphs; next: GitHub App, drift on every push/PR, PR review comments.
 6. **Jira sync**: epics/stories generated from requirements, with status reflected on the canvas.
 7. **Diagram generation** from the same model: sequence, C4, ER, deployment, agent graph, MCP topology.
 8. **Document intake**: SRS/PDF → requirements; meeting transcripts → live canvas.
@@ -247,4 +287,5 @@ In rough order of leverage:
 
 ## License
 
-Apache-2.0
+Apache-2.0. The optional repository-analysis extra uses [Graphify](https://pypi.org/project/graphifyy/)
+(`graphifyy`, Apache-2.0; ships an additional MIT license file and NOTICE) and its tree-sitter grammars; it is not installed by default.
