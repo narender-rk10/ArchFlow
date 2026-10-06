@@ -74,6 +74,14 @@ def test_client_calling_a_service_directly_needs_auth():
     assert [i["node_ids"] for i in issues_of(state, "unauthenticated_entry")] == [["pub"]]
 
 
+def test_key_vaults_and_guardrails_do_not_count_as_identity():
+    for name, tech in [("Key Management", "AWS KMS"), ("AI Guardrails", "Prompt-injection filters"), ("WAF", "AWS WAF")]:
+        nodes = [("web", "client", "Web", "React"), ("gw", "gateway", "Gateway", "Kong"), ("sec", "security", name, tech),
+                 ("svc", "service", "Svc", "Go")]
+        found = issues_of(build(nodes, [("web", "gw"), ("gw", "sec"), ("gw", "svc")]), "unauthenticated_entry")
+        assert found, name
+
+
 def test_no_identity_component_at_all_is_reported_once():
     state = build([("web", "client", "Web", "React"), ("gw", "gateway", "Gateway", "Kong"), ("svc", "service", "Svc", "Go")],
                   [("web", "gw"), ("gw", "svc")])
