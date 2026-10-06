@@ -172,7 +172,11 @@ export function CodeDialog({ pid, branch, readOnly, onClose, onOpenBranch, onFoc
                       · {i.files ? `${i.files} file(s)` : i.evidence[0] ?? ""}</span></li>
                   ))}
                   {s.frameworks.map((f) => <li key={f.name}>{f.name} <span className="muted">· {f.kind === "ui" ? "UI" : "web framework"} · {f.files} file(s)</span></li>)}
-                  {s.compose_services.length > 0 && <li className="muted">docker-compose: {s.compose_services.map((c) => c.name).join(", ")}</li>}
+                  {s.compose_services.some((c) => !c.dev_tool) && <li className="muted">docker-compose: {s.compose_services.filter((c) => !c.dev_tool).map((c) => c.name).join(", ")}</li>}
+                  {(s.dev_tools?.length ?? 0) > 0 && (
+                    <li className="muted" title="Dev/test tools are left out of the reconstructed architecture">
+                      dev tools (not in the architecture): {s.dev_tools!.map((c) => c.name).join(", ")}</li>
+                  )}
                   {(s.dockerfiles > 0 || s.k8s > 0 || s.terraform > 0) && (
                     <li className="muted">{s.dockerfiles} Dockerfile(s) · {s.k8s} Kubernetes object(s) · {s.terraform} Terraform resource(s)</li>
                   )}

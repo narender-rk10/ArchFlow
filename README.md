@@ -120,6 +120,31 @@ uv run archflow-codegraph ../path/to/repo -o archflow-codegraph.json
 | `ARCHFLOW_CODEGRAPH_MAX_UPLOAD_MB` | `25` | Upload size limit |
 | `ARCHFLOW_CODEGRAPH_JOBS` / `_PROCS` | `1` / `2` | Concurrent analyses / parser processes per analysis |
 
+How the architecture is reconstructed (deterministic; `codegraph/reconstruct.py` documents every rule):
+
+- **Code units** are directories with a package manifest. Each gets a role: *runtime service* (server framework,
+  server entry point, Dockerfile or compose service), *client app* (UI framework with an app entry point),
+  *library* (folded into the units that import it — its paths are appended to theirs) or *tooling* (email
+  templates such as react-email, docs/Storybook sites, copier/cookiecutter `hooks/`, `scripts/`). Only runtime
+  units and infrastructure become components.
+- **docker compose**: all compose files are merged by service name (base, then `*.override.*`, then others, as
+  `docker compose` does). A service whose build context, Dockerfile or name matches a code unit *is* that unit
+  (`props.compose_service`). Known images are typed: PostgreSQL/MySQL/MongoDB/Elasticsearch → database (merged
+  with the same database found through client libraries), Redis/Valkey/Memcached → cache, RabbitMQ/Kafka/NATS →
+  queue, MinIO → storage, Traefik/NGINX/Caddy/HAProxy/Envoy/Kong → gateway, Keycloak → security,
+  Prometheus/Grafana → monitoring services. Dev/test tools (Adminer, pgAdmin, Mailpit, MailHog, MailDev,
+  Playwright, Selenium, Cypress, LocalStack, ...) are left out and listed as `dev_tools` in the summary and the
+  reconstruct result; `POST .../reconstruct {"include_dev_tools": true}` adds them as components.
+- **Connections** run from the importer/caller to its dependency: unit → datastore it imports a client for,
+  compose `depends_on` and service hostnames in compose environment values, gateway → the services it routes to
+  (Traefik `traefik.http.routers.*` labels, nginx/Caddy/Traefik config files), client → backend over HTTP/WebSocket
+  — through the gateway when one routes to that backend (client → gateway → backend). Code references between
+  units count only within one language and never from tests or generated code; a backend never "imports" a
+  front-end.
+- **Names** are deterministic (`Backend API`, `Web App`, `PostgreSQL`, `Traefik`). The optional LLM pass may only
+  rename runtime services, to at most three Title Case words without parentheses or technology names; any other
+  proposal keeps the deterministic name.
+
 Security: only `https://` URLs without credentials on port 443 are accepted; the host is resolved and **every**
 address must be public (loopback, private, link-local — including the cloud metadata address — CGNAT, multicast
 and reserved ranges are refused), and git is pinned to the vetted address (`http.curloptResolve`) with redirects

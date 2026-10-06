@@ -544,3 +544,31 @@ def test_refine_only_renames_runtime_services_to_valid_names(tmp_path, monkeypat
     proposals[0] = {"id": ids["Backend API"], "name": "Items API"}
     reconstruct.refine(recon, g)
     assert {n["name"] for n in recon["nodes"]} == {"Items API", "Web App", "PostgreSQL", "Traefik"}
+
+
+# --------------------------------------------------------------------------- API
+def test_api_reconstruct_reports_dev_tools(tmp_path):
+    from authhelp import new_client, signup
+
+    from archflow.main import create_app
+    from archflow.store import Store
+    from test_mcp_remote import BASE
+
+    g = graph_from_repo(make_template_repo(tmp_path / "repo"), NOISE_EDGES)
+    with new_client(create_app(Store(":memory:")), base_url=BASE) as client:
+        signup(client)
+        pid = client.post("/api/projects", json={"name": "Template"}).json()["id"]
+        rec = client.post(f"/api/projects/{pid}/codegraph/upload", content=json.dumps(g),
+                          headers={"Content-Type": "application/json"}).json()
+        assert [d["name"] for d in rec["summary"]["dev_tools"]] == ["adminer", "mailpit"]
+        out = client.post(f"/api/projects/{pid}/codegraph/{rec['id']}/reconstruct", json={"refine": False}).json()
+        assert out["components"] == 4 and out["connections"] == 4
+        assert [d["name"] for d in out["dev_tools"]] == ["adminer", "mailpit"] and not out["dev_tools"][0]["included"]
+        assert {x["path"] for x in out["excluded"]} == {".", "packages/email-templates"}
+        dev = client.post(f"/api/projects/{pid}/codegraph/{rec['id']}/reconstruct",
+                          json={"refine": False, "include_dev_tools": True}).json()
+        assert dev["components"] == 6 and dev["dev_tools"][0]["included"]
+        state = client.get(f"/api/projects/{pid}", params={"branch": dev["branch"]}).json()["state"]
+        assert {n["name"] for n in state["nodes"].values()} == set(EXPECTED_NODES) | {"Adminer", "Mailpit"}
+        drift = client.get(f"/api/projects/{pid}/codegraph/drift", params={"branch": out["branch"]}).json()
+        assert drift["issues"] == []  # drift uses the default (dev tools excluded) reconstruction

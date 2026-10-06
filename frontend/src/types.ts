@@ -205,7 +205,8 @@ export interface CodeSummary {
   frameworks: { name: string; kind: string; files: number }[];
   entry_points: { path: string; kind: string; name: string }[];
   manifests: { path: string; kind: string; name: string }[];
-  compose_services: { name: string; image: string; build: string | null }[];
+  compose_services: { name: string; image: string; build: string | null; files?: string[]; dev_tool?: boolean }[];
+  dev_tools?: { name: string; image: string; files: string[] }[];  // excluded from the reconstructed architecture
   dockerfiles: number; k8s: number; terraform: number;
   communities: { id: number; size: number; label: string; paths: string[] }[];
   god_nodes: { id: string; name: string; degree: number }[];
@@ -240,4 +241,6 @@ export interface ImpactResult {
 export interface ReconstructResult {
   branch: string; version: number; code_graph_id: string; engine: string; components: number; connections: number;
   requirements_linked: number;
+  dev_tools?: { name: string; image: string; files: string[]; included: boolean }[];
+  excluded?: { path: string; role: string; reason: string; files: number }[];
 }
