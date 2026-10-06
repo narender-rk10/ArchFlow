@@ -43,6 +43,7 @@ class Services:
     commit_ops: Callable[[str, str, list[dict[str, Any]], str], Awaitable[tuple[ProjectState, list[str]]]]
     commit_version: Callable[[str, str, str, str], Awaitable[dict[str, Any]]]
     ai_command: Callable[[str, str, str, list[str], str], Awaitable[dict[str, Any]]]
+    codegraph: Any = None  # codegraph.service.CodeGraphService (repository analysis)
 
 
 INSTRUCTIONS = """ArchFlow holds a team's software architecture as structured data: components (nodes), connections \
@@ -444,5 +445,59 @@ def build_remote_mcp(services: Services) -> MCPServer:
             d = decisions_mod.decision_from_evaluation(store, project_id, result, p.actor, title or None)
             result["decision"] = {"id": d["id"], "title": d["title"], "status": d["status"], "chosen": d["chosen"]}
         return result
+
+    # ---- repository analysis (code graph) ----
+    def codegraph_call(fn, *args, **kw):
+        from .codegraph.service import CodeGraphError
+
+        if services.codegraph is None:
+            raise ToolError("Repository analysis is not enabled on this server")
+        try:
+            return fn(*args, **kw)
+        except CodeGraphError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool()
+    def analyze_repository(project_id: str, repo_url: str) -> dict[str, Any]:
+        """Analyse a public Git repository (https URL) in the background: code graph (files, symbols, calls,
+        imports, communities) plus detected infrastructure. Returns a job; poll get_code_summary(job_id=...)."""
+        p = Principal(store)
+        p.require_write()
+        project_for(p, project_id)
+        return codegraph_call(services.codegraph.analyze, project_id, p.actor, repo_url=repo_url)
+
+    @mcp.tool()
+    def get_code_summary(project_id: str, job_id: str = "") -> dict[str, Any]:
+        """The latest code analysis of a project: languages, files, symbols, communities, detected infrastructure
+        (databases, caches, queues, LLM providers), frameworks and entry points. With job_id, also that job's status."""
+        p = Principal(store)
+        project_for(p, project_id)
+        out: dict[str, Any] = {}
+        if job_id:
+            out["job"] = codegraph_call(services.codegraph.job, project_id, job_id)
+        latest = store.latest_code_graph(project_id)
+        out["latest"] = latest
+        if latest is None:
+            out["hint"] = "No analysis yet: call analyze_repository, or upload a graph made with archflow-codegraph."
+        return out
+
+    @mcp.tool()
+    def get_drift(project_id: str, branch: str = "main") -> dict[str, Any]:
+        """Designed architecture (branch) versus the architecture reconstructed from the latest code analysis:
+        components in code but not designed, designed but not in code, undeclared connections and technology
+        mismatches, plus an alignment score (0-100)."""
+        p = Principal(store)
+        project_for(p, project_id, branch)
+        return codegraph_call(services.codegraph.drift, project_id, branch)
+
+    @mcp.tool()
+    def get_change_impact(project_id: str, files: list[str], branch: str = "main", depth: int = 2) -> dict[str, Any]:
+        """What a change to these files (repository-relative paths) can affect: symbols that call/import the
+        changed code, the architecture components involved and the requirements traced to them."""
+        p = Principal(store)
+        project_for(p, project_id, branch)
+        if not files:
+            raise ToolError("give at least one file")
+        return codegraph_call(services.codegraph.impact, project_id, files[:2000], branch, max(1, min(depth, 6)))
 
     return mcp

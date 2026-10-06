@@ -184,13 +184,22 @@ def health(state: ProjectState) -> dict[str, Any]:
     }
 
 
-def full_analysis(state: ProjectState) -> dict[str, Any]:
-    return {
+def full_analysis(state: ProjectState, code_state: ProjectState | None = None) -> dict[str, Any]:
+    """``code_state``: the architecture reconstructed from the project's latest code graph, if any; adds
+    ``drift_issues`` and ``health.code_alignment`` (see codegraph/drift.py)."""
+    out = {
         "requirement_issues": lint_requirements(state),
         "architecture_issues": validate_architecture(state),
         "traceability": traceability(state),
         "health": health(state),
     }
+    if code_state is not None:
+        from .codegraph.drift import drift
+
+        d = drift(state, code_state)
+        out["drift_issues"] = d["issues"]
+        out["health"]["code_alignment"] = d["alignment"]
+    return out
 
 
 def _issue(severity: str, code: str, message: str, suggestion: str = "",

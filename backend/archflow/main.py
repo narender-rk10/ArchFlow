@@ -25,6 +25,8 @@ from pydantic import BaseModel, Field
 
 from . import accounts, ai, auth, catalog, chat, collab_sync, decisions, lld, llm, secrets_box, users
 from .analysis import full_analysis, trace_requirement
+from .codegraph.service import CodeGraphService
+from .codegraph.service import register_routes as register_codegraph_routes
 from .authz import ROLES, Access, Authz, CSRFMiddleware, can, cap_scopes
 from .diff import diff_states, diff_to_text
 from .mcp_remote import Services, build_remote_mcp
@@ -290,6 +292,11 @@ def create_app(store: Store | None = None) -> FastAPI:
         await hub.broadcast(Hub.key(pid, branch), {"type": "versions", "actor": author})
         return version
 
+    # ---- repository analysis (code graph → reconstruction, drift, impact); see codegraph/service.py ----
+    codegraph = CodeGraphService(store, commit_ops, commit_version)
+    app.state.codegraph = codegraph
+    register_codegraph_routes(app, codegraph, authz=authz)
+
     @app.post("/api/projects/{pid}/commit", status_code=201)
     async def commit(pid: str, body: CommitIn, branch: str = "main", a: Access = Depends(edit)):
         return await commit_version(pid, branch, body.message, a.actor)
@@ -357,7 +364,7 @@ def create_app(store: Store | None = None) -> FastAPI:
     # ---- analysis ----
     @app.get("/api/projects/{pid}/analysis")
     def analysis(pid: str, branch: str = "main", a: Access = Depends(read)):
-        return full_analysis(state_or_404(pid, branch))
+        return full_analysis(state_or_404(pid, branch), codegraph.code_state(pid))
 
     @app.get("/api/projects/{pid}/trace/{req_id}")
     def trace(pid: str, req_id: str, branch: str = "main", a: Access = Depends(read)):
@@ -581,7 +588,7 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     # ---- remote MCP server (Streamable HTTP + OAuth 2.1) ----
     mcp = build_remote_mcp(Services(store=store, commit_ops=commit_ops, commit_version=commit_version,
-                                    ai_command=run_ai_command))
+                                    ai_command=run_ai_command, codegraph=codegraph))
     provider: auth.ArchFlowOAuthProvider = mcp._archflow_provider
     app.state.mcp = mcp
 
