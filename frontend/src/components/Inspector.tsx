@@ -3,6 +3,26 @@ import { VENDOR_STYLE } from "./Palette";
 import { Field } from "./Field";
 import { TYPE_META } from "./ArchNode";
 import { LldViews } from "./LldViews";
+import { codeUrl } from "./CodeDialog";
+
+/** Where a component lives in the code (props written by "Reconstruct from code", or set by hand). */
+function CodeTrace({ props }: { props: Record<string, string> }) {
+  const paths = (props.code_paths ?? "").split(",").map((p) => p.trim()).filter(Boolean);
+  if (!paths.length && !props.symbols) return null;
+  const repo = props.code_repo, sha = props.code_commit;
+  return (
+    <div className="field code-trace">
+      <span>Code{props.symbols ? ` · ${props.symbols} symbols` : ""}{props.files ? ` · ${props.files} files` : ""}</span>
+      {paths.map((p) => {
+        const href = codeUrl(repo, sha, p);
+        return href ? <a key={p} className="mono" href={href} target="_blank" rel="noreferrer">{p}</a>
+          : <span key={p} className="mono">{p}</span>;
+      })}
+      {props.entry_point && <span className="muted">entry point: <span className="mono">{props.entry_point}</span></span>}
+      {(repo || sha) && <span className="muted small">{repo ?? ""}{sha ? ` @ ${sha.slice(0, 10)}` : ""}</span>}
+    </div>
+  );
+}
 
 interface Props {
   catalog: Catalog | null;
@@ -92,6 +112,7 @@ export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pi
           </div>
         </div>
         </fieldset>
+        {n.props && <CodeTrace props={n.props} />}
         <div className="insp-actions">
           {onOpenInternals && n.type !== "note" && (
             <button onClick={() => onOpenInternals(n.id)} title="Open this component's internal (low-level) diagram">

@@ -2,6 +2,7 @@ import type { Activity, Analysis, ArchOption, Branch, ChatCard, ChatTurn, ApiTok
 import type { Decision, Evaluation } from "./types";
 import type { AIProvider, AISettings, Invite, InviteInfo, Me, Member, Role } from "./types";
 import type { ComponentViews, LldResult } from "./types";
+import type { CodeGraphRecord, CodeJob, CodeOverview, DriftResult, ImpactResult, ReconstructResult } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, public data: any) {
@@ -11,6 +12,18 @@ export class ApiError extends Error {
 
 /** Fired on any 401 so the app can show the sign-in screen (session expired or signed out elsewhere). */
 export const UNAUTHORIZED_EVENT = "archflow:unauthorized";
+
+/** Upload a file as the raw request body (the code-graph JSON can be large; no parsing in the browser). */
+async function upload<T>(path: string, file: Blob, params?: Record<string, string>): Promise<T> {
+  const qs = params && Object.keys(params).length ? "?" + new URLSearchParams(params).toString() : "";
+  const res = await fetch(`/api${path}${qs}`, {
+    method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: file,
+  });
+  const data = await res.json().catch(() => null);
+  if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+  if (!res.ok) throw new ApiError(res.status, data);
+  return data as T;
+}
 
 async function call<T>(method: string, path: string, body?: unknown, params?: Record<string, string>): Promise<T> {
   const qs = params ? "?" + new URLSearchParams(params).toString() : "";
@@ -117,4 +130,16 @@ export const api = {
     call<LldResult>("POST", `/projects/${pid}/nodes/${encodeURIComponent(nodeId)}/lld`, { actor, replace }, b(branch)),
   views: (pid: string, branch: string, nodeId: string) =>
     call<ComponentViews>("GET", `/projects/${pid}/nodes/${encodeURIComponent(nodeId)}/views`, undefined, b(branch)),
+  // ---- repository analysis (code graph) ----
+  codeOverview: (pid: string) => call<CodeOverview>("GET", `/projects/${pid}/codegraph`),
+  codeAnalyze: (pid: string, repo_url: string) => call<CodeJob>("POST", `/projects/${pid}/codegraph/analyze`, { repo_url }),
+  codeJob: (pid: string, id: string) => call<CodeJob>("GET", `/projects/${pid}/codegraph/jobs/${id}`),
+  codeUpload: (pid: string, file: Blob, repo_url?: string, commit_sha?: string) =>
+    upload<CodeGraphRecord>(`/projects/${pid}/codegraph/upload`, file,
+      Object.fromEntries(Object.entries({ repo_url, commit_sha }).filter(([, v]) => v)) as Record<string, string>),
+  codeReconstruct: (pid: string, id: string) =>
+    call<ReconstructResult>("POST", `/projects/${pid}/codegraph/${id}/reconstruct`, { refine: true }),
+  codeDrift: (pid: string, branch: string) => call<DriftResult>("GET", `/projects/${pid}/codegraph/drift`, undefined, b(branch)),
+  codeImpact: (pid: string, branch: string, files: string[]) =>
+    call<ImpactResult>("POST", `/projects/${pid}/codegraph/impact`, { files, branch }),
 };

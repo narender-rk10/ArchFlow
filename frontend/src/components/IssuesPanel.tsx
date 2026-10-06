@@ -4,6 +4,7 @@ interface Props {
   analysis: Analysis | null;
   onFocus: (issue: Issue) => void;
   onAsk: (question: string) => void;
+  onOpenCode?: () => void;
 }
 
 function Meter({ label, value }: { label: string; value: number }) {
@@ -16,10 +17,10 @@ function Meter({ label, value }: { label: string; value: number }) {
   );
 }
 
-export function IssuesPanel({ analysis, onFocus, onAsk }: Props) {
+export function IssuesPanel({ analysis, onFocus, onAsk, onOpenCode }: Props) {
   if (!analysis) return <div className="panel"><p className="muted small pad">Analysing…</p></div>;
   const h = analysis.health;
-  const all = [...analysis.architecture_issues, ...analysis.requirement_issues];
+  const all = [...analysis.architecture_issues, ...analysis.requirement_issues, ...(analysis.drift_issues ?? [])];
   const order = { error: 0, warning: 1, info: 2 } as const;
   all.sort((a, b) => order[a.severity] - order[b.severity]);
 
@@ -30,6 +31,11 @@ export function IssuesPanel({ analysis, onFocus, onAsk }: Props) {
         <Meter label="Requirements approved" value={h.requirements_approved} />
         <Meter label="Traceability" value={h.traceability} />
         <Meter label="Architecture checks" value={h.architecture_score} />
+        {h.code_alignment !== undefined && (
+          <button className="link code-meter" onClick={onOpenCode} title="Design vs code (latest repository analysis)">
+            <Meter label="Matches the code" value={h.code_alignment} />
+          </button>
+        )}
         <div className="small muted">
           {h.counts.requirements} requirements · {h.counts.components} components · {h.counts.connections} connections
         </div>
@@ -43,7 +49,7 @@ export function IssuesPanel({ analysis, onFocus, onAsk }: Props) {
       <ul className="issue-list">
         {all.map((i, k) => (
           <li key={k} className={`issue ${i.severity}`} onClick={() => onFocus(i)}>
-            <div><span className="sev">{i.severity}</span> {i.message}</div>
+            <div><span className="sev">{i.code.startsWith("drift_") ? `code · ${i.severity}` : i.severity}</span> {i.message}</div>
             {i.suggestion && <div className="small muted">{i.suggestion}</div>}
           </li>
         ))}

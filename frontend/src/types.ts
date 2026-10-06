@@ -119,7 +119,11 @@ export interface Analysis {
     requirements_complete: number; requirements_approved: number; traceability: number; architecture_score: number;
     counts: { requirements: number; components: number; connections: number };
     issues: { errors: number; warnings: number; info: number };
+    /** Present when the project has a code analysis: how well the design matches the code (0-100). */
+    code_alignment?: number;
   };
+  /** Designed-vs-code drift (only when the project has a code analysis). */
+  drift_issues?: Issue[];
 }
 
 interface DiffSection { added: { id: string; name: string }[]; removed: { id: string; name: string }[]; changed: { id: string; name: string; fields: { field: string; from: unknown; to: unknown }[] }[] }
@@ -189,4 +193,51 @@ export interface ComponentViews {
     relations: { from: string; to: string; label: string }[]; mermaid: string;
   };
   sequence: { mermaid: string };
+}
+
+// ---- repository analysis (code graph) ----
+export interface CodeSummary {
+  stats: { files?: number; symbols?: number; edges?: number; communities?: number };
+  generator: { tool?: string; version?: string };
+  root_name: string;
+  languages: Record<string, number>;
+  infrastructure: { key: string; label: string; category: string; technology: string; files: number; evidence: string[] }[];
+  frameworks: { name: string; kind: string; files: number }[];
+  entry_points: { path: string; kind: string; name: string }[];
+  manifests: { path: string; kind: string; name: string }[];
+  compose_services: { name: string; image: string; build: string | null }[];
+  dockerfiles: number; k8s: number; terraform: number;
+  communities: { id: number; size: number; label: string; paths: string[] }[];
+  god_nodes: { id: string; name: string; degree: number }[];
+  import_cycles: number;
+}
+export interface CodeGraphRecord {
+  id: string; project_id: string; source: "git" | "local" | "upload"; repo_url: string | null; commit_sha: string | null;
+  created_at: string; created_by: string; status: string; summary?: CodeSummary;
+}
+export interface CodeOverview {
+  available: boolean; local_repos: boolean; latest: (CodeGraphRecord & { summary: CodeSummary }) | null;
+  graphs: CodeGraphRecord[]; cli: string; install_hint: string | null;
+}
+export interface CodeJob {
+  id: string; project_id: string; status: "queued" | "running" | "done" | "failed"; phase: string; source: string;
+  repo_url: string | null; created_by: string; error: string | null; code_graph_id: string | null; commit_sha?: string | null;
+}
+export interface DriftResult {
+  branch: string; code_graph_id: string; repo_url: string | null; commit_sha: string | null; alignment: number;
+  issues: (Issue & { code_node_ids: string[] })[];
+  matches: { node_id: string; name: string; code_node_id: string; code_name: string; score: number }[];
+  code_only: string[]; design_only: string[];
+}
+export interface ImpactResult {
+  branch: string; changed_files: string[]; unmatched_files: string[]; seed_symbols: number;
+  affected_symbols: { id: string; name: string; file: string; line: number | null; depth: number; via: string }[];
+  affected_symbol_count: number; affected_files: string[];
+  code_components: { id: string; name: string }[];
+  components: { id: string; name: string; type: string }[];
+  requirements: { id: string; title: string; priority: string; status: string }[];
+}
+export interface ReconstructResult {
+  branch: string; version: number; code_graph_id: string; engine: string; components: number; connections: number;
+  requirements_linked: number;
 }

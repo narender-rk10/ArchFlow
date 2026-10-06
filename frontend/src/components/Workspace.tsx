@@ -13,6 +13,7 @@ import type {
 import { can } from "../types";
 import { UserMenu } from "./UserMenu";
 import { ArchNodeComponent, TYPE_META, type ArchFlowNode, type DiffMark } from "./ArchNode";
+import { CodeDialog } from "./CodeDialog";
 import { CommandBar, type LogEntry } from "./CommandBar";
 import { ConnectDialog } from "./ConnectDialog";
 import { DecisionsPanel } from "./DecisionsPanel";
@@ -65,6 +66,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const [toasts, setToasts] = useState<{ id: number; text: string }[]>([]);
   const [loadError, setLoadError] = useState("");
   const [connectOpen, setConnectOpen] = useState(false);
+  const [codeOpen, setCodeOpen] = useState(false);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [converting, setConverting] = useState(false);
   const [ai, setAi] = useState<{ available: boolean; model: string } | null>(null);
@@ -507,6 +509,8 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           <option value="aws">AWS</option><option value="azure">Azure</option>
           <option value="gcp">Google Cloud</option><option value="oss">Open source (self-hosted)</option>
         </select>
+        <button className="small" onClick={() => setCodeOpen(true)}
+          title="Analyse a repository: reconstruct its architecture, check drift against this design and change impact">⟨/⟩ Code</button>
         <button className="small" onClick={() => setConnectOpen(true)} title="Connect Claude, Codex or other agents over MCP">⌘ Connect AI</button>
         {themeToggle}
         <div className="presence">
@@ -547,7 +551,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           <RequirementsPanel state={state} issues={analysis?.requirement_issues ?? []} traced={traced} onTrace={setTraced} readOnly={readOnly}
             send={send} onPrompt={(rid) => setPromptFor({ nodeIds: [], requirementIds: [rid] })} />
         )}
-        {tab === "issues" && <IssuesPanel analysis={analysis} onFocus={focusIssue} onAsk={runAsk} />}
+        {tab === "issues" && <IssuesPanel analysis={analysis} onFocus={focusIssue} onAsk={runAsk} onOpenCode={() => setCodeOpen(true)} />}
         {tab === "versions" && (
           <VersionsPanel versions={versions} activity={activity} branch={branch} headVersion={headVersion} diff={diff}
             onCommit={commit} onDiff={showDiff} onRestore={restore} onBranchFrom={(v, name) => createBranch(name, v)} />
@@ -629,6 +633,11 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
 
       {connectOpen && project && (
         <ConnectDialog orgId={project.org_id ?? "org-default"} canManage={can(role, "admin")} onClose={() => setConnectOpen(false)} />
+      )}
+      {codeOpen && (
+        <CodeDialog pid={pid} branch={branch} readOnly={readOnly} toast={toast} onClose={() => setCodeOpen(false)}
+          onOpenBranch={(name) => { if (name !== branch) onBranch(name); }}
+          onFocus={(i) => { setTab("issues"); focusIssue(i); }} />
       )}
       {promptFor && <PromptDialog pid={pid} branch={branch} nodeIds={promptFor.nodeIds} requirementIds={promptFor.requirementIds}
         onClose={() => setPromptFor(null)} />}
