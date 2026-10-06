@@ -115,6 +115,7 @@ uv run archflow-codegraph ../path/to/repo -o archflow-codegraph.json
 |---|---|---|
 | `ARCHFLOW_CODEGRAPH_TIMEOUT` | `600` | Seconds the analysis worker process may run |
 | `ARCHFLOW_ALLOW_LOCAL_REPOS` | off | `1` lets developers analyse server-local directories (`local_path`); self-hosted/dev only |
+| `ARCHFLOW_ALLOW_UNPINNED_GIT` | off | Analysing Git URLs needs git 2.37+ (DNS pinning against rebinding). With older git, URL analysis is refused unless this is `1`; developer machines only |
 | `ARCHFLOW_CODEGRAPH_MAX_REPO_MB` / `_CLONE_TIMEOUT` | `500` / `180` | Clone size cap and time limit |
 | `ARCHFLOW_CODEGRAPH_MAX_UPLOAD_MB` | `25` | Upload size limit |
 | `ARCHFLOW_CODEGRAPH_JOBS` / `_PROCS` | `1` / `2` | Concurrent analyses / parser processes per analysis |

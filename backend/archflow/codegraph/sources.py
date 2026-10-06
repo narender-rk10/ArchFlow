@@ -135,11 +135,31 @@ def _git_env() -> dict[str, str]:
     return env
 
 
+PINNING_GIT = (2, 37)  # first git release with http.curloptResolve; older versions silently ignore it
+
+
+def git_version() -> tuple[int, int]:
+    out = subprocess.run(["git", "--version"], capture_output=True, text=True, timeout=10).stdout
+    m = re.search(r"(\d+)\.(\d+)", out)
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
+def unpinned_git_allowed() -> bool:
+    return os.environ.get("ARCHFLOW_ALLOW_UNPINNED_GIT", "").strip().lower() in ("1", "true", "yes")
+
+
 def clone(url: str, dest: Path, *, resolver=resolve_host) -> str:
     """Shallow-clone a public repository into ``dest`` (must not exist). Returns the commit SHA."""
     norm, host, ip = validate_repo_url(url, resolver)
     if shutil.which("git") is None:
         raise RuntimeError("git is not installed on the server")
+    # Without DNS pinning a hostname could resolve to a public address for our check and to an internal one when
+    # git connects (DNS rebinding). Older git silently ignores the pinning option, so fail closed unless the
+    # operator explicitly accepts that risk (e.g. on a developer machine).
+    if git_version() < PINNING_GIT and not unpinned_git_allowed():
+        raise SourceError(f"analysing Git URLs safely needs git {PINNING_GIT[0]}.{PINNING_GIT[1]} or newer on the "
+                          "server (for DNS pinning). Upgrade git, or set ARCHFLOW_ALLOW_UNPINNED_GIT=1 for local "
+                          "development only.")
     pin = f"{host}:443:[{ip}]" if ":" in ip else f"{host}:443:{ip}"
     cmd = ["git", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "http.followRedirects=false",
            "-c", f"http.curloptResolve={pin}", "-c", "core.symlinks=false", "-c", "core.hooksPath=/dev/null",
