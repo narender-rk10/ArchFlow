@@ -49,7 +49,8 @@ export function IssuesPanel({ analysis, onFocus, onAsk, onOpenCode }: Props) {
       <ul className="issue-list">
         {all.map((i, k) => (
           <li key={k} className={`issue ${i.severity}`} onClick={() => onFocus(i)}>
-            <div><span className="sev">{i.code.startsWith("drift_") ? `code · ${i.severity}` : i.severity}</span> {i.message}</div>
+            <div><span className="sev">{i.code.startsWith("drift_") ? `code · ${i.severity}`
+              : i.code === "completeness" ? `missing · ${i.severity}` : i.severity}</span> {i.message}</div>
             {i.suggestion && <div className="small muted">{i.suggestion}</div>}
           </li>
         ))}
