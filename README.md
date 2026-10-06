@@ -14,7 +14,7 @@ is validated, versioned, conflict-checked and shown live to everyone.
 | Area | What works |
 |---|---|
 | Project workspace | Projects, templates (blank, AI customer-support), per-branch working state |
-| Guided design chat | Describe an idea; ArchFlow asks multiple-choice questions (single/multi-select, recommended option, “Other”), then offers 2–4 ranked architectures with pros/cons, cost and complexity. Pick one to apply it to the canvas or open it as a draft branch. Works offline with a built-in question bank; adaptive with an LLM |
+| Guided design chat | Describe an idea; ArchFlow asks multiple-choice questions (single/multi-select, recommended option, “Other”), then offers 2–4 (normally 3) ranked architectures with pros/cons, cost and complexity. Every option is reviewed before it is shown: the flow and completeness checks run on it, the LLM gets one repair call per flawed option with the concrete issues, rules fix what is left, and each option shows what was fixed. Pick one to apply it to the canvas or open it as a draft branch. Works offline with a built-in question bank; adaptive with an LLM |
 | Accounts & organizations | Email + password accounts, HttpOnly session cookies, orgs with six roles (owner → viewer), invite links, org-scoped projects, per-org AI provider keys (encrypted) |
 | Requirement model | Structured FR/NFR objects: actors, acceptance criteria, priority, status, category |
 | Requirement completeness | Lint for vague terms ("fast", "scalable"…), missing acceptance criteria/actors, missing NFR categories |
@@ -31,7 +31,7 @@ is validated, versioned, conflict-checked and shown live to everyone.
 | Versioning | Commit snapshots, version list, restore, create branch from any version, switch branches |
 | Architecture & requirement diff | Structural diff between any versions/branches, rendered **on the canvas** (added / changed / removed ghosts) plus text |
 | Traceability | Requirement ↔ component links; click a requirement to highlight everything implementing it; untraced requirements flagged |
-| Architecture validation | Orphans, client→DB access, shared databases, unguarded LLMs, missing auth or PII controls, missing gateway |
+| Architecture validation | Orphans, client→DB access, shared databases, unguarded LLMs, missing auth or PII controls, missing gateway; data-flow checks (unauthenticated entry points, queues without producers/consumers, realtime channels without a return path, data stores without writers, unreachable services); requirement-driven checks (key management for encrypted PII, replication under an availability target, cache/queue under peak load, erasure vs. immutable event logs); domain completeness checklists (delivery marketplace, marketplace, e-commerce, SaaS, fintech, AI assistant, RAG, multi-agent, IoT, media) |
 | Health dashboard | Requirements completeness/approval, traceability %, architecture score, issue counts |
 | Vibe coding | Implementation brief for Claude Code / Codex / Gemini CLI / Aider from the whole system, selected components, or a requirement (pulls in traced context, interfaces, stubs, acceptance criteria → tests) |
 | Remote MCP server | Streamable HTTP at `/mcp` with OAuth 2.1 (works with Claude Code, Claude.ai, Claude Desktop and other MCP clients) or personal access tokens; 33 tools, org-scoped, read-only or read & edit. Agent edits show up live on everyone's canvas |
@@ -243,6 +243,8 @@ backend/archflow/
   ops.py         the single mutation pipeline + conflict detection
   diff.py        structural diff
   analysis.py    requirement lint, architecture validation, traceability, health
+  checklists.py  domain completeness checklists (capabilities, requirement areas)
+  review.py      deterministic review/repair of proposed architecture options
   ai.py          Claude tool-use → ops; offline command parser
   vibe.py        implementation-brief generator
   templates.py   starter architectures
