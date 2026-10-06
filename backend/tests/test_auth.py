@@ -343,6 +343,7 @@ def test_secrets_box_round_trip(monkeypatch):
 
 def test_ai_settings_endpoints(app, owner, monkeypatch):
     dev = member_client(app, owner, "developer", "dev@example.com")
+    monkeypatch.delenv("ARCHFLOW_SECRET_KEY", raising=False)  # independent of a developer's local .env
     r = owner.get("/api/orgs/org-default/ai-settings")
     assert r.status_code == 503 and "ARCHFLOW_SECRET_KEY" in r.json()["detail"]
     monkeypatch.setenv("ARCHFLOW_SECRET_KEY", TEST_SECRET)
