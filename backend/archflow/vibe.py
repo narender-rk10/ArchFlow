@@ -41,7 +41,7 @@ def build_prompt(state: ProjectState, project_name: str, node_ids: list[str], re
 
     selected = set(node_ids)
     edges = [e for e in state.edges.values() if e.source in selected or e.target in selected]
-    boundary = sorted({e.source for e in edges} | {e.target for e in edges} - selected)
+    boundary = sorted(({e.source for e in edges} | {e.target for e in edges}) - selected)
     tech = sorted({state.nodes[n].technology for n in node_ids if state.nodes[n].technology})
     agent = TARGETS.get(target, TARGETS["generic"])
 

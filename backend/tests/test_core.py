@@ -155,3 +155,24 @@ def test_api_flow():
         assert msg["type"] == "state" and msg["actor"] == "Owner" and "kafka" in msg["state"]["nodes"]
 
     assert client.get(f"/api/projects/{pid}/activity").json()[0]["actor"] == "Owner"  # client-supplied actor ignored
+
+
+def test_vibe_brief_external_list_excludes_selected_components():
+    """Regression: components being implemented must not also be listed as external dependencies."""
+    state = build_template("ai-customer-support")
+    text = build_prompt(state, "Demo", ["order-service"], [])
+    external = text.split("## External components", 1)[1].split("##", 1)[0]
+    assert "Order Service" not in external
+    assert "Orders DB" in external or "Orders MCP Server" in external
+
+
+def test_nfr_coverage_reads_wording_not_just_category():
+    """Regression: a 'Compliance' NFR about GDPR/PII encryption counts for privacy and security."""
+    state, _ = apply_ops(ProjectState(), [{"op": "add_requirement", "requirement": {
+        "title": "EU GDPR Compliance", "kind": "non_functional", "category": "Compliance",
+        "description": "Customer personal data (PII) is encrypted at rest and deleted on request.",
+        "acceptance_criteria": ["Right to be forgotten handled within 30 days"]}}])
+    from archflow.analysis import nfr_coverage
+    assert {"privacy", "security"} <= nfr_coverage(state)
+    codes = {i["code"] for i in full_analysis(state)["architecture_issues"]}
+    assert "pii" not in codes
