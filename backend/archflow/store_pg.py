@@ -26,8 +26,8 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from .models import ProjectState
-from .store import (DECISION_COLS, DECISION_JSON_FIELDS, DEFAULT_ORG_ID, DEFAULT_ORG_NAME, check_decision_fields,
-                    decision_id)
+from .store import (CODE_GRAPH_COLS, DECISION_COLS, DECISION_JSON_FIELDS, DEFAULT_ORG_ID, DEFAULT_ORG_NAME,
+                    check_decision_fields, code_graph_id, decision_id)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 MIGRATION_LOCK_KEY = 0x41524346  # "ARCF": pg_advisory_lock key for the migration runner
@@ -543,3 +543,42 @@ class PostgresStore:
                     f"UPDATE decisions SET {', '.join(sets)}, updated_at = now() WHERE project_id=%s AND id=%s",
                     (*params, pid, did))
         return self.get_decision(pid, did)
+
+    # ---- code graphs (repository analysis) ------------------------------------
+    @staticmethod
+    def _code_graph(row: dict[str, Any] | None, with_graph: bool = False) -> dict[str, Any] | None:
+        d = _row(row)
+        if d is None:
+            return None
+        d["summary"] = d.get("summary") or {}
+        if with_graph:
+            d["graph"] = bytes(d["graph"]) if d.get("graph") is not None else None
+        else:
+            d.pop("graph", None)
+        return d
+
+    def add_code_graph(self, pid: str, *, source: str, repo_url: str | None, commit_sha: str | None,
+                       created_by: str, status: str = "ready", summary: dict[str, Any] | None = None,
+                       graph: bytes | None = None) -> dict[str, Any]:
+        gid = code_graph_id()
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO code_graphs (id, project_id, source, repo_url, commit_sha, created_by, status, summary, "
+                "graph) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (gid, pid, source, repo_url, commit_sha, created_by, status, Jsonb(summary or {}), graph))
+        return self.get_code_graph(pid, gid)
+
+    def get_code_graph(self, pid: str, gid: str, with_graph: bool = False) -> dict[str, Any] | None:
+        cols = CODE_GRAPH_COLS + (", graph" if with_graph else "")
+        return self._code_graph(self._one(f"SELECT {cols} FROM code_graphs WHERE project_id=%s AND id=%s", (pid, gid)),
+                                with_graph)
+
+    def list_code_graphs(self, pid: str, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self._all(f"SELECT {CODE_GRAPH_COLS} FROM code_graphs WHERE project_id=%s "
+                         "ORDER BY created_at DESC, id DESC LIMIT %s", (pid, limit))
+        return [self._code_graph(r) for r in rows]
+
+    def latest_code_graph(self, pid: str, with_graph: bool = False) -> dict[str, Any] | None:
+        cols = CODE_GRAPH_COLS + (", graph" if with_graph else "")
+        return self._code_graph(self._one(f"SELECT {cols} FROM code_graphs WHERE project_id=%s AND status='ready' "
+                                          "ORDER BY created_at DESC, id DESC LIMIT 1", (pid,)), with_graph)

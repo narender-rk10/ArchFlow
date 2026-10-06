@@ -163,6 +163,18 @@ CREATE TABLE IF NOT EXISTS decisions (
     PRIMARY KEY (project_id, id),
     UNIQUE (project_id, seq)
 );
+CREATE TABLE IF NOT EXISTS code_graphs (
+    id TEXT PRIMARY KEY,             -- cg-<hex>
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source TEXT NOT NULL,            -- git | local | upload
+    repo_url TEXT,
+    commit_sha TEXT,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ready',
+    summary TEXT NOT NULL DEFAULT '{}',  -- JSON, see codegraph/normalize.summarize
+    graph BLOB                       -- zlib-compressed normalized graph JSON (codegraph/__init__.py)
+);
 """
 
 MEMBERSHIPS_DDL = """
@@ -184,6 +196,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_branch ON activity(project_id, branch, i
 CREATE INDEX IF NOT EXISTS idx_memberships_user ON memberships(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_invites_org ON invites(org_id);
+CREATE INDEX IF NOT EXISTS idx_code_graphs_project ON code_graphs(project_id, created_at);
 """
 
 USER_COLS = "id, email, name, created_at, last_login_at"
@@ -198,6 +211,14 @@ DECISION_FIELDS = ("title", "status", "context", "decision", "consequences", "al
 DECISION_JSON_FIELDS = ("alternatives", "requirement_ids", "node_ids", "evaluation")
 DECISION_COLS = ("id, title, status, context, decision, consequences, alternatives, chosen, requirement_ids, "
                  "node_ids, evaluation, author, created_at, updated_at")
+
+
+# ---- code graphs (repository analysis, shared by both stores) ----
+CODE_GRAPH_COLS = "id, project_id, source, repo_url, commit_sha, created_at, created_by, status, summary"
+
+
+def code_graph_id() -> str:
+    return f"cg-{secrets.token_hex(6)}"
 
 
 def decision_id(seq: int) -> str:
@@ -725,6 +746,43 @@ class Store:
                     f"UPDATE decisions SET {', '.join(sets)}, updated_at=? WHERE project_id=? AND id=?",
                     (*params, now(), pid, did))
         return self.get_decision(pid, did)
+
+    # ---- code graphs (repository analysis) ------------------------------------
+    def _code_graph(self, row, with_graph: bool = False) -> dict[str, Any] | None:
+        if not row:
+            return None
+        d = dict(row)
+        d["summary"] = json.loads(d["summary"] or "{}")
+        if with_graph:
+            d["graph"] = bytes(d["graph"]) if d.get("graph") is not None else None
+        else:
+            d.pop("graph", None)
+        return d
+
+    def add_code_graph(self, pid: str, *, source: str, repo_url: str | None, commit_sha: str | None,
+                       created_by: str, status: str = "ready", summary: dict[str, Any] | None = None,
+                       graph: bytes | None = None) -> dict[str, Any]:
+        gid = code_graph_id()
+        with self.lock, self._conn:
+            self._conn.execute(
+                f"INSERT INTO code_graphs ({CODE_GRAPH_COLS}, graph) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (gid, pid, source, repo_url, commit_sha, now(), created_by, status, json.dumps(summary or {}), graph))
+        return self.get_code_graph(pid, gid)
+
+    def get_code_graph(self, pid: str, gid: str, with_graph: bool = False) -> dict[str, Any] | None:
+        cols = CODE_GRAPH_COLS + (", graph" if with_graph else "")
+        return self._code_graph(self._one(f"SELECT {cols} FROM code_graphs WHERE project_id=? AND id=?", (pid, gid)),
+                                with_graph)
+
+    def list_code_graphs(self, pid: str, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self._all(f"SELECT {CODE_GRAPH_COLS} FROM code_graphs WHERE project_id=? "
+                         "ORDER BY created_at DESC, rowid DESC LIMIT ?", (pid, limit))
+        return [self._code_graph(r) for r in rows]
+
+    def latest_code_graph(self, pid: str, with_graph: bool = False) -> dict[str, Any] | None:
+        cols = CODE_GRAPH_COLS + (", graph" if with_graph else "")
+        return self._code_graph(self._one(f"SELECT {cols} FROM code_graphs WHERE project_id=? AND status='ready' "
+                                          "ORDER BY created_at DESC, rowid DESC LIMIT 1", (pid,)), with_graph)
 
 
 def default_store():

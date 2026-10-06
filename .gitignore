@@ -19,3 +19,6 @@ Thumbs.db
 
 # Claude Code local state (agent worktrees, settings)
 .claude/
+
+# Graphify cache/output (repository analysis runs)
+graphify-out/
