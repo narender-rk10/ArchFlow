@@ -430,7 +430,7 @@ def llm_turn(turns: list[dict[str, Any]], state: ProjectState, org_id: str | Non
         options = _clean_options(q.get("options") or [])
         if len(options) >= 2:
             return {"message": data.get("message", ""), "card": {
-                "type": "question", "id": slugify(q.get("id") or q["question"])[:40] + f"-{asked + 1}",
+                "type": "question", "id": slugify(q.get("id") or q["question"]) + f"-{asked + 1}",
                 "question": q["question"], "why": q.get("why", ""), "multi": bool(q.get("multi")),
                 "options": options, "step": asked + 1, "total": None}}
     archs = [_clean_arch(a, i) for i, a in enumerate(data.get("architectures") or [])]
