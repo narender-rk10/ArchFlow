@@ -210,6 +210,11 @@ plus tool subsets on the same agent, not separate systems.
   uploads only the graph, so source never leaves the machine. It can also import graphs from existing tools
   (Understand-Anything, Graphify, CodeGraph) rather than competing with them.
 - **Drift detection**: designed model vs code-derived model diff, on every push and PR; PR check comments.
+- *Status (MVP):* implemented with Graphify as the parser (`backend/archflow/codegraph/`, optional extra
+  `codegraph`): public-URL shallow clones and server-local dirs (opt-in) analysed in a separate worker process,
+  `archflow-codegraph` CLI + graph upload, normalized graphs in `code_graphs`, reconstruction to a draft branch,
+  drift in the analysis, change impact, REST + MCP tools. Still to do: GitHub App/webhooks, a durable job queue,
+  drift on push/PR with check comments, Helm/serverless/CI parsing.
 
 ### 3.10 Delivery: Jira, prompts, skills, coding agents
 
