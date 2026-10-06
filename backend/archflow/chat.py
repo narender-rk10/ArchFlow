@@ -19,8 +19,9 @@ import logging
 import re
 from typing import Any
 
+from . import checklists, review
 from .models import NODE_TYPES, ProjectState
-from .ops import slugify
+from .ops import slugify, unique_slug
 
 log = logging.getLogger("archflow.chat")
 
@@ -154,9 +155,9 @@ def offline_turn(turns: list[dict[str, Any]], state: ProjectState) -> dict[str, 
 # --------------------------------------------------------------------------- offline architecture composer
 TECH = {
     "aws": {"gateway": "Amazon API Gateway", "auth": "Amazon Cognito", "db": "Amazon RDS PostgreSQL", "docdb": "Amazon DynamoDB",
-            "cache": "ElastiCache Redis", "queue": "Amazon SQS / EventBridge", "stream": "Amazon MSK (Kafka)", "storage": "Amazon S3",
+            "cache": "ElastiCache Redis", "queue": "Amazon SQS", "stream": "Amazon MSK (Kafka)", "storage": "Amazon S3",
             "fn": "AWS Lambda", "container": "Amazon ECS Fargate", "warehouse": "Amazon Redshift", "llm": "Amazon Bedrock (Claude)",
-            "vector": "OpenSearch / pgvector", "cdn": "CloudFront"},
+            "vector": "Amazon OpenSearch Service", "cdn": "CloudFront"},
     "azure": {"gateway": "Azure API Management", "auth": "Microsoft Entra ID", "db": "Azure Database for PostgreSQL", "docdb": "Azure Cosmos DB",
               "cache": "Azure Cache for Redis", "queue": "Azure Service Bus", "stream": "Azure Event Hubs", "storage": "Azure Blob Storage",
               "fn": "Azure Functions", "container": "Azure Container Apps", "warehouse": "Azure Synapse", "llm": "Azure OpenAI",
@@ -165,7 +166,7 @@ TECH = {
             "cache": "Memorystore Redis", "queue": "Cloud Pub/Sub", "stream": "Cloud Pub/Sub", "storage": "Cloud Storage",
             "fn": "Cloud Run functions", "container": "Cloud Run", "warehouse": "BigQuery", "llm": "Vertex AI Gemini",
             "vector": "AlloyDB pgvector", "cdn": "Cloud CDN"},
-    "agnostic": {"gateway": "Kong / NGINX Ingress", "auth": "Keycloak", "db": "PostgreSQL", "docdb": "MongoDB",
+    "agnostic": {"gateway": "Kong", "auth": "Keycloak", "db": "PostgreSQL", "docdb": "MongoDB",
                  "cache": "Redis", "queue": "RabbitMQ", "stream": "Apache Kafka", "storage": "MinIO (S3 API)",
                  "fn": "Knative", "container": "Kubernetes Deployment", "warehouse": "ClickHouse", "llm": "LLM via LiteLLM (Gemini/Claude)",
                  "vector": "pgvector", "cdn": "Cloudflare"},
@@ -276,8 +277,9 @@ def _components(style: str, answers: dict, t: dict[str, str]) -> tuple[list[dict
     # Messaging layer
     if style == "event_driven":
         add("bus", "Event Stream", "queue", t["stream"], 3, "Domain events between services")
-        for s in services:
-            link(s, "bus", "events")
+        for s in services[:-1]:
+            link(s, "bus", "publish events")
+        link("bus", services[-1], "consume")  # the notification service reacts to domain events
     elif style in ("microservices", "serverless") or _has(answers, "channels", "messaging"):
         add("queue", "Job Queue", "queue", t["queue"], 3, "Async jobs and retries")
         link(services[0], "queue", "enqueue")
@@ -293,7 +295,7 @@ def _components(style: str, answers: dict, t: dict[str, str]) -> tuple[list[dict
         link("users-svc", "users-db", "SQL")
         link("core-svc", "core-db", "SQL")
     scale = (answers.get("scale", {}).get("option_ids") or ["m"])[0]
-    if scale in ("l", "xl") or style == "microservices":
+    if scale != "s" or style == "microservices":  # anything beyond a pilot needs a cache to absorb peaks
         add("cache", "Cache", "cache", t["cache"], 3)
         link(services[0] if style == "monolith" else "core-svc", "cache", "RESP")
     if _has(answers, "data", "files"):
@@ -333,6 +335,11 @@ def _requirements_from_answers(idea: str, answers: dict) -> list[dict[str, Any]]
         reqs.append({"title": f"AI: {', '.join(ai)}", "description": f"Provide {', '.join(ai).lower()}.", "kind": "functional",
                      "priority": "medium", "actors": users,
                      "acceptance_criteria": ["Answers cite their sources", "Agent tool calls are permission-checked and logged"]})
+    if _has(answers, "priority", "compliance"):
+        reqs.append({"title": "Personal data protection", "kind": "non_functional", "category": "privacy", "priority": "high",
+                     "description": "Personal data is encrypted at rest and in transit, access is audit-logged and data "
+                                    "subjects can have their data deleted.",
+                     "acceptance_criteria": ["All PII is encrypted with managed keys", "Deletion requests are completed within 30 days"]})
     pr = answers.get("priority", {}).get("labels")
     if pr:
         reqs.append({"title": f"Priority: {pr[0]}", "description": f"Architecture decisions optimize for {pr[0].lower()}.",
@@ -341,19 +348,31 @@ def _requirements_from_answers(idea: str, answers: dict) -> list[dict[str, Any]]
     return reqs
 
 
-def compose_architectures(idea: str, answers: dict) -> dict[str, Any]:
+def _context(idea: str, answers: dict) -> str:
+    """Text used to detect the domain: the idea plus the chosen answers (not the options that were not chosen)."""
+    return " ".join([idea] + [" ".join(a.get("labels") or []) for a in answers.values()])
+
+
+def compose_architectures(idea: str, answers: dict, styles: list[str] | None = None) -> dict[str, Any]:
+    """Offline composer: up to three styles ranked by the answers, each completed for the detected domain
+    (checklist capabilities) and checked/repaired by the deterministic review."""
     cloud = _cloud(answers)
     t = TECH[cloud]
-    ranked = _rank(answers)[:3]
+    ranked = styles or _rank(answers)[:3]
+    context = _context(idea, answers)
+    requirements = _requirements_from_answers(idea, answers)
+    requirements += review.requirement_additions(context, requirements)
     options = []
     for i, style in enumerate(ranked):
         name, summary, pros, cons, best_for, cost, complexity = STYLES[style]
         comps, conns = _components(style, answers, t)
-        options.append({"id": style, "name": name, "style": style, "summary": summary, "pros": pros, "cons": cons,
-                        "best_for": best_for, "cost": cost, "complexity": complexity, "recommended": i == 0,
-                        "components": comps, "connections": conns})
+        option = {"id": style, "name": name, "style": style, "summary": summary, "pros": pros, "cons": cons,
+                  "best_for": best_for, "cost": cost, "complexity": complexity, "recommended": i == 0,
+                  "components": comps, "connections": conns}
+        review.review_option(option, requirements, context, cloud=cloud)
+        options.append(option)
     return {"type": "architectures", "id": "architectures", "title": f"Architecture options ({cloud.upper() if cloud != 'agnostic' else 'cloud-agnostic'})",
-            "options": options, "requirements": _requirements_from_answers(idea, answers)}
+            "options": options, "requirements": requirements}
 
 
 # --------------------------------------------------------------------------- LLM interviewer
@@ -492,8 +511,10 @@ def next_turn(turns: list[dict[str, Any]], state: ProjectState, org_id: str | No
 
 # --------------------------------------------------------------------------- applying a chosen architecture
 def architecture_ops(state: ProjectState, option: dict[str, Any], requirements: list[dict[str, Any]],
-                     replace: bool = True) -> list[dict[str, Any]]:
-    """Operations that put a chosen architecture (and its requirements) onto the canvas."""
+                     replace: bool = True, ids_out: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """Operations that put a chosen architecture (and its requirements) onto the canvas.
+
+    ``ids_out``, if given, is filled with component key → node id."""
     ops: list[dict[str, Any]] = []
     if replace:
         # Removing a top-level component also removes its internal (LLD) elements.
@@ -541,6 +562,8 @@ def architecture_ops(state: ProjectState, option: dict[str, Any], requirements: 
                 "technology": c.get("technology", ""), "description": c.get("description", ""),
                 "position": {"x": i * COL_X - width / 2, "y": layer * LAYER_Y},
                 "requirement_ids": _link_requirements(c, linked)}})
+    if ids_out is not None:
+        ids_out.update(ids)
     seen = set()
     for e in option.get("connections") or []:
         a, b = ids.get(e.get("from")), ids.get(e.get("to"))
