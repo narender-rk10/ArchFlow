@@ -250,7 +250,10 @@ plus tool subsets on the same agent, not separate systems.
 ### 3.13 Tenancy, auth, permissions
 
 - Org → projects → members. Roles: Owner, Admin, Architect, Developer, Reviewer, Viewer; per-project overrides.
-- Auth: **WorkOS AuthKit** (generous free tier, enterprise SSO/SCIM when needed) or self-hosted Keycloak
+- **Implemented (v1):** email + password accounts (scrypt), cookie sessions, org roles enforced on every API route,
+  invite links, CSRF/CORS origin checks, signed collab tickets (read-only for viewers/reviewers), MCP consent bound
+  to the signed-in user with role-capped scopes, per-org encrypted AI keys. See README "Accounts, roles and security".
+- Next: SSO via **WorkOS AuthKit** (generous free tier, enterprise SSO/SCIM when needed) or self-hosted Keycloak
   if we want zero vendor cost. Postgres RLS on `org_id` for defense in depth.
 - Audit log of every operation, plus approvals (draft → review → approved) per object type.
 

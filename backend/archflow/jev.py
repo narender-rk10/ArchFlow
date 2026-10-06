@@ -460,7 +460,7 @@ def evaluate(requirements: ProjectState, alternatives: dict[str, ProjectState],
             notes.append(f"Jev unavailable: {exc}")
     else:
         notes.append("JEV_API_KEY not set")
-    if llm.available():
+    if llm.available(org_id):
         try:
             out = evaluate_llm(requirements, alternatives, org_id=org_id)
             out["notes"] = notes

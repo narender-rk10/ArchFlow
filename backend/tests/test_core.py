@@ -1,7 +1,7 @@
 import os
 
 import pytest
-from fastapi.testclient import TestClient
+from authhelp import authed_client, ws_headers
 
 os.environ.setdefault("ARCHFLOW_DB", ":memory:")
 os.environ["ARCHFLOW_AI"] = "offline"
@@ -119,7 +119,7 @@ def test_vibe_prompt_pulls_in_trace():
 
 
 def test_api_flow():
-    client = TestClient(create_app(Store(":memory:")))
+    client = authed_client(create_app(Store(":memory:")))
     p = client.post("/api/projects", json={"name": "Demo", "template": "ai-customer-support"}).json()
     pid = p["id"]
     data = client.get(f"/api/projects/{pid}").json()
@@ -147,11 +147,11 @@ def test_api_flow():
     assert "redis" not in client.get(f"/api/projects/{pid}").json()["state"]["nodes"]
 
     # realtime: a websocket client sees state broadcasts
-    with client.websocket_connect(f"/ws/{pid}/main?name=Tester") as ws:
+    with client.websocket_connect(f"/ws/{pid}/main", headers=ws_headers(client)) as ws:
         assert ws.receive_json()["type"] == "hello"
         assert ws.receive_json()["type"] == "presence"
-        client.post(f"/api/projects/{pid}/ops", json={"ops": [{"op": "add_node", "node": {"name": "Kafka"}}], "actor": "bob"})
+        client.post(f"/api/projects/{pid}/ops", json={"ops": [{"op": "add_node", "node": {"name": "Kafka"}}], "actor": "spoofed"})
         msg = ws.receive_json()
-        assert msg["type"] == "state" and msg["actor"] == "bob" and "kafka" in msg["state"]["nodes"]
+        assert msg["type"] == "state" and msg["actor"] == "Owner" and "kafka" in msg["state"]["nodes"]
 
-    assert client.get(f"/api/projects/{pid}/activity").json()[0]["actor"] == "bob"
+    assert client.get(f"/api/projects/{pid}/activity").json()[0]["actor"] == "Owner"  # client-supplied actor ignored

@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { ApiToken, User } from "../types";
+import type { ApiToken } from "../types";
 
-interface Props { orgId: string; orgName?: string; user: User; onClose: () => void }
+interface Props { orgId: string; orgName?: string; canManage: boolean; onClose: () => void }
 
-function Copy({ text, label = "Copy" }: { text: string; label?: string }) {
+export function Copy({ text, label = "Copy" }: { text: string; label?: string }) {
   const [done, setDone] = useState(false);
   return (
     <button type="button" className="small" onClick={async () => {
@@ -25,7 +25,7 @@ function Snippet({ code }: { code: string }) {
 const ago = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : "never");
 
 /** How to connect Claude and other MCP clients, plus personal access tokens and connected apps. */
-export function ConnectDialog({ orgId, orgName, user, onClose }: Props) {
+export function ConnectDialog({ orgId, orgName, canManage, onClose }: Props) {
   const [url, setUrl] = useState("");
   const [tab, setTab] = useState<"claude-code" | "claude-ai" | "other">("claude-code");
   const [tokens, setTokens] = useState<ApiToken[]>([]);
@@ -36,7 +36,7 @@ export function ConnectDialog({ orgId, orgName, user, onClose }: Props) {
   const [error, setError] = useState("");
   const [org, setOrg] = useState(orgName ?? orgId);
 
-  const load = () => api.tokens(orgId).then(setTokens).catch((e) => setError(e.message));
+  const load = () => { if (canManage) api.tokens(orgId).then(setTokens).catch((e) => setError(e.message)); };
   useEffect(() => {
     api.mcpInfo().then((i) => setUrl(i.url)).catch(() => setUrl(`${location.protocol}//${location.hostname}:8000/mcp`));
     api.orgs().then((os) => setOrg(os.find((o) => o.id === orgId)?.name ?? orgId)).catch(() => {});
@@ -46,7 +46,7 @@ export function ConnectDialog({ orgId, orgName, user, onClose }: Props) {
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const t = await api.createToken(orgId, name.trim(), user.name, access, expiry ? Number(expiry) : null);
+      const t = await api.createToken(orgId, name.trim(), access, expiry ? Number(expiry) : null);
       setCreated(t.token);
       setName("");
       load();
@@ -106,6 +106,11 @@ export function ConnectDialog({ orgId, orgName, user, onClose }: Props) {
           </div>
         )}
 
+        {!canManage && (
+          <p className="muted small">Personal access tokens and the list of connected apps are managed by your organization's admins.
+            You can still connect through the browser sign-in above; the agent gets at most your own access level.</p>
+        )}
+        {canManage && (<>
         <h4>Personal access tokens</h4>
         {created && (
           <div className="token-created">
@@ -129,6 +134,7 @@ export function ConnectDialog({ orgId, orgName, user, onClose }: Props) {
         <h4>Connected apps</h4>
         <p className="muted tiny">Revoking disconnects the app immediately; it has to be approved again to reconnect.</p>
         <TokenTable rows={apps} empty="No apps connected through OAuth yet." onRevoke={revoke} kind="app" />
+        </>)}
         {error && <p className="error small">{error}</p>}
       </div>
     </div>

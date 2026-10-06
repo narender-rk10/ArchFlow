@@ -6,8 +6,8 @@ snapshots. Two interchangeable backends share one public interface:
 * ``Store`` (this module): SQLite, the zero-setup dev default.
 * ``PostgresStore`` (store_pg.py): production, selected when DATABASE_URL is a postgres URL.
 
-Multi-tenancy is minimal for now: every project belongs to an org (default "org-default").
-TODO(auth): user identity is a free-form display name; replace with real users once auth lands.
+Every project belongs to an org (legacy data lives in "org-default"). People are real accounts (``users``)
+with browser ``sessions``; org access is a ``memberships`` row (org, user, role). See users.py / authz.py.
 """
 
 from __future__ import annotations
@@ -34,12 +34,44 @@ CREATE TABLE IF NOT EXISTS orgs (
     name TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS memberships (
-    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    user_name TEXT NOT NULL,  -- TODO(auth): becomes user_id once real auth exists
-    role TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,      -- stored lower-cased
+    name TEXT NOT NULL,
+    password_hash TEXT NOT NULL,     -- scrypt, see users.py
     created_at TEXT NOT NULL,
-    PRIMARY KEY (org_id, user_name)
+    last_login_at TEXT
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,     -- SHA-256 of the cookie value; the token itself is never stored
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    revoked INTEGER NOT NULL DEFAULT 0,
+    user_agent TEXT NOT NULL DEFAULT ''
+);
+{MEMBERSHIPS}
+CREATE TABLE IF NOT EXISTS invites (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    email TEXT,                      -- optional: only this address may accept
+    role TEXT NOT NULL,
+    created_by TEXT,
+    created_at TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    accepted_at TEXT,
+    accepted_by TEXT,
+    revoked INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS org_ai_keys (
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,          -- gemini | anthropic | openai
+    ciphertext TEXT NOT NULL,        -- AES-GCM, see secrets_box.py
+    last4 TEXT NOT NULL,
+    updated_by TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (org_id, provider)
 );
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
@@ -82,7 +114,8 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     token_hash TEXT NOT NULL UNIQUE,
     kind TEXT NOT NULL CHECK (kind IN ('access', 'refresh', 'pat')),
     org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    user_name TEXT NOT NULL,
+    user_name TEXT NOT NULL,         -- display name at creation (for listings)
+    user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
     scopes TEXT NOT NULL,
     client_id TEXT,
     name TEXT NOT NULL DEFAULT '',
@@ -132,12 +165,29 @@ CREATE TABLE IF NOT EXISTS decisions (
 );
 """
 
+MEMBERSHIPS_DDL = """
+CREATE TABLE IF NOT EXISTS memberships (
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (org_id, user_id)
+);
+"""
+SCHEMA = SCHEMA.replace("{MEMBERSHIPS}", MEMBERSHIPS_DDL)
+
 # Indexes are created after in-place migrations, since they may reference migrated columns.
 INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_projects_org ON projects(org_id);
 CREATE INDEX IF NOT EXISTS idx_versions_branch ON versions(project_id, branch);
 CREATE INDEX IF NOT EXISTS idx_activity_branch ON activity(project_id, branch, id DESC);
+CREATE INDEX IF NOT EXISTS idx_memberships_user ON memberships(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_invites_org ON invites(org_id);
 """
+
+USER_COLS = "id, email, name, created_at, last_login_at"
+INVITE_COLS = "id, org_id, email, role, created_by, created_at, expires_at, accepted_at, accepted_by, revoked"
 
 PROJECT_COLS = "id, name, description, created_at, org_id"
 
@@ -201,6 +251,17 @@ class Store:
                 self._conn.execute(
                     f"ALTER TABLE projects ADD COLUMN org_id TEXT NOT NULL DEFAULT '{DEFAULT_ORG_ID}'"
                 )
+            # Accounts (005): memberships used to be keyed by a free-form display name, which cannot be mapped
+            # to a real account. Those rows are dropped; the first person to sign up becomes owner of every org.
+            mcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(memberships)")}
+            if "user_name" in mcols:
+                self._conn.execute("DROP TABLE memberships")
+                self._conn.executescript(MEMBERSHIPS_DDL)
+            tcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(api_tokens)")}
+            if "user_id" not in tcols:
+                self._conn.execute("ALTER TABLE api_tokens ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE CASCADE")
+            # Tokens issued before accounts existed belong to nobody: they stop working.
+            self._conn.execute("UPDATE api_tokens SET revoked=1 WHERE user_id IS NULL AND revoked=0")
 
     def _one(self, sql: str, params: tuple = ()):
         with self.lock:
@@ -237,26 +298,155 @@ class Store:
         row = self._one("SELECT id, name, created_at FROM orgs WHERE id=?", (org_id,))
         return dict(row) if row else None
 
-    def add_member(self, org_id: str, user_name: str, role: str = "member") -> dict[str, Any]:
-        # TODO(auth): user_name is a display name until real user accounts exist.
-        ts = now()
+    def update_org(self, org_id: str, name: str) -> dict[str, Any] | None:
+        with self.lock, self._conn:
+            self._conn.execute("UPDATE orgs SET name=? WHERE id=?", (name, org_id))
+        return self.get_org(org_id)
+
+    # ---- memberships ------------------------------------------------------
+    def add_member(self, org_id: str, user_id: str, role: str) -> dict[str, Any]:
+        """Add a member or change their role (upsert)."""
         with self.lock, self._conn:
             self._conn.execute(
-                "INSERT INTO memberships (org_id, user_name, role, created_at) VALUES (?,?,?,?) "
-                "ON CONFLICT(org_id, user_name) DO UPDATE SET role=excluded.role",
-                (org_id, user_name, role, ts),
+                "INSERT INTO memberships (org_id, user_id, role, created_at) VALUES (?,?,?,?) "
+                "ON CONFLICT(org_id, user_id) DO UPDATE SET role=excluded.role",
+                (org_id, user_id, role, now()),
             )
+        return self.get_member(org_id, user_id)
+
+    def get_member(self, org_id: str, user_id: str) -> dict[str, Any] | None:
         row = self._one(
-            "SELECT org_id, user_name, role, created_at FROM memberships WHERE org_id=? AND user_name=?",
-            (org_id, user_name),
-        )
-        return dict(row)
+            "SELECT m.org_id, m.user_id, u.email, u.name, m.role, m.created_at FROM memberships m "
+            "JOIN users u ON u.id = m.user_id WHERE m.org_id=? AND m.user_id=?", (org_id, user_id))
+        return dict(row) if row else None
+
+    def get_role(self, org_id: str, user_id: str) -> str | None:
+        row = self._one("SELECT role FROM memberships WHERE org_id=? AND user_id=?", (org_id, user_id))
+        return row["role"] if row else None
 
     def list_members(self, org_id: str) -> list[dict[str, Any]]:
         rows = self._all(
-            "SELECT org_id, user_name, role, created_at FROM memberships WHERE org_id=? ORDER BY created_at, user_name",
-            (org_id,),
-        )
+            "SELECT m.org_id, m.user_id, u.email, u.name, m.role, m.created_at FROM memberships m "
+            "JOIN users u ON u.id = m.user_id WHERE m.org_id=? ORDER BY m.created_at, u.email", (org_id,))
+        return [dict(r) for r in rows]
+
+    def remove_member(self, org_id: str, user_id: str) -> bool:
+        with self.lock, self._conn:
+            cur = self._conn.execute("DELETE FROM memberships WHERE org_id=? AND user_id=?", (org_id, user_id))
+        return cur.rowcount > 0
+
+    def count_role(self, org_id: str, role: str) -> int:
+        return self._one("SELECT COUNT(*) FROM memberships WHERE org_id=? AND role=?", (org_id, role))[0]
+
+    def list_user_orgs(self, user_id: str) -> list[dict[str, Any]]:
+        rows = self._all(
+            "SELECT o.id, o.name, o.created_at, m.role FROM memberships m JOIN orgs o ON o.id = m.org_id "
+            "WHERE m.user_id=? ORDER BY o.created_at, o.id", (user_id,))
+        return [dict(r) for r in rows]
+
+    # ---- users and sessions -------------------------------------------------
+    def count_users(self) -> int:
+        return self._one("SELECT COUNT(*) FROM users")[0]
+
+    def create_user(self, email: str, name: str, password_hash: str) -> dict[str, Any]:
+        uid = f"u-{secrets.token_hex(6)}"
+        with self.lock, self._conn:
+            self._conn.execute("INSERT INTO users (id, email, name, password_hash, created_at) VALUES (?,?,?,?,?)",
+                               (uid, email, name, password_hash, now()))
+        return self.get_user(uid)
+
+    def get_user(self, user_id: str) -> dict[str, Any] | None:
+        row = self._one(f"SELECT {USER_COLS} FROM users WHERE id=?", (user_id,))
+        return dict(row) if row else None
+
+    def get_user_by_email(self, email: str, with_hash: bool = False) -> dict[str, Any] | None:
+        cols = USER_COLS + (", password_hash" if with_hash else "")
+        row = self._one(f"SELECT {cols} FROM users WHERE email=?", (email,))
+        return dict(row) if row else None
+
+    def touch_login(self, user_id: str) -> None:
+        with self.lock, self._conn:
+            self._conn.execute("UPDATE users SET last_login_at=? WHERE id=?", (now(), user_id))
+
+    def create_session(self, token_hash: str, user_id: str, expires_at: float, user_agent: str = "") -> None:
+        with self.lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO sessions (token_hash, user_id, created_at, expires_at, user_agent) VALUES (?,?,?,?,?)",
+                (token_hash, user_id, now(), expires_at, user_agent[:300]))
+
+    def get_session(self, token_hash: str) -> dict[str, Any] | None:
+        """Active session (not revoked, not expired)."""
+        row = self._one("SELECT token_hash, user_id, created_at, expires_at, user_agent FROM sessions "
+                        "WHERE token_hash=? AND revoked=0 AND expires_at >= ?", (token_hash, time.time()))
+        return dict(row) if row else None
+
+    def extend_session(self, token_hash: str, expires_at: float) -> None:
+        with self.lock, self._conn:
+            self._conn.execute("UPDATE sessions SET expires_at=? WHERE token_hash=?", (expires_at, token_hash))
+
+    def revoke_session(self, token_hash: str) -> None:
+        with self.lock, self._conn:
+            self._conn.execute("UPDATE sessions SET revoked=1 WHERE token_hash=?", (token_hash,))
+
+    # ---- invites --------------------------------------------------------------
+    @staticmethod
+    def _invite(row) -> dict[str, Any] | None:
+        if not row:
+            return None
+        d = dict(row)
+        d["revoked"] = bool(d["revoked"])
+        return d
+
+    def create_invite(self, org_id: str, token_hash: str, role: str, expires_at: float, email: str | None = None,
+                      created_by: str | None = None) -> dict[str, Any]:
+        iid = f"inv-{secrets.token_hex(6)}"
+        with self.lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO invites (id, org_id, token_hash, email, role, created_by, created_at, expires_at) "
+                "VALUES (?,?,?,?,?,?,?,?)", (iid, org_id, token_hash, email, role, created_by, now(), expires_at))
+        return self._invite(self._one(f"SELECT {INVITE_COLS} FROM invites WHERE id=?", (iid,)))
+
+    def get_invite(self, token_hash: str) -> dict[str, Any] | None:
+        """Usable invite by hash (not revoked, not accepted, not expired)."""
+        return self._invite(self._one(
+            f"SELECT {INVITE_COLS} FROM invites WHERE token_hash=? AND revoked=0 AND accepted_at IS NULL "
+            "AND expires_at >= ?", (token_hash, time.time())))
+
+    def list_invites(self, org_id: str) -> list[dict[str, Any]]:
+        rows = self._all(f"SELECT {INVITE_COLS} FROM invites WHERE org_id=? AND revoked=0 AND accepted_at IS NULL "
+                         "AND expires_at >= ? ORDER BY created_at DESC", (org_id, time.time()))
+        return [self._invite(r) for r in rows]
+
+    def revoke_invite(self, org_id: str, invite_id: str) -> bool:
+        with self.lock, self._conn:
+            cur = self._conn.execute("UPDATE invites SET revoked=1 WHERE id=? AND org_id=? AND revoked=0 "
+                                     "AND accepted_at IS NULL", (invite_id, org_id))
+        return cur.rowcount > 0
+
+    def accept_invite(self, invite_id: str, user_id: str) -> bool:
+        """Mark an invite used (single use, atomic). False if it was already used, revoked or expired."""
+        with self.lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE invites SET accepted_at=?, accepted_by=? WHERE id=? AND accepted_at IS NULL AND revoked=0 "
+                "AND expires_at >= ?", (now(), user_id, invite_id, time.time()))
+        return cur.rowcount > 0
+
+    # ---- per-org AI provider keys (encrypted by the caller, see secrets_box.py) ----------
+    def set_ai_key(self, org_id: str, provider: str, ciphertext: str, last4: str, user_id: str | None) -> None:
+        with self.lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO org_ai_keys (org_id, provider, ciphertext, last4, updated_by, updated_at) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(org_id, provider) DO UPDATE SET ciphertext=excluded.ciphertext, "
+                "last4=excluded.last4, updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                (org_id, provider, ciphertext, last4, user_id, now()))
+
+    def delete_ai_key(self, org_id: str, provider: str) -> None:
+        with self.lock, self._conn:
+            self._conn.execute("DELETE FROM org_ai_keys WHERE org_id=? AND provider=?", (org_id, provider))
+
+    def list_ai_keys(self, org_id: str) -> list[dict[str, Any]]:
+        rows = self._all("SELECT provider, ciphertext, last4, updated_by, updated_at FROM org_ai_keys "
+                         "WHERE org_id=? ORDER BY provider", (org_id,))
         return [dict(r) for r in rows]
 
     # ---- projects -------------------------------------------------------
@@ -423,13 +613,14 @@ class Store:
 
     def create_token(self, token_hash: str, kind: str, org_id: str, user_name: str, scopes: list[str],
                      client_id: str | None = None, name: str = "", expires_at: float | None = None,
-                     resource: str | None = None) -> dict[str, Any]:
+                     resource: str | None = None, user_id: str | None = None) -> dict[str, Any]:
         tid = f"tok-{secrets.token_hex(6)}"
         with self.lock, self._conn:
             self._conn.execute(
-                "INSERT INTO api_tokens (id, token_hash, kind, org_id, user_name, scopes, client_id, name, resource, "
-                "created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (tid, token_hash, kind, org_id, user_name, json.dumps(scopes), client_id, name, resource, now(), expires_at))
+                "INSERT INTO api_tokens (id, token_hash, kind, org_id, user_name, user_id, scopes, client_id, name, "
+                "resource, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (tid, token_hash, kind, org_id, user_name, user_id, json.dumps(scopes), client_id, name, resource,
+                 now(), expires_at))
         return self.get_token_by_id(tid)
 
     @staticmethod
@@ -463,6 +654,10 @@ class Store:
         with self.lock, self._conn:
             cur = self._conn.execute("UPDATE api_tokens SET revoked=1 WHERE id=? AND revoked=0", (token_id,))
         return cur.rowcount > 0
+
+    def revoke_user_tokens(self, org_id: str, user_id: str) -> None:
+        with self.lock, self._conn:
+            self._conn.execute("UPDATE api_tokens SET revoked=1 WHERE org_id=? AND user_id=?", (org_id, user_id))
 
     def list_tokens(self, org_id: str, kind: str | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM api_tokens WHERE org_id=? AND revoked=0"

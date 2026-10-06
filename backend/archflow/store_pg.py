@@ -144,21 +144,139 @@ class PostgresStore:
     def get_org(self, org_id: str) -> dict[str, Any] | None:
         return _row(self._one("SELECT id, name, created_at FROM orgs WHERE id=%s", (org_id,)))
 
-    def add_member(self, org_id: str, user_name: str, role: str = "member") -> dict[str, Any]:
-        # TODO(auth): user_name is a display name until real user accounts exist.
-        row = self._one(
-            "INSERT INTO memberships (org_id, user_name, role) VALUES (%s, %s, %s) "
-            "ON CONFLICT (org_id, user_name) DO UPDATE SET role = EXCLUDED.role "
-            "RETURNING org_id, user_name, role, created_at",
-            (org_id, user_name, role),
-        )
-        return _row(row)
+    def update_org(self, org_id: str, name: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            conn.execute("UPDATE orgs SET name=%s WHERE id=%s", (name, org_id))
+        return self.get_org(org_id)
+
+    # ---- memberships ------------------------------------------------------
+    _MEMBER_SQL = ("SELECT m.org_id, m.user_id, u.email, u.name, m.role, m.created_at FROM memberships m "
+                   "JOIN users u ON u.id = m.user_id")
+
+    def add_member(self, org_id: str, user_id: str, role: str) -> dict[str, Any]:
+        """Add a member or change their role (upsert)."""
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO memberships (org_id, user_id, role) VALUES (%s, %s, %s) "
+                "ON CONFLICT (org_id, user_id) DO UPDATE SET role = EXCLUDED.role", (org_id, user_id, role))
+        return self.get_member(org_id, user_id)
+
+    def get_member(self, org_id: str, user_id: str) -> dict[str, Any] | None:
+        return _row(self._one(f"{self._MEMBER_SQL} WHERE m.org_id=%s AND m.user_id=%s", (org_id, user_id)))
+
+    def get_role(self, org_id: str, user_id: str) -> str | None:
+        row = self._one("SELECT role FROM memberships WHERE org_id=%s AND user_id=%s", (org_id, user_id))
+        return row["role"] if row else None
 
     def list_members(self, org_id: str) -> list[dict[str, Any]]:
+        rows = self._all(f"{self._MEMBER_SQL} WHERE m.org_id=%s ORDER BY m.created_at, u.email", (org_id,))
+        return [_row(r) for r in rows]
+
+    def remove_member(self, org_id: str, user_id: str) -> bool:
+        row = self._one("DELETE FROM memberships WHERE org_id=%s AND user_id=%s RETURNING user_id", (org_id, user_id))
+        return row is not None
+
+    def count_role(self, org_id: str, role: str) -> int:
+        return self._one("SELECT COUNT(*) AS n FROM memberships WHERE org_id=%s AND role=%s", (org_id, role))["n"]
+
+    def list_user_orgs(self, user_id: str) -> list[dict[str, Any]]:
         rows = self._all(
-            "SELECT org_id, user_name, role, created_at FROM memberships WHERE org_id=%s "
-            "ORDER BY created_at, user_name", (org_id,)
-        )
+            "SELECT o.id, o.name, o.created_at, m.role FROM memberships m JOIN orgs o ON o.id = m.org_id "
+            "WHERE m.user_id=%s ORDER BY o.created_at, o.id", (user_id,))
+        return [_row(r) for r in rows]
+
+    # ---- users and sessions -------------------------------------------------
+    _USER_COLS = "id, email, name, created_at, last_login_at"
+
+    def count_users(self) -> int:
+        return self._one("SELECT COUNT(*) AS n FROM users")["n"]
+
+    def create_user(self, email: str, name: str, password_hash: str) -> dict[str, Any]:
+        uid = f"u-{secrets.token_hex(6)}"
+        with self._conn() as conn:
+            conn.execute("INSERT INTO users (id, email, name, password_hash) VALUES (%s, %s, %s, %s)",
+                         (uid, email, name, password_hash))
+        return self.get_user(uid)
+
+    def get_user(self, user_id: str) -> dict[str, Any] | None:
+        return _row(self._one(f"SELECT {self._USER_COLS} FROM users WHERE id=%s", (user_id,)))
+
+    def get_user_by_email(self, email: str, with_hash: bool = False) -> dict[str, Any] | None:
+        cols = self._USER_COLS + (", password_hash" if with_hash else "")
+        return _row(self._one(f"SELECT {cols} FROM users WHERE email=%s", (email,)))
+
+    def touch_login(self, user_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE users SET last_login_at = now() WHERE id=%s", (user_id,))
+
+    def create_session(self, token_hash: str, user_id: str, expires_at: float, user_agent: str = "") -> None:
+        with self._conn() as conn:
+            conn.execute("INSERT INTO sessions (token_hash, user_id, expires_at, user_agent) VALUES (%s, %s, %s, %s)",
+                         (token_hash, user_id, expires_at, user_agent[:300]))
+
+    def get_session(self, token_hash: str) -> dict[str, Any] | None:
+        """Active session (not revoked, not expired)."""
+        return _row(self._one(
+            "SELECT token_hash, user_id, created_at, expires_at, user_agent FROM sessions "
+            "WHERE token_hash=%s AND NOT revoked AND expires_at >= %s", (token_hash, time.time())))
+
+    def extend_session(self, token_hash: str, expires_at: float) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE sessions SET expires_at=%s WHERE token_hash=%s", (expires_at, token_hash))
+
+    def revoke_session(self, token_hash: str) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE sessions SET revoked = TRUE WHERE token_hash=%s", (token_hash,))
+
+    # ---- invites --------------------------------------------------------------
+    _INVITE_COLS = "id, org_id, email, role, created_by, created_at, expires_at, accepted_at, accepted_by, revoked"
+
+    def create_invite(self, org_id: str, token_hash: str, role: str, expires_at: float, email: str | None = None,
+                      created_by: str | None = None) -> dict[str, Any]:
+        iid = f"inv-{secrets.token_hex(6)}"
+        return _row(self._one(
+            "INSERT INTO invites (id, org_id, token_hash, email, role, created_by, expires_at) "
+            f"VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING {self._INVITE_COLS}",
+            (iid, org_id, token_hash, email, role, created_by, expires_at)))
+
+    def get_invite(self, token_hash: str) -> dict[str, Any] | None:
+        """Usable invite by hash (not revoked, not accepted, not expired)."""
+        return _row(self._one(
+            f"SELECT {self._INVITE_COLS} FROM invites WHERE token_hash=%s AND NOT revoked AND accepted_at IS NULL "
+            "AND expires_at >= %s", (token_hash, time.time())))
+
+    def list_invites(self, org_id: str) -> list[dict[str, Any]]:
+        rows = self._all(
+            f"SELECT {self._INVITE_COLS} FROM invites WHERE org_id=%s AND NOT revoked AND accepted_at IS NULL "
+            "AND expires_at >= %s ORDER BY created_at DESC", (org_id, time.time()))
+        return [_row(r) for r in rows]
+
+    def revoke_invite(self, org_id: str, invite_id: str) -> bool:
+        row = self._one("UPDATE invites SET revoked = TRUE WHERE id=%s AND org_id=%s AND NOT revoked "
+                        "AND accepted_at IS NULL RETURNING id", (invite_id, org_id))
+        return row is not None
+
+    def accept_invite(self, invite_id: str, user_id: str) -> bool:
+        """Mark an invite used (single use, atomic). False if it was already used, revoked or expired."""
+        row = self._one("UPDATE invites SET accepted_at = now(), accepted_by=%s WHERE id=%s AND accepted_at IS NULL "
+                        "AND NOT revoked AND expires_at >= %s RETURNING id", (user_id, invite_id, time.time()))
+        return row is not None
+
+    # ---- per-org AI provider keys (encrypted by the caller, see secrets_box.py) ----------
+    def set_ai_key(self, org_id: str, provider: str, ciphertext: str, last4: str, user_id: str | None) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO org_ai_keys (org_id, provider, ciphertext, last4, updated_by) VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (org_id, provider) DO UPDATE SET ciphertext = EXCLUDED.ciphertext, last4 = EXCLUDED.last4, "
+                "updated_by = EXCLUDED.updated_by, updated_at = now()", (org_id, provider, ciphertext, last4, user_id))
+
+    def delete_ai_key(self, org_id: str, provider: str) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM org_ai_keys WHERE org_id=%s AND provider=%s", (org_id, provider))
+
+    def list_ai_keys(self, org_id: str) -> list[dict[str, Any]]:
+        rows = self._all("SELECT provider, ciphertext, last4, updated_by, updated_at FROM org_ai_keys "
+                         "WHERE org_id=%s ORDER BY provider", (org_id,))
         return [_row(r) for r in rows]
 
     # ---- projects -------------------------------------------------------
@@ -327,13 +445,13 @@ class PostgresStore:
 
     def create_token(self, token_hash: str, kind: str, org_id: str, user_name: str, scopes: list[str],
                      client_id: str | None = None, name: str = "", expires_at: float | None = None,
-                     resource: str | None = None) -> dict[str, Any]:
+                     resource: str | None = None, user_id: str | None = None) -> dict[str, Any]:
         tid = f"tok-{secrets.token_hex(6)}"
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO api_tokens (id, token_hash, kind, org_id, user_name, scopes, client_id, name, resource, expires_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (tid, token_hash, kind, org_id, user_name, Jsonb(scopes), client_id, name, resource, expires_at))
+                "INSERT INTO api_tokens (id, token_hash, kind, org_id, user_name, user_id, scopes, client_id, name, "
+                "resource, expires_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (tid, token_hash, kind, org_id, user_name, user_id, Jsonb(scopes), client_id, name, resource, expires_at))
         return self.get_token_by_id(tid)
 
     @staticmethod
@@ -364,6 +482,10 @@ class PostgresStore:
     def revoke_token_id(self, token_id: str) -> bool:
         row = self._one("UPDATE api_tokens SET revoked = TRUE WHERE id=%s AND NOT revoked RETURNING id", (token_id,))
         return row is not None
+
+    def revoke_user_tokens(self, org_id: str, user_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE api_tokens SET revoked = TRUE WHERE org_id=%s AND user_id=%s", (org_id, user_id))
 
     def list_tokens(self, org_id: str, kind: str | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM api_tokens WHERE org_id=%s AND NOT revoked"

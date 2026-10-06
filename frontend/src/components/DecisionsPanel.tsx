@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
-import type { Branch, Decision, DecisionAlternative, DecisionStatus, Evaluation, User } from "../types";
+import { can, type Branch, type Decision, type DecisionAlternative, type DecisionStatus, type Evaluation, type Role, type User } from "../types";
 
 interface Props {
   pid: string;
   branches: Branch[];
   user: User;
+  role?: Role | null;
   onAdopted: (r: { version: number; branch: string; source: string; decisionId: string }) => void;
   toast: (text: string) => void;
 }
@@ -78,7 +79,8 @@ function alternativesFrom(ev: Evaluation): DecisionAlternative[] {
   });
 }
 
-export function DecisionsPanel({ pid, branches, user, onAdopted, toast }: Props) {
+export function DecisionsPanel({ pid, branches, user, role, onAdopted, toast }: Props) {
+  const canEdit = role === undefined || can(role, "edit");
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   const [comparing, setComparing] = useState(false);
@@ -127,7 +129,7 @@ export function DecisionsPanel({ pid, branches, user, onAdopted, toast }: Props)
   const open = decisions.find((d) => d.id === openId);
   if (open) {
     return (
-      <DecisionDetail key={open.id + open.updated_at} pid={pid} decision={open} branches={branches} user={user}
+      <DecisionDetail key={open.id + open.updated_at} pid={pid} decision={open} branches={branches} user={user} role={role}
         toast={toast} onBack={() => setOpenId(null)}
         onSaved={(d) => setDecisions((ds) => ds.map((x) => (x.id === d.id ? d : x)))}
         onAdopted={(r) => { reload(); onAdopted(r); }} />
@@ -138,9 +140,9 @@ export function DecisionsPanel({ pid, branches, user, onAdopted, toast }: Props)
     <div className="panel">
       <div className="panel-tools">
         <span className="grow muted small">Architecture decision records</span>
-        <button className={comparing ? "" : "primary"} onClick={() => { setComparing(!comparing); setResult(null); setError(""); }}>
+        {canEdit && <button className={comparing ? "" : "primary"} onClick={() => { setComparing(!comparing); setResult(null); setError(""); }}>
           {comparing ? "Close" : "Compare drafts"}
-        </button>
+        </button>}
       </div>
 
       {comparing && (
@@ -200,13 +202,16 @@ interface DetailProps {
   decision: Decision;
   branches: Branch[];
   user: User;
+  role?: Role | null;
   toast: (text: string) => void;
   onBack: () => void;
   onSaved: (d: Decision) => void;
   onAdopted: (r: { version: number; branch: string; source: string; decisionId: string }) => void;
 }
 
-function DecisionDetail({ pid, decision: d, branches, user, toast, onBack, onSaved, onAdopted }: DetailProps) {
+function DecisionDetail({ pid, decision: d, branches, user, role, toast, onBack, onSaved, onAdopted }: DetailProps) {
+  const canEdit = role === undefined || can(role, "edit");
+  const canReview = role === undefined || can(role, "review"); // reviewers may change the status only
   const [form, setForm] = useState({ title: d.title, status: d.status, context: d.context, decision: d.decision, consequences: d.consequences });
   const [saving, setSaving] = useState(false);
   const [confirm, setConfirm] = useState(false);
@@ -216,7 +221,7 @@ function DecisionDetail({ pid, decision: d, branches, user, toast, onBack, onSav
   const names = new Set(branches.map((b) => b.name));
   const alt = d.alternatives.find((a) => a.name === d.chosen || a.branch === d.chosen);
   const source = alt?.branch && names.has(alt.branch) ? alt.branch : names.has(d.chosen) ? d.chosen : null;
-  const canAdopt = !!source && source !== TARGET && (d.status === "proposed" || d.status === "accepted");
+  const canAdopt = canEdit && !!source && source !== TARGET && (d.status === "proposed" || d.status === "accepted");
 
   const save = async () => {
     const changes = Object.fromEntries((Object.keys(form) as (keyof typeof form)[])
@@ -252,19 +257,19 @@ function DecisionDetail({ pid, decision: d, branches, user, toast, onBack, onSav
         <span className={`status adr-s-${d.status}`}>{d.status}</span>
       </div>
       <div className="adr-form">
-        <label className="field"><span>Title</span><input value={form.title} onChange={set("title")} /></label>
+        <label className="field"><span>Title</span><input value={form.title} onChange={set("title")} disabled={!canEdit} /></label>
         <label className="field"><span>Status</span>
-          <select value={form.status} onChange={set("status")}>
+          <select value={form.status} onChange={set("status")} disabled={!canReview}>
             {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </label>
-        <label className="field"><span>Context</span><textarea rows={3} value={form.context} onChange={set("context")} /></label>
-        <label className="field"><span>Decision</span><textarea rows={3} value={form.decision} onChange={set("decision")} /></label>
-        <label className="field"><span>Consequences</span><textarea rows={3} value={form.consequences} onChange={set("consequences")} /></label>
-        <div className="row gap">
+        <label className="field"><span>Context</span><textarea rows={3} value={form.context} onChange={set("context")} disabled={!canEdit} /></label>
+        <label className="field"><span>Decision</span><textarea rows={3} value={form.decision} onChange={set("decision")} disabled={!canEdit} /></label>
+        <label className="field"><span>Consequences</span><textarea rows={3} value={form.consequences} onChange={set("consequences")} disabled={!canEdit} /></label>
+        {canReview && <div className="row gap">
           <button className="primary" disabled={!dirty || saving || !form.title.trim()} onClick={save}>{saving ? "Saving…" : "Save"}</button>
           {dirty && <button onClick={() => setForm({ title: d.title, status: d.status, context: d.context, decision: d.decision, consequences: d.consequences })}>Discard</button>}
-        </div>
+        </div>}
       </div>
 
       {d.alternatives.length > 0 && (

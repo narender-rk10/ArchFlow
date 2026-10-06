@@ -9,13 +9,14 @@ interface Props {
   onTrace: (id: string | null) => void;
   send: (ops: Op[]) => void;
   onPrompt: (reqId: string) => void;
+  readOnly?: boolean;
 }
 
 const splitList = (s: string, sep: string | RegExp) => s.split(sep).map((x) => x.trim()).filter(Boolean);
 const STATUS = ["draft", "review", "approved", "implemented"] as const;
 const PRIORITY = ["low", "medium", "high", "critical"] as const;
 
-export function RequirementsPanel({ state, issues, traced, onTrace, send, onPrompt }: Props) {
+export function RequirementsPanel({ state, issues, traced, onTrace, send, onPrompt, readOnly = false }: Props) {
   const [open, setOpen] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const reqs = Object.values(state.requirements).filter((r) =>
@@ -29,8 +30,8 @@ export function RequirementsPanel({ state, issues, traced, onTrace, send, onProm
     <div className="panel">
       <div className="panel-tools">
         <input placeholder="Filter requirements…" value={filter} onChange={(e) => setFilter(e.target.value)} />
-        <button onClick={() => add("functional")} title="Add functional requirement">+ FR</button>
-        <button onClick={() => add("non_functional")} title="Add non-functional requirement">+ NFR</button>
+        {!readOnly && <button onClick={() => add("functional")} title="Add functional requirement">+ FR</button>}
+        {!readOnly && <button onClick={() => add("non_functional")} title="Add non-functional requirement">+ NFR</button>}
       </div>
       {reqs.length === 0 && <p className="muted small pad">No requirements. Add one, or describe your idea in the command bar and let the AI interview you.</p>}
       <ul className="req-list">
@@ -57,6 +58,7 @@ export function RequirementsPanel({ state, issues, traced, onTrace, send, onProm
                   {mine.map((i, k) => (
                     <div key={k} className={`issue ${i.severity}`}><b>{i.message}</b> {i.suggestion}</div>
                   ))}
+                  <fieldset className="bare" disabled={readOnly}>
                   <Field label="Title" value={r.title} rev={state.rev} onCommit={(v, b) => upd("title", v, b)} />
                   <Field label="Description" value={r.description} rev={state.rev} multiline onCommit={(v, b) => upd("description", v, b)} />
                   <div className="grid2">
@@ -69,9 +71,10 @@ export function RequirementsPanel({ state, issues, traced, onTrace, send, onProm
                     onCommit={(v, b) => upd("actors", splitList(v, ","), b)} />
                   <Field label="Acceptance criteria (one per line, Ctrl+Enter to save)" value={r.acceptance_criteria.join("\n")} rev={state.rev} multiline
                     onCommit={(v, b) => upd("acceptance_criteria", splitList(v, /\n/), b)} />
+                  </fieldset>
                   <div className="insp-actions">
                     <button onClick={() => onPrompt(r.id)}>⚙ Generate implementation</button>
-                    <button className="danger" onClick={() => send([{ op: "remove_requirement", id: r.id }])}>Delete</button>
+                    {!readOnly && <button className="danger" onClick={() => send([{ op: "remove_requirement", id: r.id }])}>Delete</button>}
                   </div>
                 </div>
               )}

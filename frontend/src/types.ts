@@ -58,7 +58,38 @@ export interface CatalogItem {
   id: string; vendor: string; kind: string; name: string; type: NodeType; category: string; kind_label: string;
 }
 export interface Catalog { vendors: Record<string, string>; items: CatalogItem[] }
-export interface Org { id: string; name: string; created_at: string }
+export interface Org { id: string; name: string; created_at: string; role?: Role }
+
+// ---- accounts and roles ----
+export const ROLES = ["viewer", "reviewer", "developer", "architect", "admin", "owner"] as const;
+export type Role = (typeof ROLES)[number];
+const RANK: Record<string, number> = Object.fromEntries(ROLES.map((r, i) => [r, i]));
+/** Mirrors backend authz.py: read = any member, review = reviewer+, edit = developer+, admin, owner. */
+export function can(role: Role | null | undefined, action: "read" | "review" | "edit" | "admin" | "owner"): boolean {
+  const min = { read: "viewer", review: "reviewer", edit: "developer", admin: "admin", owner: "owner" }[action];
+  return role != null && role in RANK && RANK[role] >= RANK[min];
+}
+export const ROLE_HELP: Record<Role, string> = {
+  viewer: "Read only",
+  reviewer: "Read, and accept or reject decisions",
+  developer: "Edit the canvas, requirements, versions and decisions; run AI",
+  architect: "Same as developer",
+  admin: "Also manage members, invites, API tokens and AI keys",
+  owner: "Everything, including organization settings and owners",
+};
+export interface Account { id: string; email: string; name: string; created_at: string; last_login_at: string | null }
+export interface Me { user: Account; orgs: (Org & { role: Role })[]; features: { ai_settings: boolean } }
+export interface Member { org_id: string; user_id: string; email: string; name: string; role: Role; created_at: string }
+export interface Invite {
+  id: string; org_id: string; email: string | null; role: Role; created_by: string | null; created_at: string; expires_at: number;
+}
+export interface InviteInfo { org_name: string; role: Role; email: string | null; expires_at: number }
+export type AIProvider = "gemini" | "anthropic" | "openai";
+export interface AISettings {
+  enabled: boolean;
+  providers: Record<AIProvider, { configured: boolean; last4: string | null; updated_at: string | null }>;
+}
+
 export interface ApiToken {
   id: string; kind: "pat" | "refresh"; name: string; user_name: string; access: "read" | "write";
   client_name: string; created_at: string; expires_at: number | null; last_used_at: string | null;

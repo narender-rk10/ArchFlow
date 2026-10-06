@@ -13,9 +13,11 @@
  * Scaling out: add @hocuspocus/extension-redis so several instances share documents.
  */
 import { Server } from "@hocuspocus/server";
+
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import * as Y from "yjs";
+import { verifyTicket } from "./ticket.js";
 import { applyPatch, docToState, ORIGIN_SERVER, stateToPatch, type Patch } from "./ydoc.js";
 
 const PORT = Number(process.env.COLLAB_PORT ?? 1234);
@@ -30,16 +32,13 @@ if (!INTERNAL_TOKEN) {
   process.exit(1);
 }
 
-interface Ctx { user: { name: string; color: string }; server?: boolean }
+interface Ctx { user: { id?: string; name: string; color: string }; server?: boolean }
+
 
 const actors = new Map<string, Set<string>>(); // documentName → people who edited since the last store
 
 const internal = { "x-internal-token": INTERNAL_TOKEN };
 const enc = (name: string) => name.split("/").map(encodeURIComponent).join("/");
-function parseName(name: string): [string, string] {
-  const i = name.indexOf(":");
-  return i < 0 ? [name, "main"] : [name.slice(0, i), name.slice(i + 1) || "main"];
-}
 
 async function api(path: string, init: RequestInit = {}) {
   return fetch(`${API}${path}`, { ...init, headers: { ...internal, ...(init.headers ?? {}) } });
@@ -63,14 +62,11 @@ const server = new Server<Ctx>({
   maxDebounce: 5000,
   quiet: true,
 
-  async onAuthenticate({ token, documentName }) {
-    // TODO(auth): verify a signed session token issued by the API. For now the token carries the display identity.
-    let user = { name: "anonymous", color: "#888" };
-    try { user = { ...user, ...JSON.parse(token || "{}") }; } catch { /* plain-string token */ }
-    const [pid, branch] = parseName(documentName);
-    const r = await fetch(`${API}/api/projects/${encodeURIComponent(pid)}?branch=${encodeURIComponent(branch)}`);
-    if (!r.ok) throw new Error(`unknown document ${documentName}`);
-    return { user: { name: String(user.name).slice(0, 40), color: String(user.color).slice(0, 20) } };
+  async onAuthenticate({ token, documentName, connectionConfig }) {
+    // The browser presents a short-lived ticket from GET /api/projects/:pid/collab-ticket (signed by the API).
+    const claims = verifyTicket(INTERNAL_TOKEN, token, documentName);
+    if (claims.ro) connectionConfig.readOnly = true; // viewers and reviewers: document updates are rejected
+    return { user: { id: claims.uid, name: String(claims.name).slice(0, 40), color: String(claims.color).slice(0, 20) } };
   },
 
   async onLoadDocument({ document, documentName }) {
@@ -80,8 +76,7 @@ const server = new Server<Ctx>({
       return;
     }
     // First time this branch is opened collaboratively: seed from the API's structured state.
-    const [pid, branch] = parseName(documentName);
-    const s = await fetch(`${API}/api/projects/${encodeURIComponent(pid)}?branch=${encodeURIComponent(branch)}`);
+    const s = await api(`/api/internal/state/${enc(documentName)}`);
     if (!s.ok) throw new Error(`cannot load ${documentName}: ${s.status}`);
     const { state } = await s.json();
     applyPatch(document, stateToPatch(state), ORIGIN_SERVER);

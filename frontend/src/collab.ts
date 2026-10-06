@@ -2,6 +2,7 @@ import { HocuspocusProvider } from "@hocuspocus/provider";
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { applyOps, coll, docToState, ORIGIN_LOCAL, ORIGIN_SERVER } from "@collab/ydoc";
+import { api } from "./api";
 import type { Op, ProjectState, User } from "./types";
 
 export interface Peer { clientId: number; name: string; color: string; cursor?: { x: number; y: number; level?: string }; selection?: string[] }
@@ -32,7 +33,9 @@ export function useCollab(pid: string, branch: string, user: User) {
       url: `${proto}://${location.host}/collab`,
       name: `${pid}:${branch}`,
       document: doc,
-      token: JSON.stringify({ name: user.name, color: user.color }),
+      // A fresh short-lived ticket signed by the API for every (re)connect; it carries who you are and
+      // whether your role may edit (viewers/reviewers get a read-only connection).
+      token: async () => (await api.collabTicket(pid, branch, user.color)).ticket,
     });
     const undo = new Y.UndoManager([coll(doc, "nodes"), coll(doc, "edges"), coll(doc, "requirements")], {
       trackedOrigins: new Set([ORIGIN_LOCAL]),

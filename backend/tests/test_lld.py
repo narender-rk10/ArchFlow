@@ -6,7 +6,7 @@ os.environ.setdefault("ARCHFLOW_DB", ":memory:")
 os.environ["ARCHFLOW_AI"] = "offline"
 
 import pytest  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
+from authhelp import new_client, signup  # noqa: E402
 
 from archflow import collab_sync, lld, llm  # noqa: E402
 from archflow.analysis import full_analysis  # noqa: E402
@@ -135,7 +135,7 @@ def test_offline_lld_for_database_and_queue_events():
 
 def test_llm_generator_used_and_falls_back(monkeypatch):
     st = build_template("ai-customer-support")
-    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(llm, "available", lambda *a, **k: True)
     monkeypatch.setattr(llm, "complete_json", lambda *a, **k: {
         "elements": [{"key": "c", "name": "OrderHandler", "type": "component"},
                      {"key": "e", "name": "POST /orders", "type": "endpoint", "method": "POST", "path": "/orders"},
@@ -154,7 +154,8 @@ def test_llm_generator_used_and_falls_back(monkeypatch):
 # --------------------------------------------------------------------------- API
 @pytest.fixture()
 def client():
-    with TestClient(create_app(Store(":memory:")), base_url=BASE, follow_redirects=False) as c:
+    with new_client(create_app(Store(":memory:")), base_url=BASE) as c:
+        signup(c)
         yield c
 
 

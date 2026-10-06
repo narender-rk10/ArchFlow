@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("ARCHFLOW_DB", ":memory:")
 os.environ["ARCHFLOW_AI"] = "offline"
 
-from fastapi.testclient import TestClient  # noqa: E402
+from authhelp import authed_client  # noqa: E402
 
 from archflow import chat  # noqa: E402
 from archflow.main import create_app  # noqa: E402
@@ -64,7 +64,7 @@ def test_architecture_ops_apply_cleanly_and_trace():
 
 
 def test_chat_api_apply_replace_and_branch():
-    client = TestClient(create_app(Store(":memory:")))
+    client = authed_client(create_app(Store(":memory:")))
     pid = client.post("/api/projects", json={"name": "Demo", "template": "ai-customer-support"}).json()["id"]
     turns = [{"role": "user", "content": "Customer support AI"}]
     card = run_interview(turns, lambda t: client.post(f"/api/projects/{pid}/chat", json={"turns": t}).json())

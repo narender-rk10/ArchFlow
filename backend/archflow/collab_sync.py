@@ -11,8 +11,13 @@ document. Field-level patches merge with concurrent human edits instead of overw
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import logging
 import os
+import time
 from typing import Any
 
 import httpx
@@ -31,6 +36,51 @@ if not INTERNAL_TOKEN:
     log.warning("ARCHFLOW_INTERNAL_TOKEN is not set: real-time sync with the collab server is disabled. See .env.example.")
 COLLECTIONS = {"nodes": Node, "edges": Edge, "requirements": Requirement}
 BOOKKEEPING = {"rev", "field_revs"}
+
+
+TICKET_TTL = 120  # seconds; the browser fetches a fresh ticket for every (re)connect
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _unb64url(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def _ticket_sig(body: str) -> str:
+    return _b64url(hmac.new(INTERNAL_TOKEN.encode(), f"collab-ticket.{body}".encode(), hashlib.sha256).digest())
+
+
+def sign_ticket(claims: dict[str, Any], ttl: int = TICKET_TTL, now: float | None = None) -> str:
+    """A short-lived ticket for the collab server: ``<base64url(json claims)>.<base64url(HMAC-SHA256)>``.
+
+    Claims: uid, name, color, doc (``<pid>:<branch>``), ro (read-only), exp (unix seconds). Keyed with
+    ARCHFLOW_INTERNAL_TOKEN, which the collab server shares (see collab/src/server.ts verifyTicket)."""
+    if not INTERNAL_TOKEN:
+        raise RuntimeError("ARCHFLOW_INTERNAL_TOKEN is not configured")
+    payload = {**claims, "exp": int((now if now is not None else time.time()) + ttl)}
+    body = _b64url(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
+    return f"{body}.{_ticket_sig(body)}"
+
+
+def verify_ticket(ticket: str, doc: str | None = None, now: float | None = None) -> dict[str, Any]:
+    """Claims of a valid ticket; raises ValueError if the signature, expiry or document does not match."""
+    if not INTERNAL_TOKEN:
+        raise ValueError("ARCHFLOW_INTERNAL_TOKEN is not configured")
+    body, _, sig = (ticket or "").partition(".")
+    if not body or not sig or not hmac.compare_digest(sig, _ticket_sig(body)):
+        raise ValueError("bad ticket signature")
+    try:
+        claims = json.loads(_unb64url(body))
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("malformed ticket") from exc
+    if not isinstance(claims, dict) or float(claims.get("exp", 0)) < (now if now is not None else time.time()):
+        raise ValueError("ticket expired")
+    if doc is not None and claims.get("doc") != doc:
+        raise ValueError("ticket is for another document")
+    return claims
 
 
 def doc_name(pid: str, branch: str) -> str:

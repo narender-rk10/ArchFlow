@@ -10,7 +10,7 @@ os.environ["ARCHFLOW_AI"] = "offline"
 
 import httpx  # noqa: E402
 import pytest  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
+from authhelp import new_client, signup  # noqa: E402
 
 from archflow import jev, llm  # noqa: E402
 from archflow.main import create_app  # noqa: E402
@@ -246,7 +246,7 @@ def test_llm_fallback_when_jev_fails(monkeypatch):
                 "scores": [{"alternative": "A", **row}, {"alternative": "B", **row, "performance": 5}]}
 
     monkeypatch.setattr(jev, "call_jev", failing)
-    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(llm, "available", lambda *a, **k: True)
     monkeypatch.setattr(llm, "complete_json", fake_complete_json)
     out = jev.evaluate(REQS, ALTS)
     assert out["engine"] == "llm" and out["recommended"] == "draft/scaled"
@@ -266,7 +266,8 @@ def test_llm_fallback_when_jev_fails(monkeypatch):
 @pytest.fixture()
 def client():
     store = Store(":memory:")
-    with TestClient(create_app(store), base_url=BASE, follow_redirects=False) as c:
+    with new_client(create_app(store), base_url=BASE) as c:
+        signup(c)
         yield c
 
 
@@ -294,7 +295,7 @@ def test_decision_rest_crud(client):
         "alternatives": [{"name": "Kafka"}, {"name": "RabbitMQ", "pros": ["simple"]}], "chosen": "Kafka"})
     assert r.status_code == 201, r.text
     d = r.json()
-    assert d["id"] == "ADR-001" and d["alternatives"][1]["pros"] == ["simple"] and d["author"] == "nk"
+    assert d["id"] == "ADR-001" and d["alternatives"][1]["pros"] == ["simple"] and d["author"] == "Owner"
     assert client.get(f"/api/projects/{pid}/decisions/ADR-001").json()["title"] == "Use Kafka for events"
     assert client.get(f"/api/projects/{pid}/decisions/ADR-999").status_code == 404
     assert client.post(f"/api/projects/{pid}/decisions", json={"title": "x", "status": "maybe"}).status_code == 422
@@ -368,7 +369,7 @@ def test_mcp_decision_tools(client):
                           alternatives=[{"name": "Redis"}, {"name": "DB sessions"}], chosen="Redis",
                           requirement_ids=["REQ-001"])
     assert not err, text
-    assert out["id"] == "ADR-002" and out["author"] == "Claude Tester via MCP"
+    assert out["id"] == "ADR-002" and out["author"] == "Owner via MCP"
     err, _, text = tool(client, at, "create_decision", project_id=pid, title="Bad", status="maybe")
     assert err
 

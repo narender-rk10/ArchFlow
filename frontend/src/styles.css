@@ -403,6 +403,23 @@ select.convert { font-size: 12.5px; padding: 4px 6px; }
   max-height: 260px; overflow: auto; white-space: pre; margin: 0; }
 @media (max-width: 900px) { .crumbs { left: 10px; top: 54px; max-width: calc(100% - 20px); } }
 
+/* ---- accounts: sign-in, user menu, read-only mode, org dialogs ---- */
+.auth .auth-card { display: flex; flex-direction: column; gap: 10px; max-width: 420px; width: 100%; align-self: center; }
+.auth .auth-card .field input { width: 100%; }
+.invite-note { background: color-mix(in srgb, var(--primary) 10%, var(--panel)); border-radius: 8px; padding: 8px 10px; margin: 0; }
+.user-menu { position: relative; }
+.avatar-btn { padding: 0; border: none; background: none; border-radius: 50%; }
+.user-menu-pop {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; min-width: 220px; display: flex; flex-direction: column; gap: 6px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; box-shadow: var(--shadow);
+}
+.ro-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--warn); white-space: nowrap; }
+fieldset.bare { border: 0; margin: 0; padding: 0; min-width: 0; display: contents; }
+fieldset.bare:disabled input, fieldset.bare:disabled textarea, fieldset.bare:disabled select { opacity: .75; }
+.members select { min-width: 110px; }
+.roles-help { margin-top: 10px; }
+.ok { color: var(--ok); }
+
 /* five sidebar tabs: shrink to fit instead of overflowing */
 .sidebar .tabs { overflow: hidden; }
 .sidebar .tabs button { min-width: 0; padding: 10px 2px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

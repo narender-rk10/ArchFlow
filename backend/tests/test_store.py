@@ -76,14 +76,42 @@ def test_orgs_and_members(store, org):
     assert store.get_org("org-missing") is None
     assert org["id"] in {o["id"] for o in store.list_orgs()}
 
-    m = store.add_member(org["id"], "alice", "owner")
-    assert m["org_id"] == org["id"] and m["user_name"] == "alice" and m["role"] == "owner"
-    store.add_member(org["id"], "bob", "member")
-    store.add_member(org["id"], "bob", "admin")  # upsert changes role
-    members = {x["user_name"]: x["role"] for x in store.list_members(org["id"])}
-    assert members == {"alice": "owner", "bob": "admin"}
+    tag = org["id"]  # unique per test run (Postgres is shared across runs)
+    alice = store.create_user(f"alice+{tag}@example.com", "Alice", "scrypt$x")
+    bob = store.create_user(f"bob+{tag}@example.com", "Bob", "scrypt$x")
+    assert store.get_user_by_email(f"alice+{tag}@example.com")["id"] == alice["id"]
+    assert "password_hash" not in alice and store.get_user_by_email(alice["email"], with_hash=True)["password_hash"]
+    m = store.add_member(org["id"], alice["id"], "owner")
+    assert m["org_id"] == org["id"] and m["user_id"] == alice["id"] and m["name"] == "Alice" and m["role"] == "owner"
+    store.add_member(org["id"], bob["id"], "viewer")
+    store.add_member(org["id"], bob["id"], "admin")  # upsert changes role
+    members = {x["name"]: x["role"] for x in store.list_members(org["id"])}
+    assert members == {"Alice": "owner", "Bob": "admin"}
+    assert store.get_role(org["id"], bob["id"]) == "admin" and store.count_role(org["id"], "owner") == 1
+    assert [o["role"] for o in store.list_user_orgs(alice["id"]) if o["id"] == org["id"]] == ["owner"]
+    assert store.remove_member(org["id"], bob["id"]) and store.get_role(org["id"], bob["id"]) is None
     assert store.list_members(DEFAULT_ORG_ID) == [] or all(
         x["org_id"] == DEFAULT_ORG_ID for x in store.list_members(DEFAULT_ORG_ID))
+
+
+def test_sessions_invites_and_ai_keys(store, org):
+    import time as _t
+    u = store.create_user(f"sess+{org['id']}@example.com", "S", "scrypt$x")
+    store.create_session(f"h-{org['id']}", u["id"], _t.time() + 60, "pytest")
+    assert store.get_session(f"h-{org['id']}")["user_id"] == u["id"]
+    store.revoke_session(f"h-{org['id']}")
+    assert store.get_session(f"h-{org['id']}") is None
+    store.create_session(f"old-{org['id']}", u["id"], _t.time() - 1)
+    assert store.get_session(f"old-{org['id']}") is None  # expired
+    inv = store.create_invite(org["id"], f"ih-{org['id']}", "developer", _t.time() + 60, email=None, created_by=u["id"])
+    assert store.get_invite(f"ih-{org['id']}")["id"] == inv["id"] and [i["id"] for i in store.list_invites(org["id"])] == [inv["id"]]
+    assert store.accept_invite(inv["id"], u["id"]) and not store.accept_invite(inv["id"], u["id"])  # single use
+    assert store.get_invite(f"ih-{org['id']}") is None
+    store.set_ai_key(org["id"], "gemini", "v1:abc", "1234", u["id"])
+    store.set_ai_key(org["id"], "gemini", "v1:def", "5678", u["id"])
+    assert [(k["provider"], k["last4"]) for k in store.list_ai_keys(org["id"])] == [("gemini", "5678")]
+    store.delete_ai_key(org["id"], "gemini")
+    assert store.list_ai_keys(org["id"]) == []
 
 
 # ---------------------------------------------------------------- projects

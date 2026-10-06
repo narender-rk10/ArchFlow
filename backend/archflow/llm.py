@@ -34,6 +34,10 @@ Environment:
     ARCHFLOW_LLM_BREAKER_FAILS (5), ARCHFLOW_LLM_BREAKER_COOLDOWN seconds (30)
     LANGFUSE_PUBLIC_KEY             enables LiteLLM's langfuse callback when set
 
+Per-org keys (BYOK): ``set_org_key_resolver`` (wired in main.create_app to the encrypted org_ai_keys table) lets
+a call made with ``org_id`` use that org's own provider keys through a per-org Router (rebuilt when the keys
+change); providers the org has not configured fall back to the environment keys above.
+
 Logging goes to the ``archflow.llm`` logger. API keys and prompt contents are never logged.
 """
 
@@ -48,13 +52,14 @@ import random
 import re
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 log = logging.getLogger("archflow.llm")
 
 __all__ = ["LLMUnavailable", "LLMRefused", "LLMInvalidOutput", "available", "status",
-           "complete_json", "complete_tools"]
+           "complete_json", "complete_tools", "set_org_key_resolver", "invalidate_org"]
 
 
 # Thinking models (Gemini 3.x, Claude, GPT-5) spend output tokens on reasoning before answering; a small
@@ -128,8 +133,12 @@ def _provider(model: str) -> str:
     return "unknown"
 
 
-def _keys(provider: str) -> list[str | None]:
-    """API keys for a provider. ``[None]`` means "let LiteLLM resolve credentials" (other providers)."""
+def _keys(provider: str, org_keys: dict[str, str] | None = None) -> list[str | None]:
+    """API keys for a provider. ``[None]`` means "let LiteLLM resolve credentials" (other providers).
+
+    A key the org configured for this provider (``org_keys``) replaces the environment's keys."""
+    if org_keys and org_keys.get(provider):
+        return [org_keys[provider]]
     if provider == "gemini":
         keys = [k.strip() for k in os.environ.get("GEMINI_API_KEYS", "").split(",")]
         keys += [os.environ.get(e, "").strip() for e in _KEY_ENVS["gemini"]]
@@ -169,10 +178,10 @@ class Tier:
     keys: tuple          # API keys (never logged)
 
 
-def _tiers(group: str) -> list[Tier]:
+def _tiers(group: str, org_keys: dict[str, str] | None = None) -> list[Tier]:
     tiers: list[Tier] = []
     for i, model in enumerate(_group_models(group)):
-        keys = _keys(_provider(model))
+        keys = _keys(_provider(model), org_keys)
         if keys:
             tiers.append(Tier(group if i == 0 else f"{group}#{i + 1}", model, tuple(keys)))
     return tiers
@@ -183,10 +192,35 @@ def primary_model(group: str = "reasoning") -> str:
     return _group_models(group)[0]
 
 
-def available() -> bool:
+# --------------------------------------------------------------------------- per-org keys (BYOK)
+OrgKeyResolver = Callable[[str], "dict[str, str]"]
+_org_key_resolver: OrgKeyResolver | None = None
+
+
+def set_org_key_resolver(resolver: OrgKeyResolver | None) -> None:
+    """Register ``resolver(org_id) -> {provider: api_key}`` (decrypted org keys; see secrets_box.py).
+
+    When a call passes ``org_id`` and the org has a key for a provider, that key is used for the call instead of
+    the environment's key(s) for the same provider. Providers without an org key fall back to the environment."""
+    global _org_key_resolver
+    _org_key_resolver = resolver
+
+
+def _org_keys(org_id: str | None) -> dict[str, str]:
+    if not org_id or _org_key_resolver is None:
+        return {}
+    try:
+        return {k: v for k, v in (_org_key_resolver(org_id) or {}).items() if v}
+    except Exception:  # noqa: BLE001 - a broken key store must not take AI down; env keys still work
+        log.exception("could not load AI keys for org %s; using environment keys", org_id)
+        return {}
+
+
+def available(org_id: str | None = None) -> bool:
     if _mode() == "offline":
         return False
-    return any(_tiers(g) for g in GROUPS)
+    org_keys = _org_keys(org_id)
+    return any(_tiers(g, org_keys) for g in GROUPS)
 
 
 def status() -> dict:
@@ -203,14 +237,18 @@ _router_lock = threading.Lock()
 _router: Any = None
 _router_sig: str | None = None
 _callbacks_set = False
+# Routers for orgs with their own keys: org_id -> (config signature, Router). A key change produces a new
+# signature, so the org's router is rebuilt on its next call (and the old one, holding the old key, dropped).
+_org_routers: "OrderedDict[str, tuple[str, Any]]" = OrderedDict()
+MAX_ORG_ROUTERS = 256
 
 
-def _router_config() -> tuple[list[dict], list[dict]]:
+def _router_config(org_keys: dict[str, str] | None = None) -> tuple[list[dict], list[dict]]:
     model_list: list[dict] = []
     fallbacks: list[dict] = []
     timeout = _env_float("ARCHFLOW_LLM_TIMEOUT", 120)
     for g in GROUPS:
-        tiers = _tiers(g)
+        tiers = _tiers(g, org_keys)
         for t in tiers:
             for i, key in enumerate(t.keys):
                 params: dict[str, Any] = {"model": t.model, "timeout": timeout}
@@ -223,36 +261,59 @@ def _router_config() -> tuple[list[dict], list[dict]]:
     return model_list, fallbacks
 
 
-def _get_router():
-    """Build (or rebuild when env config changes) the shared LiteLLM Router."""
-    global _router, _router_sig, _callbacks_set
-    model_list, fallbacks = _router_config()
+def _build_router(model_list: list[dict], fallbacks: list[dict]) -> Any:
+    global _callbacks_set
+    import litellm
+    from litellm import Router
+
+    if os.environ.get("LANGFUSE_PUBLIC_KEY") and not _callbacks_set:
+        for attr in ("success_callback", "failure_callback"):
+            cbs = getattr(litellm, attr)
+            if "langfuse" not in cbs:
+                cbs.append("langfuse")
+        _callbacks_set = True
+    return Router(
+        model_list=model_list,
+        num_retries=_env_int("ARCHFLOW_LLM_ROUTER_RETRIES", 2),
+        retry_after=1,              # minimum wait; provider Retry-After headers take precedence
+        allowed_fails=3,            # failures/minute before a deployment is cooled down
+        cooldown_time=30,
+        fallbacks=fallbacks,        # used by direct router callers; _dispatch drives tiers itself
+        timeout=_env_float("ARCHFLOW_LLM_TIMEOUT", 120),
+        routing_strategy="simple-shuffle",
+    )
+
+
+def _get_router(org_keys: dict[str, str] | None = None, org_id: str | None = None):
+    """The shared LiteLLM Router (rebuilt when env config changes), or an org's own router when it has keys."""
+    global _router, _router_sig
+    model_list, fallbacks = _router_config(org_keys)
     sig = hashlib.sha256(json.dumps([model_list, fallbacks], sort_keys=True).encode()).hexdigest()
     with _router_lock:
+        if org_keys and org_id:
+            cached = _org_routers.get(org_id)
+            if cached and cached[0] == sig:
+                _org_routers.move_to_end(org_id)
+                return cached[1]
+            router = _build_router(model_list, fallbacks)
+            _org_routers[org_id] = (sig, router)
+            _org_routers.move_to_end(org_id)
+            while len(_org_routers) > MAX_ORG_ROUTERS:
+                _org_routers.popitem(last=False)
+            log.info("LLM router configured for org %s (own keys for %s)", org_id, sorted(org_keys))
+            return router
         if _router is not None and sig == _router_sig:
             return _router
-        import litellm
-        from litellm import Router
-
-        if os.environ.get("LANGFUSE_PUBLIC_KEY") and not _callbacks_set:
-            for attr in ("success_callback", "failure_callback"):
-                cbs = getattr(litellm, attr)
-                if "langfuse" not in cbs:
-                    cbs.append("langfuse")
-            _callbacks_set = True
-        _router = Router(
-            model_list=model_list,
-            num_retries=_env_int("ARCHFLOW_LLM_ROUTER_RETRIES", 2),
-            retry_after=1,              # minimum wait; provider Retry-After headers take precedence
-            allowed_fails=3,            # failures/minute before a deployment is cooled down
-            cooldown_time=30,
-            fallbacks=fallbacks,        # used by direct router callers; _dispatch drives tiers itself
-            timeout=_env_float("ARCHFLOW_LLM_TIMEOUT", 120),
-            routing_strategy="simple-shuffle",
-        )
+        _router = _build_router(model_list, fallbacks)
         _router_sig = sig
         log.info("LLM router configured: %s", {g: [t.model for t in _tiers(g)] for g in GROUPS})
         return _router
+
+
+def invalidate_org(org_id: str) -> None:
+    """Forget an org's router (called when its keys change)."""
+    with _router_lock:
+        _org_routers.pop(org_id, None)
 
 
 def _reset() -> None:
@@ -260,6 +321,7 @@ def _reset() -> None:
     global _router, _router_sig
     with _router_lock:
         _router, _router_sig = None, None
+        _org_routers.clear()
     _breakers.clear()
     org_limiter.reset()
 
@@ -439,12 +501,14 @@ def _dispatch(group: str, org_id: str | None, **kwargs) -> Any:
     """Call the router tier by tier with backoff, breaker and explicit re-dispatch. Returns a ModelResponse."""
     if _mode() == "offline":
         raise LLMUnavailable("AI is disabled (ARCHFLOW_AI=offline)")
-    tiers = _tiers(group)
+    org_keys = _org_keys(org_id)
+    tiers = _tiers(group, org_keys)
     if not tiers:
-        raise LLMUnavailable("No LLM provider configured (set GEMINI_API_KEY, ANTHROPIC_API_KEY or OPENAI_API_KEY)")
+        raise LLMUnavailable("No LLM provider configured (set GEMINI_API_KEY, ANTHROPIC_API_KEY or OPENAI_API_KEY, "
+                             "or add your organization's own key in AI settings)")
     _acquire_org(org_id)
 
-    router = _get_router()
+    router = _get_router(org_keys, org_id) if org_keys else _get_router()
     max_attempts = max(1, _env_int("ARCHFLOW_LLM_MAX_ATTEMPTS", 5))
     base, cap = _env_float("ARCHFLOW_LLM_BACKOFF_BASE", 0.5), _env_float("ARCHFLOW_LLM_BACKOFF_CAP", 20.0)
     deadline = time.monotonic() + _env_float("ARCHFLOW_LLM_DEADLINE", 120.0)
@@ -454,7 +518,8 @@ def _dispatch(group: str, org_id: str | None, **kwargs) -> Any:
     errors: list[str] = []
 
     for tier_idx, tier in enumerate(tiers):
-        breaker = _breaker(tier.model)
+        # An org's own key gets its own breaker: one org's bad key must not trip the shared provider circuit.
+        breaker = _breaker(tier.model + (f"@{org_id}" if org_keys.get(_provider(tier.model)) else ""))
         if not breaker.allow():
             log.info("llm skip model=%s group=%s reason=circuit_open", tier.model, group)
             errors.append(f"{tier.model}: circuit open")

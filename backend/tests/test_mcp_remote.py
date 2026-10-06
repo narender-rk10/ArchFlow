@@ -11,7 +11,7 @@ os.environ.setdefault("ARCHFLOW_DB", ":memory:")
 os.environ["ARCHFLOW_AI"] = "offline"
 
 import pytest  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
+from authhelp import ORIGIN, member_client, new_client, signup  # noqa: E402
 
 from archflow.main import create_app  # noqa: E402
 from archflow.store import Store  # noqa: E402
@@ -25,11 +25,12 @@ MCP_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": 
 @pytest.fixture()
 def env():
     store = Store(":memory:")
-    with TestClient(create_app(store), base_url=BASE, follow_redirects=False) as client:
+    with new_client(create_app(store), base_url=BASE) as client:
+        signup(client)
         yield client, store
 
 
-def oauth_login(client, access="write", org_id="org-default", user="Claude Tester", scope="archflow:read archflow:write"):
+def oauth_login(client, access="write", org_id="org-default", scope="archflow:read archflow:write"):
     reg = client.post("/register", json={"redirect_uris": [REDIRECT], "client_name": "Test Agent",
                                          "token_endpoint_auth_method": "none",
                                          "grant_types": ["authorization_code", "refresh_token"], "scope": scope})
@@ -47,7 +48,7 @@ def oauth_login(client, access="write", org_id="org-default", user="Claude Teste
     page = client.get("/oauth/consent", params={"request": request_id})
     assert page.status_code == 200 and "Test Agent" in page.text
     r = client.post("/oauth/consent", data={"request": request_id, "decision": "approve", "org_id": org_id,
-                                            "user_name": user, "access": access})
+                                            "access": access})
     assert r.status_code == 302, r.text
     q = parse_qs(urlparse(r.headers["location"]).query)
     assert q["state"] == ["xyz"]
@@ -99,7 +100,7 @@ def test_oauth_flow_and_tools(env):
     assert {"get_architecture", "add_component", "list_tasks", "get_task_brief", "report_progress"} <= names
 
     err, who, _ = tool(client, at, "whoami")
-    assert not err and who["user"] == "Claude Tester" and who["access"] == "read-write"
+    assert not err and who["user"] == "Owner" and who["access"] == "read-write"
     err, out, text = tool(client, at, "get_architecture", project_id=pid)
     assert not err and len(out["components"]) == 10
 
@@ -107,7 +108,7 @@ def test_oauth_flow_and_tools(env):
     assert not err, text
     state = client.get(f"/api/projects/{pid}").json()["state"]
     assert "payments" in state["nodes"]
-    assert client.get(f"/api/projects/{pid}/activity").json()[0]["actor"] == "Claude Tester via MCP"
+    assert client.get(f"/api/projects/{pid}/activity").json()[0]["actor"] == "Owner via MCP"
 
     err, out, text = tool(client, at, "list_tasks", project_id=pid)
     tasks = json.loads(text) if not out else out.get("result", out)
@@ -150,7 +151,7 @@ def test_read_only_scope_and_refresh_rotation(env):
 def test_personal_access_token_lifecycle(env):
     client, store = env
     pid = client.post("/api/projects", json={"name": "P", "template": "blank"}).json()["id"]
-    created = client.post("/api/orgs/org-default/tokens", json={"name": "CI", "user_name": "ci-bot", "access": "write"}).json()
+    created = client.post("/api/orgs/org-default/tokens", json={"name": "CI", "user_name": "ignored", "access": "write"}).json()
     secret = created["token"]
     assert secret.startswith("afp_") and "token_hash" not in created
     err, _, text = tool(client, secret, "add_component", project_id=pid, name="Worker")
@@ -171,3 +172,108 @@ def test_consent_denied(env):
     r = client.post("/oauth/consent", data={"request": rid, "decision": "deny"})
     q = parse_qs(urlparse(r.headers["location"]).query)
     assert q["error"] == ["access_denied"] and q["state"] == ["s"]
+
+
+def start_authorize(client, scope="archflow:read archflow:write"):
+    reg = client.post("/register", json={"redirect_uris": [REDIRECT], "client_name": "Agent",
+                                         "token_endpoint_auth_method": "none", "scope": scope})
+    cid = reg.json()["client_id"]
+    r = client.get("/authorize", params={"response_type": "code", "client_id": cid, "redirect_uri": REDIRECT,
+                                         "code_challenge": "x" * 43, "code_challenge_method": "S256", "state": "s",
+                                         "scope": scope, "resource": f"{BASE}/mcp"})
+    return parse_qs(urlparse(r.headers["location"]).query)["request"][0]
+
+
+def test_consent_requires_login_and_api_login_form(env):
+    client, store = env
+    app = client.app
+    anon = new_client(app, base_url=BASE)
+    rid = start_authorize(anon)
+    # Not signed in: the consent page sends you to the API-served sign-in form, which returns you here.
+    r = anon.get("/oauth/consent", params={"request": rid})
+    assert r.status_code == 303 and r.headers["location"].startswith("/oauth/login?next=")
+    login_url = r.headers["location"]
+    assert "Sign in" in anon.get(login_url).text
+    # Approving without a session is impossible.
+    r = anon.post("/oauth/consent", data={"request": rid, "decision": "approve", "org_id": "org-default", "access": "write"})
+    assert r.status_code == 303 and "/oauth/login" in r.headers["location"]
+    # Wrong password, then the right one; the redirect target is only ever a consent URL (no open redirect).
+    nxt = f"/oauth/consent?request={rid}"
+    bad = anon.post("/oauth/login", data={"email": "owner@example.com", "password": "wrong password!", "next": nxt})
+    assert bad.status_code == 401
+    ok = anon.post("/oauth/login", data={"email": "owner@example.com", "password": "correct horse battery staple",
+                                         "next": nxt})
+    assert ok.status_code == 303 and ok.headers["location"] == nxt
+    page = anon.get(nxt)
+    assert page.status_code == 200 and "Default" in page.text and "Owner" in page.text
+    evil = anon.post("/oauth/login", data={"email": "owner@example.com", "password": "correct horse battery staple",
+                                           "next": "https://evil.example/steal"})
+    assert evil.status_code == 200 and "location" not in evil.headers
+    # A login form posted from another site is rejected (login CSRF).
+    cross = new_client(app, base_url=BASE)
+    cross.headers["Origin"] = "https://evil.example"
+    assert cross.post("/oauth/login", data={"email": "owner@example.com", "password": "x" * 12}).status_code == 403
+
+
+def test_consent_lists_only_my_orgs_and_caps_scopes_by_role(env):
+    client, store = env
+    app = client.app
+    hidden = client.post("/api/orgs", json={"name": "Owner Private"}).json()["id"]
+    viewer = member_client(app, client, "viewer", "viewer@example.com", "Vera")
+    pid = client.post("/api/projects", json={"name": "Shop", "template": "ai-customer-support"}).json()["id"]
+    # Consent runs as the viewer; MCP calls use bearer tokens through the lifespan-managed owner client.
+    rid = start_authorize(viewer)
+    page = viewer.get("/oauth/consent", params={"request": rid}).text
+    assert "Default" in page and "read only" in page and "Owner Private" not in page
+    # Not a member of that org: refused.
+    r = viewer.post("/oauth/consent", data={"request": rid, "decision": "approve", "org_id": hidden, "access": "write"})
+    assert r.status_code == 400
+    # Asking for write as a viewer yields a read-only token.
+    _, tokens = oauth_login(viewer, access="write")
+    assert tokens["scope"] == "archflow:read"
+    err, _, text = tool(client, tokens["access_token"], "add_component", project_id=pid, name="X")
+    assert err and "read-only" in text
+    err, who, _ = tool(client, tokens["access_token"], "whoami")
+    assert not err and who["user"] == "Vera" and who["access"] == "read-only"
+
+
+def test_removed_member_loses_mcp_access_immediately(env):
+    client, store = env
+    app = client.app
+    dev = member_client(app, client, "developer", "dev@example.com", "Dev")
+    pid = client.post("/api/projects", json={"name": "Shop", "template": "blank"}).json()["id"]
+    dev_id = dev.get("/api/me").json()["user"]["id"]
+    _, tokens = oauth_login(dev)  # consent as the developer; MCP calls via the lifespan-managed client
+    err, _, text = tool(client, tokens["access_token"], "add_component", project_id=pid, name="Worker")
+    assert not err, text
+    # Demoted to viewer: the same token is now read-only.
+    assert client.patch(f"/api/orgs/org-default/members/{dev_id}", json={"role": "viewer"}).status_code == 200
+    err, _, text = tool(client, tokens["access_token"], "add_component", project_id=pid, name="Other")
+    assert err and "read-only" in text
+    # Removed: the token stops working (and the refresh token cannot mint new ones).
+    assert client.delete(f"/api/orgs/org-default/members/{dev_id}").status_code == 204
+    assert mcp_call(client, tokens["access_token"], "tools/list").status_code == 401
+
+
+def test_membership_recheck_even_if_tokens_not_revoked(env):
+    client, store = env
+    app = client.app
+    dev = member_client(app, client, "developer", "dev2@example.com", "Dev2")
+    dev_id = dev.get("/api/me").json()["user"]["id"]
+    _, tokens = oauth_login(dev)
+    assert mcp_call(client, tokens["access_token"], "tools/list").status_code == 200
+    store.remove_member("org-default", dev_id)  # bypass the API (no token revocation): the re-check still applies
+    assert mcp_call(client, tokens["access_token"], "tools/list").status_code == 401
+
+
+def test_pat_requires_admin_and_is_owned_by_creator(env):
+    client, store = env
+    app = client.app
+    dev = member_client(app, client, "developer", "dev3@example.com", "Dev3")
+    assert dev.post("/api/orgs/org-default/tokens", json={"name": "CI", "access": "write"}).status_code == 403
+    assert dev.get("/api/orgs/org-default/tokens").status_code == 403
+    created = client.post("/api/orgs/org-default/tokens", json={"name": "CI", "user_name": "spoof", "access": "write"})
+    assert created.status_code == 201
+    rec = created.json()
+    assert rec["user_name"] == "Owner" and rec["user_id"] == client.get("/api/me").json()["user"]["id"]
+    assert ORIGIN  # clients send the trusted dev origin

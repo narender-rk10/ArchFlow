@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("ARCHFLOW_DB", ":memory:")
 os.environ["ARCHFLOW_AI"] = "offline"
 
-from fastapi.testclient import TestClient  # noqa: E402
+from authhelp import authed_client  # noqa: E402
 
 from archflow import collab_sync  # noqa: E402
 from archflow.main import create_app  # noqa: E402
@@ -71,7 +71,7 @@ def test_internal_endpoints_and_live_doc_sync(monkeypatch):
 
     monkeypatch.setattr(collab_sync, "push_patch", fake_push)
     store = Store(":memory:")
-    client = TestClient(create_app(store))
+    client = authed_client(create_app(store))
     pid = client.post("/api/projects", json={"name": "P", "template": "ai-customer-support"}).json()["id"]
     name = f"{pid}:main"
 
@@ -93,7 +93,7 @@ def test_internal_endpoints_and_live_doc_sync(monkeypatch):
 
     # Server-side edits (MCP/AI/REST ops) are pushed to the live doc as a field-level patch.
     client.post(f"/api/projects/{pid}/ops", json={"ops": [{"op": "update_node", "id": "orders-db", "changes": {"name": "Orders"}}], "actor": "mcp"})
-    assert pushed[-1][2] == {"nodes": {"set": {"orders-db": {"name": "Orders"}}, "del": []}} and pushed[-1][3] == "mcp"
+    assert pushed[-1][2] == {"nodes": {"set": {"orders-db": {"name": "Orders"}}, "del": []}} and pushed[-1][3] == "Owner"  # the signed-in user, not the client-supplied actor
 
 
 def test_unreachable_collab_drops_stale_doc(monkeypatch):
@@ -102,7 +102,7 @@ def test_unreachable_collab_drops_stale_doc(monkeypatch):
 
     monkeypatch.setattr(collab_sync, "push_patch", down)
     store = Store(":memory:")
-    client = TestClient(create_app(store))
+    client = authed_client(create_app(store))
     pid = client.post("/api/projects", json={"name": "P"}).json()["id"]
     store.put_ydoc(pid, "main", b"stale")
     client.post(f"/api/projects/{pid}/ops", json={"ops": [{"op": "add_node", "node": {"name": "X"}}]})

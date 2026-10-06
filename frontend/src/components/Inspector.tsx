@@ -15,9 +15,11 @@ interface Props {
   pid?: string;
   branch?: string;
   onOpenInternals?: (nodeId: string) => void;
+  /** Viewer/reviewer: fields are shown but disabled, delete actions hidden. */
+  readOnly?: boolean;
 }
 
-export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pid, branch, onOpenInternals }: Props) {
+export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pid, branch, onOpenInternals, readOnly = false }: Props) {
   if (nodeIds.length === 1 && edgeIds.length === 0) {
     const n = state.nodes[nodeIds[0]];
     if (!n) return null;
@@ -30,6 +32,7 @@ export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pi
           <span className="an-glyph">{TYPE_META[n.type].glyph}</span> {n.name}
           <span className="muted small mono">{n.id}</span>
         </div>
+        <fieldset className="bare" disabled={readOnly}>
         <Field label="Name" value={n.name} rev={state.rev} onCommit={(v, b) => upd("name", v, b)} />
         <Field label="Type" value={n.type} rev={state.rev} options={NODE_TYPES} onCommit={(v, b) => upd("type", v, b)} />
         {(() => {
@@ -88,6 +91,7 @@ export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pi
             })}
           </div>
         </div>
+        </fieldset>
         <div className="insp-actions">
           {onOpenInternals && n.type !== "note" && (
             <button onClick={() => onOpenInternals(n.id)} title="Open this component's internal (low-level) diagram">
@@ -95,7 +99,7 @@ export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pi
             </button>
           )}
           <button onClick={onPrompt}>⚙ Build this (coding prompt)</button>
-          <button className="danger" onClick={() => send([{ op: "remove_node", id: n.id }])}>Delete</button>
+          {!readOnly && <button className="danger" onClick={() => send([{ op: "remove_node", id: n.id }])}>Delete</button>}
         </div>
         {pid && branch && !n.parent_id && n.type !== "note" && <LldViews pid={pid} branch={branch} nodeId={n.id} rev={state.rev} />}
         <p className="muted small">rev {n.rev} · connections {Object.values(state.edges).filter((e) => e.source === n.id || e.target === n.id).length}</p>
@@ -112,12 +116,16 @@ export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pi
       <div className="inspector">
         <div className="insp-head">Connection</div>
         <p className="small">{state.nodes[e.source]?.name} → {state.nodes[e.target]?.name}</p>
+        <fieldset className="bare" disabled={readOnly}>
         <Field label="Protocol" value={e.protocol} rev={state.rev} placeholder="REST, gRPC, Kafka, MCP, A2A…" onCommit={(v, b) => upd("protocol", v, b)} />
         <Field label="Label" value={e.label} rev={state.rev} onCommit={(v, b) => upd("label", v, b)} />
-        <div className="insp-actions">
-          <button onClick={() => send([{ op: "update_edge", id: e.id, changes: { source: e.target, target: e.source } }])}>⇄ Reverse</button>
-          <button className="danger" onClick={() => send([{ op: "remove_edge", id: e.id }])}>Delete</button>
-        </div>
+        </fieldset>
+        {!readOnly && (
+          <div className="insp-actions">
+            <button onClick={() => send([{ op: "update_edge", id: e.id, changes: { source: e.target, target: e.source } }])}>⇄ Reverse</button>
+            <button className="danger" onClick={() => send([{ op: "remove_edge", id: e.id }])}>Delete</button>
+          </div>
+        )}
       </div>
     );
   }
@@ -129,11 +137,11 @@ export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pi
         <p className="muted small">Ctrl+C / Ctrl+V to copy, Ctrl+D to duplicate, Delete to remove.</p>
         <div className="insp-actions">
           <button onClick={onPrompt}>⚙ Build selected architecture</button>
-          <button className="danger" onClick={() => send([
+          {!readOnly && <button className="danger" onClick={() => send([
             ...edgeIds.filter((id) => !nodeIds.includes(state.edges[id]?.source) && !nodeIds.includes(state.edges[id]?.target))
               .map((id) => ({ op: "remove_edge", id })),
             ...nodeIds.map((id) => ({ op: "remove_node", id })),
-          ])}>Delete selection</button>
+          ])}>Delete selection</button>}
         </div>
       </div>
     );
@@ -141,7 +149,8 @@ export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pi
 
   return (
     <div className="inspector empty">
-      <p className="muted small">Select a component or connection to edit it.</p>
+      <p className="muted small">{readOnly ? "Select a component or connection to see its details. You have read-only access."
+        : "Select a component or connection to edit it."}</p>
       <ul className="muted small tips">
         <li>Drag components from the palette onto the canvas.</li>
         <li>Drag from a handle to another component to connect.</li>

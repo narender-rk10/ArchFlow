@@ -19,6 +19,8 @@ interface Props {
   aiBusy: string | null;
   onCommand: (text: string) => void;
   onAsk: (text: string) => void;
+  /** Viewer/reviewer: only "Ask" (questions about the project) is available. */
+  readOnly?: boolean;
 }
 
 const SUGGESTIONS = [
@@ -28,9 +30,10 @@ const SUGGESTIONS = [
   "Add authentication and PII protection requirements",
 ];
 
-export function CommandBar({ log, selectionCount, aiBusy, onCommand, onAsk }: Props) {
+export function CommandBar({ log, selectionCount, aiBusy, onCommand, onAsk, readOnly = false }: Props) {
   const [text, setText] = useState("");
-  const [mode, setMode] = useState<"command" | "ask">("command");
+  const [modeState, setMode] = useState<"command" | "ask">(readOnly ? "ask" : "command");
+  const mode = readOnly ? "ask" : modeState;
   const [expanded, setExpanded] = useState(true);
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -74,7 +77,7 @@ export function CommandBar({ log, selectionCount, aiBusy, onCommand, onAsk }: Pr
       )}
       <form className="cmd-form" onSubmit={submit}>
         <div className="seg">
-          <button type="button" className={mode === "command" ? "on" : ""} onClick={() => setMode("command")}>Edit</button>
+          {!readOnly && <button type="button" className={mode === "command" ? "on" : ""} onClick={() => setMode("command")}>Edit</button>}
           <button type="button" className={mode === "ask" ? "on" : ""} onClick={() => setMode("ask")}>Ask</button>
         </div>
         <input

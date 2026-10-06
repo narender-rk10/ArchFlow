@@ -480,7 +480,7 @@ def next_turn(turns: list[dict[str, Any]], state: ProjectState, org_id: str | No
     """Return {"message", "card", "engine"} for the next assistant turn."""
     try:
         from . import llm
-        if llm.available():
+        if llm.available(org_id):
             try:
                 return {**llm_turn(turns, state, org_id), "engine": "llm"}
             except (llm.LLMUnavailable, llm.LLMRefused, ValueError, KeyError, TypeError) as exc:

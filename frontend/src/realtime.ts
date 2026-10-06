@@ -22,7 +22,7 @@ export function useRealtime(pid: string, branch: string, user: User, handlers: H
 
     const connect = () => {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const qs = new URLSearchParams({ name: user.name, color: user.color });
+      const qs = new URLSearchParams({ color: user.color }); // identity comes from the session cookie
       ws = new WebSocket(`${proto}://${location.host}/ws/${pid}/${encodeURIComponent(branch)}?${qs}`);
       ws.onclose = () => { if (!closed) retry = window.setTimeout(connect, 1500); };
       ws.onmessage = (ev) => {

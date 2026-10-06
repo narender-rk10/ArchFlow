@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("ARCHFLOW_DB", ":memory:")
 os.environ["ARCHFLOW_AI"] = "offline"
 
-from fastapi.testclient import TestClient  # noqa: E402
+from authhelp import authed_client  # noqa: E402
 
 from archflow import catalog  # noqa: E402
 from archflow.main import create_app  # noqa: E402
@@ -35,7 +35,7 @@ def test_match_prefers_distinctive_and_exact_names():
 
 
 def test_convert_round_trip_via_api():
-    client = TestClient(create_app(Store(":memory:")))
+    client = authed_client(create_app(Store(":memory:")))
     pid = client.post("/api/projects", json={"name": "P", "template": "ai-customer-support"}).json()["id"]
     r = client.post(f"/api/projects/{pid}/convert", json={"target": "aws", "actor": "nk"}).json()
     assert r["changed"] == 3 and r["skipped"] == []

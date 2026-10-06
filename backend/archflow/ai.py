@@ -271,11 +271,12 @@ def claude_ask(context: str, question: str, org_id: str | None = None) -> str:
     return text
 
 
-def run_command(state: ProjectState, text: str, selection: list[str] | None = None) -> CommandResult:
+def run_command(state: ProjectState, text: str, selection: list[str] | None = None,
+                org_id: str | None = None) -> CommandResult:
     selection = selection or []
     if MODE != "offline":
         try:
-            return llm_command(state, text, selection)
+            return llm_command(state, text, selection, org_id)
         except AIUnavailable as exc:
             if MODE in ("claude", "llm"):
                 raise

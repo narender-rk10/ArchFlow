@@ -1,6 +1,11 @@
 """ArchFlow HTTP + WebSocket API.
 
 Run:  uvicorn archflow.main:app --reload --port 8000
+
+Every route requires a signed-in session (cookie, see users.py) and checks the caller's role in the project's
+org (see authz.py), except: /api/health, /api/catalog, /api/templates, /api/prompt-targets, /api/mcp-info (static
+metadata), /api/auth/signup|login|logout, GET /api/invites/{token} (token-gated), /api/internal/* (shared secret
+with the collab server) and the MCP/OAuth endpoints (bearer tokens / OAuth flow).
 """
 
 from __future__ import annotations
@@ -9,24 +14,28 @@ import asyncio
 import json
 import re
 import secrets
-from typing import Any
-
-from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from typing import Any
+from urllib.parse import quote
 
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from . import ai, auth, catalog, chat, collab_sync, decisions, lld
+from . import accounts, ai, auth, catalog, chat, collab_sync, decisions, lld, llm, secrets_box, users
 from .analysis import full_analysis, trace_requirement
+from .authz import ROLES, Access, Authz, CSRFMiddleware, can, cap_scopes
 from .diff import diff_states, diff_to_text
+from .mcp_remote import Services, build_remote_mcp
 from .models import ProjectState
 from .ops import ConflictError, OpError, apply_ops, resolve_node
 from .store import Store, default_store
 from .templates import TEMPLATES, build_template
-from .mcp_remote import Services, build_remote_mcp
 from .vibe import TARGETS, build_prompt
+
+# Request bodies keep their legacy ``actor`` / ``author`` / ``user_name`` fields so old clients still validate,
+# but they are ignored: activity is always attributed to the signed-in user.
 
 
 # --------------------------------------------------------------------------- request bodies
@@ -37,29 +46,19 @@ class ProjectIn(BaseModel):
     org_id: str = "org-default"
 
 
-class OrgIn(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
-    owner: str = ""
-
-
-class MemberIn(BaseModel):
-    user_name: str = Field(min_length=1, max_length=80)
-    role: str = Field("member", pattern="^(owner|admin|architect|developer|reviewer|viewer|member)$")
-
-
 class OpsIn(BaseModel):
     ops: list[dict[str, Any]]
-    actor: str = "anonymous"
+    actor: str = ""  # ignored
 
 
 class CommitIn(BaseModel):
     message: str
-    author: str = "anonymous"
+    author: str = ""  # ignored
 
 
 class RestoreIn(BaseModel):
     version: int
-    actor: str = "anonymous"
+    actor: str = ""  # ignored
 
 
 class BranchIn(BaseModel):
@@ -78,7 +77,7 @@ class PromptIn(BaseModel):
 class CommandIn(BaseModel):
     text: str
     selection: list[str] = []
-    actor: str = "anonymous"
+    actor: str = ""  # ignored
 
 
 class ProjectionIn(BaseModel):
@@ -88,19 +87,19 @@ class ProjectionIn(BaseModel):
 
 class ConvertIn(BaseModel):
     target: str = Field(pattern="^(aws|azure|gcp|oss)$")
-    actor: str = "anonymous"
+    actor: str = ""  # ignored
 
 
 class TokenIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    user_name: str = Field(min_length=1, max_length=80)
+    user_name: str = ""  # ignored: tokens are created for the signed-in user
     access: str = Field("write", pattern="^(read|write)$")
     expires_in_days: int | None = Field(None, ge=1, le=3650)
 
 
 class ChatIn(BaseModel):
     turns: list[dict[str, Any]]
-    actor: str = "anonymous"
+    actor: str = ""  # ignored
 
 
 class ChatApplyIn(BaseModel):
@@ -108,7 +107,7 @@ class ChatApplyIn(BaseModel):
     requirements: list[dict[str, Any]] = []
     mode: str = Field("replace", pattern="^(replace|merge|branch)$")
     branch_name: str | None = Field(None, max_length=60, pattern=r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
-    actor: str = "anonymous"
+    actor: str = ""  # ignored
 
 
 class AskIn(BaseModel):
@@ -116,8 +115,12 @@ class AskIn(BaseModel):
 
 
 class LLDIn(BaseModel):
-    actor: str = "anonymous"
+    actor: str = ""  # ignored
     replace: bool = False
+
+
+COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
+WRITE_ROLES = {r for r in ROLES if can(r, "edit")}
 
 
 # --------------------------------------------------------------------------- realtime hub
@@ -151,14 +154,18 @@ class Hub:
                 self.rooms.get(room, {}).pop(ws, None)
 
     async def broadcast_presence(self, room: str) -> None:
-        users = [{**u, "client_id": id(ws)} for ws, u in self.rooms.get(room, {}).items()]
-        await self.broadcast(room, {"type": "presence", "users": users})
+        users_ = [{**u, "client_id": id(ws)} for ws, u in self.rooms.get(room, {}).items()]
+        await self.broadcast(room, {"type": "presence", "users": users_})
 
 
 # --------------------------------------------------------------------------- app
 def create_app(store: Store | None = None) -> FastAPI:
     store = store or default_store()
     hub = Hub()
+    authz = Authz(store)
+    # LLM calls made for an org use that org's own provider keys when it has configured some (BYOK).
+    llm.set_org_key_resolver(lambda org_id: secrets_box.org_ai_keys(store, org_id))
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # The remote MCP endpoint's session manager must run for the lifetime of the app.
@@ -166,9 +173,15 @@ def create_app(store: Store | None = None) -> FastAPI:
             yield
 
     app = FastAPI(title="ArchFlow", version="0.1.0", lifespan=lifespan)
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    origins = users.allowed_origins()
+    app.add_middleware(CSRFMiddleware, allowed=origins)
+    app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True,
+                       allow_methods=["*"], allow_headers=["*"])
     app.state.store = store
     app.state.hub = hub
+    app.state.authz = authz
+
+    read, edit, admin = (authz.project(x) for x in ("read", "edit", "admin"))
 
     def project_or_404(pid: str) -> dict[str, Any]:
         project = store.get_project(pid)
@@ -215,10 +228,9 @@ def create_app(store: Store | None = None) -> FastAPI:
     async def _op_error(_, exc: OpError):
         return JSONResponse(status_code=422, content={"detail": str(exc)})
 
-    # ---- meta ----
+    # ---- meta (public: static metadata only) ----
     @app.get("/api/health")
     def api_health():
-        from . import llm
         return {"ok": True, "ai_mode": ai.MODE, "model": ai.MODEL, "llm": llm.status()}
 
     @app.get("/api/catalog")
@@ -229,67 +241,46 @@ def create_app(store: Store | None = None) -> FastAPI:
     def list_templates():
         return [{"key": k, "name": v[0]} for k, v in TEMPLATES.items()]
 
+    # ---- accounts, orgs, members, invites, org AI settings ----
+    accounts.register_routes(app, store, authz)
+
     # ---- projects ----
     @app.get("/api/projects")
-    def list_projects(org_id: str | None = None):
-        return store.list_projects(org_id)
-
-    # ---- organizations (TODO: real authentication; users are display names for now) ----
-    @app.get("/api/orgs")
-    def list_orgs():
-        return store.list_orgs()
-
-    @app.post("/api/orgs", status_code=201)
-    def create_org(body: OrgIn):
-        org = store.create_org(body.name)
-        if body.owner:
-            store.add_member(org["id"], body.owner, "owner")
-        return org
-
-    @app.get("/api/orgs/{org_id}/members")
-    def list_members(org_id: str):
-        if not store.get_org(org_id):
-            raise HTTPException(404, "org not found")
-        return store.list_members(org_id)
-
-    @app.post("/api/orgs/{org_id}/members", status_code=201)
-    def add_member(org_id: str, body: MemberIn):
-        if not store.get_org(org_id):
-            raise HTTPException(404, "org not found")
-        store.add_member(org_id, body.user_name, body.role)
-        return store.list_members(org_id)
+    def list_projects(org_id: str | None = None, user: dict = Depends(authz.current_user)):
+        if org_id:
+            authz.check_org(user, org_id, "read")
+            return store.list_projects(org_id)
+        out = [p for o in store.list_user_orgs(user["id"]) for p in store.list_projects(o["id"])]
+        return sorted(out, key=lambda p: p["created_at"], reverse=True)
 
     @app.post("/api/projects", status_code=201)
-    def create_project(body: ProjectIn):
-        if not store.get_org(body.org_id):
-            raise HTTPException(404, "org not found")
-        project = store.create_project(body.name, body.description, build_template(body.template), org_id=body.org_id)
+    def create_project(body: ProjectIn, user: dict = Depends(authz.current_user)):
+        a = authz.check_org(user, body.org_id, "edit")
+        project = store.create_project(body.name, body.description, build_template(body.template), org_id=a.org_id)
         state = store.get_state(project["id"], "main")
         if state.nodes or state.requirements:
-            store.commit(project["id"], "main", f"Created from template '{body.template}'", "ArchFlow", state)
+            store.commit(project["id"], "main", f"Created from template '{body.template}'", a.actor, state)
         return project
 
     @app.delete("/api/projects/{pid}", status_code=204)
-    def delete_project(pid: str):
-        project_or_404(pid)
+    def delete_project(pid: str, a: Access = Depends(admin)):
         store.delete_project(pid)
 
     @app.get("/api/projects/{pid}")
-    def get_project(pid: str, branch: str = "main"):
-        project = project_or_404(pid)
+    def get_project(pid: str, branch: str = "main", a: Access = Depends(read)):
         state = state_or_404(pid, branch)
-        return {"project": project, "branch": branch, "branches": store.list_branches(pid),
-                "head_version": store.head_version(pid, branch), "state": state.model_dump()}
+        return {"project": a.project, "branch": branch, "branches": store.list_branches(pid),
+                "head_version": store.head_version(pid, branch), "state": state.model_dump(),
+                "role": a.role, "ai_available": llm.available(a.org_id)}
 
     # ---- operations ----
     @app.post("/api/projects/{pid}/ops")
-    async def post_ops(pid: str, body: OpsIn, branch: str = "main"):
-        state, summary = await commit_ops(pid, branch, body.ops, body.actor)
+    async def post_ops(pid: str, body: OpsIn, branch: str = "main", a: Access = Depends(edit)):
+        state, summary = await commit_ops(pid, branch, body.ops, a.actor)
         return {"state": state.model_dump(), "summary": summary}
 
     @app.get("/api/projects/{pid}/activity")
-    def activity(pid: str, branch: str = "main", limit: int = 100):
-        project_or_404(pid)
+    def activity(pid: str, branch: str = "main", limit: int = 100, a: Access = Depends(read)):
         return store.list_activity(pid, branch, limit)
 
     # ---- versions & branches ----
@@ -300,12 +291,11 @@ def create_app(store: Store | None = None) -> FastAPI:
         return version
 
     @app.post("/api/projects/{pid}/commit", status_code=201)
-    async def commit(pid: str, body: CommitIn, branch: str = "main"):
-        return await commit_version(pid, branch, body.message, body.author)
+    async def commit(pid: str, body: CommitIn, branch: str = "main", a: Access = Depends(edit)):
+        return await commit_version(pid, branch, body.message, a.actor)
 
     @app.get("/api/projects/{pid}/versions")
-    def versions(pid: str):
-        project_or_404(pid)
+    def versions(pid: str, a: Access = Depends(read)):
         return store.list_versions(pid)
 
     def resolve_ref(pid: str, branch: str, ref: str) -> ProjectState:
@@ -323,14 +313,14 @@ def create_app(store: Store | None = None) -> FastAPI:
         return v["state"]
 
     @app.get("/api/projects/{pid}/diff")
-    def diff(pid: str, from_: str = Query(alias="from"), to: str = "working", branch: str = "main"):
-        project_or_404(pid)
+    def diff(pid: str, from_: str = Query(alias="from"), to: str = "working", branch: str = "main",
+             a: Access = Depends(read)):
         old, new = resolve_ref(pid, branch, from_), resolve_ref(pid, branch, to)
         d = diff_states(old, new)
         return {**d, "text": diff_to_text(d), "from_state": old.model_dump()}
 
     @app.post("/api/projects/{pid}/restore")
-    async def restore(pid: str, body: RestoreIn, branch: str = "main"):
+    async def restore(pid: str, body: RestoreIn, branch: str = "main", a: Access = Depends(edit)):
         v = store.get_version(pid, body.version)
         if not v:
             raise HTTPException(404, "version not found")
@@ -344,15 +334,14 @@ def create_app(store: Store | None = None) -> FastAPI:
                     item.rev = restored.rev
                     item.field_revs = {f: restored.rev for f in item.field_revs}
             store.save_state(pid, branch, restored)
-            store.log_activity(pid, branch, body.actor, [f"restored v{body.version}"], restored.rev)
-        await sync_to_live_doc(pid, branch, current, restored, body.actor)
+            store.log_activity(pid, branch, a.actor, [f"restored v{body.version}"], restored.rev)
+        await sync_to_live_doc(pid, branch, current, restored, a.actor)
         await hub.broadcast(Hub.key(pid, branch), {"type": "state", "state": restored.model_dump(),
-                                                   "actor": body.actor, "summary": [f"restored v{body.version}"]})
+                                                   "actor": a.actor, "summary": [f"restored v{body.version}"]})
         return {"state": restored.model_dump()}
 
     @app.post("/api/projects/{pid}/branches", status_code=201)
-    def create_branch(pid: str, body: BranchIn):
-        project_or_404(pid)
+    def create_branch(pid: str, body: BranchIn, a: Access = Depends(edit)):
         if store.get_state(pid, body.name) is not None:
             raise HTTPException(409, "branch already exists")
         if body.from_version is not None:
@@ -367,11 +356,11 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     # ---- analysis ----
     @app.get("/api/projects/{pid}/analysis")
-    def analysis(pid: str, branch: str = "main"):
+    def analysis(pid: str, branch: str = "main", a: Access = Depends(read)):
         return full_analysis(state_or_404(pid, branch))
 
     @app.get("/api/projects/{pid}/trace/{req_id}")
-    def trace(pid: str, req_id: str, branch: str = "main"):
+    def trace(pid: str, req_id: str, branch: str = "main", a: Access = Depends(read)):
         state = state_or_404(pid, branch)
         if req_id not in state.requirements:
             raise HTTPException(404, "requirement not found")
@@ -385,20 +374,19 @@ def create_app(store: Store | None = None) -> FastAPI:
         return node
 
     @app.post("/api/projects/{pid}/nodes/{node_id}/lld")
-    async def generate_lld(pid: str, node_id: str, body: LLDIn, branch: str = "main"):
+    async def generate_lld(pid: str, node_id: str, body: LLDIn, branch: str = "main", a: Access = Depends(edit)):
         """Generate the component's internal (low-level) diagram; applied as ordinary ops, so it syncs live."""
         state = state_or_404(pid, branch)
         node = node_or_404(state, node_id)
         try:
-            ops, info = await asyncio.to_thread(lld.build, state, node.id, body.replace,
-                                                project_or_404(pid).get("org_id"))
+            ops, info = await asyncio.to_thread(lld.build, state, node.id, body.replace, a.org_id)
         except lld.LLDError as exc:
             raise HTTPException(409, str(exc)) from exc
-        new_state, summary = await commit_ops(pid, branch, ops, f"{body.actor} (low-level design)")
+        new_state, summary = await commit_ops(pid, branch, ops, f"{a.actor} (low-level design)")
         return {**info, "summary": summary, "rev": new_state.rev}
 
     @app.get("/api/projects/{pid}/nodes/{node_id}/views")
-    def node_views(pid: str, node_id: str, branch: str = "main"):
+    def node_views(pid: str, node_id: str, branch: str = "main", a: Access = Depends(read)):
         """Read-only views derived from the model: API list, ER data, Mermaid sequence and ER diagrams."""
         state = state_or_404(pid, branch)
         return lld.views(state, node_or_404(state, node_id))
@@ -409,18 +397,19 @@ def create_app(store: Store | None = None) -> FastAPI:
         return [{"key": k, "name": v} for k, v in TARGETS.items()]
 
     @app.post("/api/projects/{pid}/prompt")
-    def prompt(pid: str, body: PromptIn, branch: str = "main"):
-        project = project_or_404(pid)
+    def prompt(pid: str, body: PromptIn, branch: str = "main", a: Access = Depends(read)):
         state = state_or_404(pid, branch)
-        return {"prompt": build_prompt(state, project["name"], body.node_ids, body.requirement_ids, body.target, body.extra)}
+        return {"prompt": build_prompt(state, a.project["name"], body.node_ids, body.requirement_ids, body.target,
+                                       body.extra)}
 
     # ---- AI ----
     async def run_ai_command(pid: str, branch: str, text: str, selection: list[str], actor: str) -> dict[str, Any]:
         state = state_or_404(pid, branch)
+        org_id = project_or_404(pid).get("org_id")
         room = Hub.key(pid, branch)
         await hub.broadcast(room, {"type": "ai_status", "status": "thinking", "actor": actor, "text": text})
         try:
-            result = await asyncio.to_thread(ai.run_command, state, text, selection)
+            result = await asyncio.to_thread(ai.run_command, state, text, selection, org_id)
         except ai.AIUnavailable as exc:
             await hub.broadcast(room, {"type": "ai_status", "status": "idle"})
             raise HTTPException(503, str(exc)) from exc
@@ -438,12 +427,12 @@ def create_app(store: Store | None = None) -> FastAPI:
                 "questions": result.questions, "engine": result.engine, "state": new_state.model_dump()}
 
     @app.post("/api/projects/{pid}/ai/command")
-    async def ai_command(pid: str, body: CommandIn, branch: str = "main"):
-        return await run_ai_command(pid, branch, body.text, body.selection, body.actor)
+    async def ai_command(pid: str, body: CommandIn, branch: str = "main", a: Access = Depends(edit)):
+        return await run_ai_command(pid, branch, body.text, body.selection, a.actor)
 
     @app.post("/api/projects/{pid}/ai/ask")
-    async def ai_ask(pid: str, body: AskIn, branch: str = "main"):
-        project = project_or_404(pid)
+    async def ai_ask(pid: str, body: AskIn, branch: str = "main", a: Access = Depends(read)):
+        project = a.project
         state = state_or_404(pid, branch)
         history = store.list_versions(pid)[:30]
         acts = store.list_activity(pid, branch, 60)
@@ -453,27 +442,27 @@ def create_app(store: Store | None = None) -> FastAPI:
                    f"<versions>\n{json.dumps(history, default=str)}\n</versions>\n"
                    f"<activity>\n{json.dumps(acts, default=str)}\n</activity>\n</project>")
         try:
-            answer = await asyncio.to_thread(ai.claude_ask, context, body.question)
+            answer = await asyncio.to_thread(ai.claude_ask, context, body.question, a.org_id)
         except ai.AIUnavailable as exc:
-            raise HTTPException(503, f"{exc}. Set GEMINI_API_KEY (or ANTHROPIC_API_KEY / OPENAI_API_KEY) to use the project assistant.") from exc
+            raise HTTPException(503, f"{exc}. Set GEMINI_API_KEY (or ANTHROPIC_API_KEY / OPENAI_API_KEY), or add "
+                                     "your organization's key in AI settings, to use the project assistant.") from exc
         return {"answer": answer}
 
     # ---- cloud conversion ----
     @app.post("/api/projects/{pid}/convert")
-    async def convert(pid: str, body: ConvertIn, branch: str = "main"):
+    async def convert(pid: str, body: ConvertIn, branch: str = "main", a: Access = Depends(edit)):
         ops, skipped = catalog.convert_ops(state_or_404(pid, branch), body.target)
-        _, summary = await commit_ops(pid, branch, ops, f"{body.actor} (convert to {catalog.VENDORS[body.target]})")
+        _, summary = await commit_ops(pid, branch, ops, f"{a.actor} (convert to {catalog.VENDORS[body.target]})")
         return {"changed": len(ops), "summary": summary, "skipped": skipped}
 
     # ---- guided design chat ----
     @app.post("/api/projects/{pid}/chat")
-    async def chat_turn(pid: str, body: ChatIn, branch: str = "main"):
+    async def chat_turn(pid: str, body: ChatIn, branch: str = "main", a: Access = Depends(edit)):
         state = state_or_404(pid, branch)
-        return await asyncio.to_thread(chat.next_turn, body.turns[-60:], state)
+        return await asyncio.to_thread(chat.next_turn, body.turns[-60:], state, a.org_id)
 
     @app.post("/api/projects/{pid}/chat/apply")
-    async def chat_apply(pid: str, body: ChatApplyIn, branch: str = "main"):
-        project_or_404(pid)
+    async def chat_apply(pid: str, body: ChatApplyIn, branch: str = "main", a: Access = Depends(edit)):
         target = branch
         if body.mode == "branch":
             target = body.branch_name or f"draft/{chat.slugify(body.option.get('name', 'option'))}"
@@ -482,18 +471,33 @@ def create_app(store: Store | None = None) -> FastAPI:
             store.create_branch(pid, target, state_or_404(pid, branch), store.head_version(pid, branch))
         ops = chat.architecture_ops(state_or_404(pid, target), body.option, body.requirements,
                                     replace=body.mode != "merge")
-        new_state, summary = await commit_ops(pid, target, ops, f"{body.actor} (design chat)")
+        new_state, summary = await commit_ops(pid, target, ops, f"{a.actor} (design chat)")
         version = store.commit(pid, target, f"Applied architecture option: {body.option.get('name', 'option')}",
-                               body.actor, new_state)
-        await hub.broadcast(Hub.key(pid, target), {"type": "versions", "actor": body.actor})
+                               a.actor, new_state)
+        await hub.broadcast(Hub.key(pid, target), {"type": "versions", "actor": a.actor})
         return {"branch": target, "version": version["number"], "summary": summary, "state": new_state.model_dump()}
 
     # ---- architecture decisions (ADRs), alternative evaluation (Jev), adopting a draft ----
     async def broadcast_room(pid: str, branch: str, msg: dict[str, Any]) -> None:
         await hub.broadcast(Hub.key(pid, branch), msg)
 
-    decisions.register_routes(app, store, project_or_404=project_or_404, sync_to_live_doc=sync_to_live_doc,
-                              broadcast=broadcast_room)
+    decisions.register_routes(app, store, authz=authz, sync_to_live_doc=sync_to_live_doc, broadcast=broadcast_room)
+
+    # ---- real-time collaboration ticket (for the Hocuspocus collab server) ----
+    @app.get("/api/projects/{pid}/collab-ticket")
+    def collab_ticket(pid: str, branch: str = "main", color: str = "", a: Access = Depends(read)):
+        """A short-lived signed ticket the browser presents to the collab server. Viewers and reviewers get a
+        read-only connection (the collab server rejects their document updates)."""
+        state_or_404(pid, branch)
+        doc = collab_sync.doc_name(pid, branch)
+        read_only = not a.can("edit")
+        try:
+            ticket = collab_sync.sign_ticket({"uid": a.user["id"], "name": a.user["name"][:40],
+                                              "color": color if COLOR_RE.match(color) else "#888888",
+                                              "doc": doc, "ro": read_only})
+        except RuntimeError as exc:
+            raise HTTPException(503, f"Real-time collaboration is not configured: {exc}") from exc
+        return {"ticket": ticket, "doc": doc, "read_only": read_only, "expires_in": collab_sync.TICKET_TTL}
 
     # ---- internal: collab server ↔ API (shared-secret authenticated) ----
     def internal_auth(token: str | None) -> None:
@@ -501,6 +505,13 @@ def create_app(store: Store | None = None) -> FastAPI:
             raise HTTPException(503, "ARCHFLOW_INTERNAL_TOKEN is not configured")
         if not token or not secrets.compare_digest(token, collab_sync.INTERNAL_TOKEN):
             raise HTTPException(401, "invalid internal token")
+
+    @app.get("/api/internal/state/{name:path}")
+    def get_internal_state(name: str, x_internal_token: str | None = Header(None)):
+        """The branch's structured state, used by the collab server to seed a new live document."""
+        internal_auth(x_internal_token)
+        pid, branch = collab_sync.parse_doc_name(name)
+        return {"state": state_or_404(pid, branch).model_dump()}
 
     @app.get("/api/internal/ydocs/{name:path}")
     def get_ydoc(name: str, x_internal_token: str | None = Header(None)):
@@ -536,16 +547,27 @@ def create_app(store: Store | None = None) -> FastAPI:
             await hub.broadcast(Hub.key(pid, branch), {"type": "activity", "actor": body.actors})
         return {"changed": bool(summary), "rev": merged.rev, "dropped": dropped}
 
-    # ---- realtime ----
+    # ---- realtime (server events: AI status, versions, activity) ----
     @app.websocket("/ws/{pid}/{branch:path}")
-    async def ws_endpoint(ws: WebSocket, pid: str, branch: str, name: str = "anonymous", color: str = "#888"):
-        await ws.accept()
-        if not store.get_project(pid) or store.get_state(pid, branch) is None:
+    async def ws_endpoint(ws: WebSocket, pid: str, branch: str, color: str = "#888"):
+        origin = ws.headers.get("origin")
+        if origin and users.origin_of(origin) not in origins:
+            await ws.close(code=4403)  # cross-site WebSocket hijacking guard
+            return
+        user = authz.user_from_token(ws.cookies.get(users.SESSION_COOKIE))
+        if not user:
+            await ws.close(code=4401)
+            return
+        project = store.get_project(pid)
+        if (not project or store.get_role(project["org_id"], user["id"]) is None
+                or store.get_state(pid, branch) is None):
             await ws.close(code=4404)
             return
+        await ws.accept()
+        name, color = user["name"][:40], (color if COLOR_RE.match(color) else "#888")
         room = Hub.key(pid, branch)
         await ws.send_text(json.dumps({"type": "hello", "client_id": id(ws)}))
-        await hub.join(room, ws, {"name": name[:40], "color": color[:20]})
+        await hub.join(room, ws, {"name": name, "color": color})
         try:
             while True:
                 msg = json.loads(await ws.receive_text())
@@ -563,40 +585,81 @@ def create_app(store: Store | None = None) -> FastAPI:
     provider: auth.ArchFlowOAuthProvider = mcp._archflow_provider
     app.state.mcp = mcp
 
+    def safe_next(url: str | None) -> str | None:
+        """Only same-site consent URLs are valid post-login destinations (no open redirect)."""
+        return url if url and re.fullmatch(r"/oauth/consent\?request=[A-Za-z0-9_\-]+", url) else None
+
+    def to_login(request_id: str) -> RedirectResponse:
+        nxt = f"/oauth/consent?request={request_id}"
+        return RedirectResponse(f"/oauth/login?next={quote(nxt, safe='')}", status_code=303)
+
+    @app.get("/oauth/login", response_class=HTMLResponse)
+    def oauth_login_form(request: Request, next: str = ""):
+        nxt = safe_next(next)
+        if nxt and authz.session_user(request):
+            return RedirectResponse(nxt, status_code=303)
+        return HTMLResponse(auth.login_page(nxt or "", users.frontend_url()))
+
+    @app.post("/oauth/login")
+    async def oauth_login_submit(request: Request):
+        form = await request.form()
+        email = users.normalize_email(str(form.get("email", "")))[:320]
+        password = str(form.get("password", ""))[:users.MAX_PASSWORD]
+        nxt = safe_next(str(form.get("next", "")))
+        key = users.limiter_key(email, accounts.client_ip(request))
+        if users.login_limiter.check(key):
+            return HTMLResponse(auth.login_page(nxt or "", users.frontend_url(),
+                                                "Too many sign-in attempts. Try again later.", email), 429)
+        rec = store.get_user_by_email(email, with_hash=True)
+        if not users.verify_password(password, rec["password_hash"] if rec else None):
+            users.login_limiter.failure(key)
+            return HTMLResponse(auth.login_page(nxt or "", users.frontend_url(), "Invalid email or password.", email), 401)
+        users.login_limiter.success(key)
+        store.touch_login(rec["id"])
+        resp: Response = (RedirectResponse(nxt, status_code=303) if nxt else
+                          HTMLResponse("<p>Signed in. You can close this window and return to your app.</p>"))
+        accounts.set_session_cookie(resp, users.create_session(store, rec["id"], request.headers.get("user-agent", "")))
+        return resp
+
     @app.get("/oauth/consent", response_class=HTMLResponse)
-    def consent_form(request: str):
-        req = provider.pending_request(request)
+    def consent_form(request: Request, request_id: str = Query(alias="request")):
+        req = provider.pending_request(request_id)
         if not req:
             return HTMLResponse("<p>This authorization request has expired. Start the connection again from your app.</p>", 400)
-        return auth.consent_page(req, request, store.list_orgs())
+        user = authz.session_user(request)
+        if not user:
+            return to_login(request_id)
+        return HTMLResponse(auth.consent_page(req, request_id, store.list_user_orgs(user["id"]), user, WRITE_ROLES))
 
     @app.post("/oauth/consent")
     async def consent_submit(req: Request):
         form = await req.form()
         request_id = str(form.get("request", ""))
         org_id = str(form.get("org_id", ""))
-        user_name = str(form.get("user_name", "")).strip()[:80]
         approve = form.get("decision") == "approve"
-        if approve and (not user_name or not store.get_org(org_id)):
-            pending = provider.pending_request(request_id)
-            if not pending:
-                return HTMLResponse("<p>This authorization request has expired.</p>", 400)
-            return HTMLResponse(auth.consent_page(pending, request_id, store.list_orgs(),
-                                                  "Enter your name and choose an organization."), 400)
-        scopes = [auth.SCOPE_READ, auth.SCOPE_WRITE] if form.get("access") == "write" else [auth.SCOPE_READ]
+        user = authz.session_user(req)
+        scopes: list[str] = []
+        if approve:
+            if not user:
+                return to_login(request_id)
+            role = store.get_role(org_id, user["id"])
+            if role is None:
+                pending = provider.pending_request(request_id)
+                if not pending:
+                    return HTMLResponse("<p>This authorization request has expired.</p>", 400)
+                return HTMLResponse(auth.consent_page(pending, request_id, store.list_user_orgs(user["id"]), user,
+                                                      WRITE_ROLES, "Choose one of your organizations."), 400)
+            requested = [auth.SCOPE_READ, auth.SCOPE_WRITE] if form.get("access") == "write" else [auth.SCOPE_READ]
+            scopes = cap_scopes(role, requested)  # viewers and reviewers can only grant read access
         try:
-            url = provider.complete_consent(request_id, approve, org_id, user_name or "anonymous", scopes)
+            url = provider.complete_consent(request_id, approve, org_id, user, scopes)
         except ValueError as exc:
             return HTMLResponse(f"<p>{exc}</p>", 400)
-        if approve:
-            store.add_member(org_id, user_name, "member")
         return RedirectResponse(url, status_code=302)
 
-    # Personal access tokens and connected apps (TODO(auth): restrict to org admins once users sign in)
+    # ---- personal access tokens and connected apps (org admins) ----
     @app.get("/api/orgs/{org_id}/tokens")
-    def list_tokens(org_id: str):
-        if not store.get_org(org_id):
-            raise HTTPException(404, "org not found")
+    def list_tokens(org_id: str, a: Access = Depends(authz.org("admin"))):
         clients: dict[str, str] = {}
 
         def client_name(cid: str | None) -> str:
@@ -616,22 +679,23 @@ def create_app(store: Store | None = None) -> FastAPI:
         return out
 
     @app.post("/api/orgs/{org_id}/tokens", status_code=201)
-    def create_token(org_id: str, body: TokenIn):
-        if not store.get_org(org_id):
-            raise HTTPException(404, "org not found")
-        scopes = [auth.SCOPE_READ, auth.SCOPE_WRITE] if body.access == "write" else [auth.SCOPE_READ]
-        secret, record = auth.create_pat(store, org_id, body.user_name, body.name, scopes, body.expires_in_days)
+    def create_token(org_id: str, body: TokenIn, a: Access = Depends(authz.org("admin"))):
+        requested = [auth.SCOPE_READ, auth.SCOPE_WRITE] if body.access == "write" else [auth.SCOPE_READ]
+        scopes = cap_scopes(a.role, requested)
+        if not scopes:
+            raise HTTPException(403, "Your role cannot create tokens")
+        secret, record = auth.create_pat(store, org_id, a.user, body.name, scopes, body.expires_in_days)
         return {"token": secret, **record}
 
     @app.delete("/api/orgs/{org_id}/tokens/{token_id}", status_code=204)
-    def revoke_token(org_id: str, token_id: str):
+    def revoke_token(org_id: str, token_id: str, a: Access = Depends(authz.org("admin"))):
         t = store.get_token_by_id(token_id)
         if not t or t["org_id"] != org_id or not store.revoke_token_id(token_id):
             raise HTTPException(404, "token not found")
         if t["kind"] == "refresh":  # disconnecting an app also ends its current sessions
-            for a in store.list_tokens(org_id, "access"):
-                if a["client_id"] == t["client_id"] and a["user_name"] == t["user_name"]:
-                    store.revoke_token_id(a["id"])
+            for x in store.list_tokens(org_id, "access"):
+                if x["client_id"] == t["client_id"] and x["user_id"] == t["user_id"]:
+                    store.revoke_token_id(x["id"])
 
     @app.get("/api/mcp-info")
     def mcp_info():

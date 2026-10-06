@@ -15,7 +15,7 @@ is validated, versioned, conflict-checked and shown live to everyone.
 |---|---|
 | Project workspace | Projects, templates (blank, AI customer-support), per-branch working state |
 | Guided design chat | Describe an idea; ArchFlow asks multiple-choice questions (single/multi-select, recommended option, “Other”), then offers 2–4 ranked architectures with pros/cons, cost and complexity. Pick one to apply it to the canvas or open it as a draft branch. Works offline with a built-in question bank; adaptive with an LLM |
-| Organizations | Orgs with members and org-scoped projects (no authentication yet; users are display names) |
+| Accounts & organizations | Email + password accounts, HttpOnly session cookies, orgs with six roles (owner → viewer), invite links, org-scoped projects, per-org AI provider keys (encrypted) |
 | Requirement model | Structured FR/NFR objects: actors, acceptance criteria, priority, status, category |
 | Requirement completeness | Lint for vague terms ("fast", "scalable"…), missing acceptance criteria/actors, missing NFR categories |
 | Architecture canvas | React Flow canvas: drag from palette, connect, move, multi-select, delete, copy/paste/duplicate, search, zoom/pan, minimap |
@@ -65,8 +65,8 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173, enter your name, and create a project from the **AI customer-support** template.
-Open a second browser window with a different name to see multiplayer.
+Open http://localhost:5173, create an account (the first account becomes owner of every existing org), and create a project from the **AI customer-support** template.
+To see multiplayer, invite a second account (Members & invites → Create invite link) and open the link in a private window.
 
 ### Enabling the LLM
 
@@ -101,12 +101,61 @@ DATABASE_URL=postgresql://archflow:<POSTGRES_PASSWORD>@localhost:5432/archflow u
 Migrations in `backend/archflow/migrations/` apply automatically on startup. Branch edits take a row lock
 (`SELECT … FOR UPDATE`), so several API processes can run side by side.
 
+### Accounts, roles and security
+
+Everyone signs in with email and password (hashed with scrypt). The session is an opaque random token in an
+`HttpOnly`, `SameSite=Lax` cookie (`Secure` when `ARCHFLOW_PUBLIC_URL` is https) with a 14-day sliding expiry;
+only its SHA-256 is stored. Sign-in attempts are rate limited per email + IP (10 failures / 15 min, in memory;
+`users.LoginLimiter` is the seam for a shared Redis limiter when running several API processes).
+
+- **Bootstrap:** the first account becomes **owner of every existing org**, including `org-default`, so data from
+  before accounts existed is claimed. Later accounts join through an invite link, or get their own
+  "*name*'s workspace" (set `ARCHFLOW_OPEN_SIGNUP=false` to require invites).
+- **Invites:** admins create single-use links (`#/invite/<token>`, valid 7 days, optionally bound to an email)
+  under **Members & invites**; the invitee signs up or signs in to join with the chosen role.
+- **Migration:** memberships used to be free-form display names; those rows are dropped on upgrade
+  (`005_users.sql` / SQLite in-place migration), and API tokens created before accounts existed are revoked.
+
+| Role | Can |
+|---|---|
+| viewer | read projects, versions, diffs, analysis, decisions and the member list; ask the AI questions; connect MCP agents read-only |
+| reviewer | viewer + change a decision's **status** (accept / reject / supersede) |
+| developer | edit the canvas, requirements, versions, branches; AI commands, design chat, convert, low-level design, decisions |
+| architect | same as developer (reserved for per-project overrides) |
+| admin | + members and roles (up to admin), invite links, personal access tokens and connected apps, org AI keys, delete projects |
+| owner | + rename the org, grant/remove the owner role. An org always keeps at least one owner |
+
+Every API route checks the caller's role in the project's org: `401` when not signed in, `404` for projects or
+orgs you are not a member of, `403` when your role is too low. Activity and versions are always attributed to
+the signed-in account (client-supplied `actor`/`author` fields are ignored). Public endpoints: `/api/health`,
+`/api/catalog`, `/api/templates`, `/api/prompt-targets`, `/api/mcp-info`, sign-up/sign-in, and
+`GET /api/invites/{token}` (requires the secret token). `/api/internal/*` uses the collab shared secret.
+
+- **CSRF / CORS:** unsafe requests that carry the session cookie (and all sign-in/sign-up requests) must come
+  from an allowed origin (`Origin`, else `Referer`): the origin of `ARCHFLOW_PUBLIC_URL` plus
+  `ARCHFLOW_ALLOWED_ORIGINS` (default `http://localhost:5173`). CORS allows exactly those origins, with credentials.
+- **Real-time:** the browser fetches a 2-minute HMAC-signed ticket (`GET /api/projects/{pid}/collab-ticket`,
+  keyed with `ARCHFLOW_INTERNAL_TOKEN`) and presents it to the collab server, which checks signature, expiry
+  and document and opens viewers/reviewers **read-only**. The `/ws` event socket requires the session cookie.
+- **Org AI keys (BYOK):** admins can set Gemini / Anthropic / OpenAI keys per org (**AI keys** on the projects
+  page). They are encrypted with AES-256-GCM using a key derived from `ARCHFLOW_SECRET_KEY` (required for this
+  feature) and only the last 4 characters are ever shown. LLM calls for that org use its keys; the server's
+  env keys remain the fallback for providers the org has not set.
+- **Dev sign-in across :5173 and :8000:** the app reaches the API through the Vite proxy, so the cookie is set
+  for `localhost`; browsers do not separate cookies by port, so the same session is valid on the API's own
+  pages (the MCP consent page on :8000). If you are not signed in there, the consent page sends you to a
+  minimal API-served sign-in form (`/oauth/login`) and back. In production serve the app and the API from
+  the same site (e.g. one domain behind a reverse proxy) so the `SameSite=Lax` cookie is first-party.
+
 ### Connecting Claude and other agents over MCP
 
 The API serves a **remote MCP server** at `http://localhost:8000/mcp` (Streamable HTTP), protected by
 OAuth 2.1: dynamic client registration, PKCE, a consent page, rotating refresh tokens and revocation.
-Every connection is bound to one organization, as read-only or read & edit. Open **⌘ Connect AI** in the
-app for copy-paste instructions and to manage tokens and connected apps.
+The consent page requires a signed-in ArchFlow account and lists only your organizations. Every connection
+is bound to you and one organization, as read-only or read & edit, capped by your role (viewers and reviewers
+can only grant read access). Each call re-checks your **current** membership and role: removed members lose
+access immediately and demoted members become read-only. Open **⌘ Connect AI** in the app for copy-paste
+instructions; admins also manage personal access tokens and connected apps there.
 
 ```bash
 # Claude Code: add the server, then run /mcp and choose "Authenticate"
@@ -158,7 +207,11 @@ backend/archflow/
   ai.py          Claude tool-use → ops; offline command parser
   vibe.py        implementation-brief generator
   templates.py   starter architectures
-  store.py       SQLite persistence
+  store.py       SQLite persistence (store_pg.py: Postgres)
+  users.py       passwords (scrypt), sessions, login rate limiting, trusted origins
+  authz.py       roles, FastAPI auth dependencies, CSRF middleware
+  accounts.py    sign-up/in, orgs, members, invites, org AI keys
+  secrets_box.py AES-GCM encryption of org secrets
   main.py        REST + WebSocket API
   mcp_server.py  MCP server
 frontend/src/
@@ -170,7 +223,7 @@ frontend/src/
 ## Tests
 
 ```bash
-cd backend && uv run pytest     # 46 tests; add TEST_DATABASE_URL=postgresql://… to also run the Postgres store tests
+cd backend && uv run pytest     # add TEST_DATABASE_URL=postgresql://… to also run the Postgres store tests
 cd frontend && npm run build    # typecheck + production build
 cd collab && npm test           # end-to-end: two live clients + MCP/AI edits (needs the API and collab server running)
 ```
@@ -184,7 +237,7 @@ In rough order of leverage:
 1. **ADRs** as first-class objects linked to components and requirements.
 2. **Branch merge** with three-way diff and AI-assisted conflict resolution.
 3. **Architecture alternatives + JEV evaluation**: generate options A/B/C as branches and score them.
-4. **Comments, @mentions and approval workflows** on any object; RBAC.
+4. **Comments, @mentions and approval workflows** on any object; per-project role overrides, SSO.
 5. **Repository analysis**: reconstruct architecture from code, drift detection, PR architecture review.
 6. **Jira sync**: epics/stories generated from requirements, with status reflected on the canvas.
 7. **Diagram generation** from the same model: sequence, C4, ER, deployment, agent graph, MCP topology.

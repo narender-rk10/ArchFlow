@@ -1,5 +1,6 @@
 import type { Activity, Analysis, ArchOption, Branch, ChatCard, ChatTurn, ApiToken, Catalog, Diff, Op, Org, Project, ProjectState, Version } from "./types";
 import type { Decision, Evaluation } from "./types";
+import type { AIProvider, AISettings, Invite, InviteInfo, Me, Member, Role } from "./types";
 import type { ComponentViews, LldResult } from "./types";
 
 export class ApiError extends Error {
@@ -8,14 +9,19 @@ export class ApiError extends Error {
   }
 }
 
+/** Fired on any 401 so the app can show the sign-in screen (session expired or signed out elsewhere). */
+export const UNAUTHORIZED_EVENT = "archflow:unauthorized";
+
 async function call<T>(method: string, path: string, body?: unknown, params?: Record<string, string>): Promise<T> {
   const qs = params ? "?" + new URLSearchParams(params).toString() : "";
   const res = await fetch(`/api${path}${qs}`, {
     method,
+    credentials: "include", // the session is an HttpOnly cookie
     headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const data = res.status === 204 ? null : await res.json().catch(() => null);
+  if (res.status === 401 && !path.startsWith("/auth/")) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
   if (!res.ok) throw new ApiError(res.status, data);
   return data as T;
 }
@@ -23,6 +29,29 @@ async function call<T>(method: string, path: string, body?: unknown, params?: Re
 const b = (branch: string) => ({ branch });
 
 export const api = {
+  // ---- accounts and organizations ----
+  me: () => call<Me>("GET", "/me"),
+  signup: (email: string, name: string, password: string, invite?: string) =>
+    call<Me>("POST", "/auth/signup", { email, name, password, invite }),
+  login: (email: string, password: string) => call<Me>("POST", "/auth/login", { email, password }),
+  logout: () => call<null>("POST", "/auth/logout"),
+  inviteInfo: (token: string) => call<InviteInfo>("GET", `/invites/${encodeURIComponent(token)}`),
+  acceptInvite: (token: string) => call<Org>("POST", `/invites/${encodeURIComponent(token)}/accept`),
+  updateOrg: (org: string, name: string) => call<Org>("PATCH", `/orgs/${org}`, { name }),
+  members: (org: string) => call<Member[]>("GET", `/orgs/${org}/members`),
+  updateMember: (org: string, userId: string, role: Role) => call<Member>("PATCH", `/orgs/${org}/members/${userId}`, { role }),
+  removeMember: (org: string, userId: string) => call<null>("DELETE", `/orgs/${org}/members/${userId}`),
+  invites: (org: string) => call<Invite[]>("GET", `/orgs/${org}/invites`),
+  createInvite: (org: string, role: Role, email?: string) =>
+    call<Invite & { token: string; link: string }>("POST", `/orgs/${org}/invites`, { role, email: email || null }),
+  revokeInvite: (org: string, id: string) => call<null>("DELETE", `/orgs/${org}/invites/${id}`),
+  aiSettings: (org: string) => call<AISettings>("GET", `/orgs/${org}/ai-settings`),
+  saveAiSettings: (org: string, keys: Partial<Record<AIProvider, string | null>>) =>
+    call<AISettings>("PUT", `/orgs/${org}/ai-settings`, keys),
+  collabTicket: (pid: string, branch: string, color: string) =>
+    call<{ ticket: string; doc: string; read_only: boolean; expires_in: number }>(
+      "GET", `/projects/${pid}/collab-ticket`, undefined, { branch, color }),
+
   health: () => call<{ ok: boolean; ai_mode: string; model: string; llm?: { available: boolean; groups: Record<string, string[]> } }>("GET", "/health"),
   catalog: () => call<Catalog>("GET", "/catalog"),
   convert: (pid: string, branch: string, target: string, actor: string) =>
@@ -31,16 +60,17 @@ export const api = {
   orgs: () => call<Org[]>("GET", "/orgs"),
   mcpInfo: () => call<{ url: string; issuer: string; scopes: string[] }>("GET", "/mcp-info"),
   tokens: (org: string) => call<ApiToken[]>("GET", `/orgs/${org}/tokens`),
-  createToken: (org: string, name: string, user_name: string, access: "read" | "write", expires_in_days: number | null) =>
-    call<ApiToken & { token: string }>("POST", `/orgs/${org}/tokens`, { name, user_name, access, expires_in_days }),
+  createToken: (org: string, name: string, access: "read" | "write", expires_in_days: number | null) =>
+    call<ApiToken & { token: string }>("POST", `/orgs/${org}/tokens`, { name, access, expires_in_days }),
   revokeToken: (org: string, id: string) => call<null>("DELETE", `/orgs/${org}/tokens/${id}`),
-  createOrg: (name: string, owner: string) => call<Org>("POST", "/orgs", { name, owner }),
+  createOrg: (name: string) => call<Org>("POST", "/orgs", { name }),
   projects: (org_id?: string) => call<Project[]>("GET", "/projects", undefined, org_id ? { org_id } : undefined),
   createProject: (name: string, template: string, org_id: string, description = "") =>
     call<Project>("POST", "/projects", { name, template, description, org_id }),
   deleteProject: (pid: string) => call<null>("DELETE", `/projects/${pid}`),
   project: (pid: string, branch: string) =>
-    call<{ project: Project; branch: string; branches: Branch[]; head_version: number | null; state: ProjectState }>(
+    call<{ project: Project; branch: string; branches: Branch[]; head_version: number | null; state: ProjectState;
+      role: Role; ai_available: boolean }>(
       "GET", `/projects/${pid}`, undefined, b(branch)),
   ops: (pid: string, branch: string, ops: Op[], actor: string) =>
     call<{ state: ProjectState; summary: string[] }>("POST", `/projects/${pid}/ops`, { ops, actor }, b(branch)),

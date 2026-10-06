@@ -409,7 +409,7 @@ def generate_design(state: ProjectState, node: Node, org_id: str | None = None) 
     """(design, engine). Uses the LLM when available and falls back to the offline template."""
     if node.type == "note":
         raise LLDError("Notes have no internal design")
-    if llm.available():
+    if llm.available(org_id):
         try:
             return llm_design(state, node, org_id), "llm"
         except (llm.LLMUnavailable, llm.LLMRefused, ValueError, KeyError, TypeError) as exc:

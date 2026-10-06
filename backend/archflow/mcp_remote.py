@@ -24,7 +24,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import auth, catalog, lld
+from . import auth, authz, catalog, lld
 from . import decisions as decisions_mod
 from .analysis import full_analysis, trace_requirement
 from .diff import diff_states, diff_to_text
@@ -51,15 +51,24 @@ team's canvas, attributed to you. For coding work: list_tasks → get_task_brief
 
 
 class Principal:
-    def __init__(self):
+    """The token's user, re-checked against the store on every tool call: a member who was removed from the org
+    loses access immediately, and scopes are capped by the user's CURRENT role (a demoted user becomes read-only)."""
+
+    def __init__(self, store):
         tok = get_access_token()
         if tok is None:
             raise ToolError("Not authenticated")
         claims = tok.claims or {}
         self.org_id: str = claims.get("org_id", "")
-        self.user: str = tok.subject or "agent"
+        self.user_id: str = claims.get("user_id") or ""
+        role = store.get_role(self.org_id, self.user_id) if self.user_id else None
+        if role is None:
+            raise ToolError("This connection's user is no longer a member of the organization.")
+        account = store.get_user(self.user_id) or {}
+        self.role = role
+        self.user: str = account.get("name") or claims.get("user_name") or "agent"
         self.client: str = tok.client_id
-        self.scopes = set(tok.scopes)
+        self.scopes = set(tok.scopes) & set(authz.role_scopes(role))
 
     @property
     def actor(self) -> str:
@@ -119,7 +128,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
         }
 
     async def edit(project_id: str, branch: str, ops: list[dict[str, Any]]) -> dict[str, Any]:
-        p = Principal()
+        p = Principal(store)
         p.require_write()
         project_for(p, project_id, branch)
         try:
@@ -132,7 +141,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
     @mcp.tool()
     def whoami() -> dict[str, Any]:
         """Who this connection acts as: user, organization and access level."""
-        p = Principal()
+        p = Principal(store)
         org = store.get_org(p.org_id) or {}
         return {"user": p.user, "organization": {"id": p.org_id, "name": org.get("name")},
                 "access": "read-write" if auth.SCOPE_WRITE in p.scopes else "read-only"}
@@ -140,13 +149,13 @@ def build_remote_mcp(services: Services) -> MCPServer:
     @mcp.tool()
     def list_projects() -> list[dict[str, Any]]:
         """Projects in your organization."""
-        p = Principal()
+        p = Principal(store)
         return [{k: x[k] for k in ("id", "name", "description", "created_at")} for x in store.list_projects(p.org_id)]
 
     @mcp.tool()
     def get_architecture(project_id: str, branch: str = "main") -> dict[str, Any]:
         """The full structured model of a project branch: components, connections and requirements."""
-        p = Principal()
+        p = Principal(store)
         project, state = project_for(p, project_id, branch)
         return {"project": {"id": project["id"], "name": project["name"]}, "branch": branch,
                 "branches": [b["name"] for b in store.list_branches(project_id)], **compact(state)}
@@ -154,26 +163,26 @@ def build_remote_mcp(services: Services) -> MCPServer:
     @mcp.tool()
     def get_requirements(project_id: str, branch: str = "main") -> list[dict[str, Any]]:
         """Structured requirements with actors, acceptance criteria, priority and status."""
-        _, state = project_for(Principal(), project_id, branch)
+        _, state = project_for(Principal(store), project_id, branch)
         return compact(state)["requirements"]
 
     @mcp.tool()
     def validate_architecture(project_id: str, branch: str = "main") -> dict[str, Any]:
         """Requirement lint, architecture checks, traceability and a health summary."""
-        _, state = project_for(Principal(), project_id, branch)
+        _, state = project_for(Principal(store), project_id, branch)
         return full_analysis(state)
 
     @mcp.tool()
     def list_versions(project_id: str) -> list[dict[str, Any]]:
         """Committed versions of the project (all branches), newest first."""
-        project_for(Principal(), project_id)
+        project_for(Principal(store), project_id)
         return store.list_versions(project_id)
 
     @mcp.tool()
     def get_architecture_diff(project_id: str, from_version: int, to_version: int | None = None,
                               branch: str = "main") -> str:
         """What changed between two versions (or between a version and the branch's current state)."""
-        _, current = project_for(Principal(), project_id, branch)
+        _, current = project_for(Principal(store), project_id, branch)
         old = store.get_version(project_id, from_version)
         if not old:
             raise ToolError(f"version {from_version} not found")
@@ -183,7 +192,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
     @mcp.tool()
     def list_tasks(project_id: str, branch: str = "main", include_done: bool = False) -> list[dict[str, Any]]:
         """Implementation tasks: requirements with the components that implement them, highest priority first."""
-        _, state = project_for(Principal(), project_id, branch)
+        _, state = project_for(Principal(store), project_id, branch)
         order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
         tasks = []
         for r in state.requirements.values():
@@ -199,7 +208,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
     def get_task_brief(project_id: str, requirement_id: str, target: str = "claude-code", branch: str = "main") -> str:
         """Implementation brief for one requirement: affected components, interfaces, acceptance criteria and tests.
         target: claude-code, codex, gemini-cli, aider or generic."""
-        project, state = project_for(Principal(), project_id, branch)
+        project, state = project_for(Principal(store), project_id, branch)
         if requirement_id not in state.requirements:
             raise ToolError(f"requirement {requirement_id} not found")
         return build_prompt(state, project["name"], [], [requirement_id], target if target in TARGETS else "generic")
@@ -208,14 +217,14 @@ def build_remote_mcp(services: Services) -> MCPServer:
     def generate_coding_prompt(project_id: str, component_ids: list[str] | None = None, target: str = "claude-code",
                                branch: str = "main") -> str:
         """Implementation brief for selected components (or the whole system when none are given)."""
-        project, state = project_for(Principal(), project_id, branch)
+        project, state = project_for(Principal(store), project_id, branch)
         return build_prompt(state, project["name"], component_ids or [], [], target if target in TARGETS else "generic")
 
     @mcp.tool()
     def search_catalog(query: str = "", vendor: str = "", limit: int = 25) -> list[dict[str, Any]]:
         """Find concrete services to use as components (AWS, Azure, GCP, open source, SaaS).
         vendor: aws, azure, gcp, oss, saas or generic. Pass the result's id as catalog_id to add_component."""
-        Principal()
+        Principal(store)
         q = query.lower()
         hits = [c for c in catalog.CATALOG
                 if (not vendor or c["vendor"] == vendor)
@@ -226,7 +235,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
     @mcp.tool()
     async def create_project(name: str, description: str = "", template: str = "blank") -> dict[str, Any]:
         """Create a project in your organization. template: blank or ai-customer-support."""
-        p = Principal()
+        p = Principal(store)
         p.require_write()
         project = store.create_project(name, description, build_template(template if template in TEMPLATES else "blank"),
                                        org_id=p.org_id)
@@ -301,7 +310,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
     async def report_progress(project_id: str, requirement_id: str, status: str, note: str = "", pr_url: str = "",
                               branch: str = "main") -> dict[str, Any]:
         """Report work on a task. status: in_progress | review | implemented. Shows in the project's activity."""
-        p = Principal()
+        p = Principal(store)
         p.require_write()
         _, state = project_for(p, project_id, branch)
         if requirement_id not in state.requirements:
@@ -320,7 +329,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
     async def convert_cloud(project_id: str, target: str, branch: str = "main") -> dict[str, Any]:
         """Swap every recognised component for its equivalent on another platform.
         target: aws, azure, gcp or oss (self-hosted open source). Third-party SaaS stays as it is."""
-        p = Principal()
+        p = Principal(store)
         p.require_write()
         _, state = project_for(p, project_id, branch)
         try:
@@ -335,7 +344,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
         """Generate the low-level design (C4 component level) inside a component (by id or name): internal
         components, API endpoints, DB tables and domain events, connected. The elements get parent_id = the
         component's id. Set replace=true to regenerate an existing design."""
-        p = Principal()
+        p = Principal(store)
         p.require_write()
         _, state = project_for(p, project_id, branch)
         try:
@@ -351,7 +360,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
     def get_component_views(project_id: str, component: str, branch: str = "main") -> dict[str, Any]:
         """Views derived from a component's design: its API endpoints (plus OpenAPI text), data model (tables,
         relations, Mermaid erDiagram) and the main request flow as a Mermaid sequenceDiagram."""
-        _, state = project_for(Principal(), project_id, branch)
+        _, state = project_for(Principal(store), project_id, branch)
         node = resolve_node(state, component)
         if not node:
             raise ToolError(f"component '{component}' not found")
@@ -360,7 +369,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
     @mcp.tool()
     async def commit_version(project_id: str, message: str, branch: str = "main") -> dict[str, Any]:
         """Snapshot the branch as a new version."""
-        p = Principal()
+        p = Principal(store)
         p.require_write()
         project_for(p, project_id, branch)
         v = await services.commit_version(project_id, branch, message, p.actor)
@@ -369,7 +378,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
     @mcp.tool()
     async def architecture_command(project_id: str, instruction: str, branch: str = "main") -> dict[str, Any]:
         """Apply a natural-language change, e.g. 'Add Redis between Order Service and Orders DB'."""
-        p = Principal()
+        p = Principal(store)
         p.require_write()
         project_for(p, project_id, branch)
         out = await services.ai_command(project_id, branch, instruction, [], p.actor)
@@ -380,14 +389,14 @@ def build_remote_mcp(services: Services) -> MCPServer:
     @mcp.tool()
     def list_decisions(project_id: str) -> list[dict[str, Any]]:
         """Architecture decision records (ADR-001, ...) of a project with status and chosen alternative."""
-        project_for(Principal(), project_id)
+        project_for(Principal(store), project_id)
         return [{k: d[k] for k in ("id", "title", "status", "chosen", "author", "created_at", "updated_at")}
                 for d in store.list_decisions(project_id)]
 
     @mcp.tool()
     def get_decision(project_id: str, decision_id: str) -> dict[str, Any]:
         """One decision record: context, decision, consequences, alternatives, linked requirements and evaluation."""
-        project_for(Principal(), project_id)
+        project_for(Principal(store), project_id)
         d = store.get_decision(project_id, decision_id)
         if not d:
             raise ToolError(f"decision {decision_id} not found")
@@ -401,7 +410,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
                               component_ids: list[str] | None = None) -> dict[str, Any]:
         """Record an architecture decision (ADR). status: proposed | accepted | rejected | superseded.
         alternatives: [{name, branch?, summary, pros: [..], cons: [..]}]; chosen: an alternative name or branch."""
-        p = Principal()
+        p = Principal(store)
         p.require_write()
         project_for(p, project_id)
         try:
@@ -419,7 +428,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
         """Compare 2–4 draft branches against the project's requirements (Jev decision API, else an LLM, else
         an offline heuristic; 'engine' says which). Scores cost, scalability, performance, security, reliability,
         operability and delivery speed 1–5 and recommends one. With create_decision, records a proposed ADR."""
-        p = Principal()
+        p = Principal(store)
         if create_decision:
             p.require_write()
         project, _ = project_for(p, project_id)

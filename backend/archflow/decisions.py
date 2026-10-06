@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Awaitable, Callable
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from . import jev
@@ -179,58 +179,59 @@ def with_bumped_revs(new: ProjectState, current: ProjectState) -> ProjectState:
 
 
 # --------------------------------------------------------------------------- routes
-def register_routes(app: FastAPI, store: Any, *, project_or_404: Callable[[str], dict[str, Any]],
+def register_routes(app: FastAPI, store: Any, *, authz: Any,
                     sync_to_live_doc: Callable[..., Awaitable[None]],
                     broadcast: Callable[[str, str, dict[str, Any]], Awaitable[None]]) -> None:
+    """Routes are authorized by ``authz`` (authz.Authz): reading needs any role; reviewers may change only a
+    decision's status; everything else needs developer or above. ``actor`` fields in bodies are ignored."""
 
     def decision_or_404(pid: str, did: str) -> dict[str, Any]:
-        project_or_404(pid)
         d = store.get_decision(pid, did)
         if not d:
             raise HTTPException(404, "decision not found")
         return d
 
     @app.get("/api/projects/{pid}/decisions")
-    def list_decisions(pid: str):
-        project_or_404(pid)
+    def list_decisions(pid: str, a=Depends(authz.project("read"))):
         return store.list_decisions(pid)
 
     @app.post("/api/projects/{pid}/decisions", status_code=201)
-    def post_decision(pid: str, body: DecisionIn):
-        project_or_404(pid)
+    def post_decision(pid: str, body: DecisionIn, a=Depends(authz.project("edit"))):
         data = body.model_dump(exclude={"actor"})
-        return create_decision(store, pid, data, body.actor)
+        return create_decision(store, pid, data, a.actor)
 
     @app.get("/api/projects/{pid}/decisions/{did}")
-    def get_decision(pid: str, did: str):
+    def get_decision(pid: str, did: str, a=Depends(authz.project("read"))):
         return decision_or_404(pid, did)
 
     @app.patch("/api/projects/{pid}/decisions/{did}")
-    def patch_decision(pid: str, did: str, body: DecisionPatch):
+    def patch_decision(pid: str, did: str, body: DecisionPatch, a=Depends(authz.project("review"))):
         decision_or_404(pid, did)
         fields = body.model_dump(exclude={"actor"}, exclude_unset=True)
         fields = {k: v for k, v in fields.items() if v is not None}
+        if set(fields) - {"status"} and not a.can("edit"):
+            raise HTTPException(403, f"Your role ({a.role}) can only change a decision's status.")
         try:
-            return update_decision(store, pid, did, fields, body.actor)
+            return update_decision(store, pid, did, fields, a.actor)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @app.post("/api/projects/{pid}/evaluate")
-    async def evaluate(pid: str, body: EvaluateIn):
-        project = project_or_404(pid)
+    async def evaluate(pid: str, body: EvaluateIn, a=Depends(authz.project("edit"))):
         try:
             result = await asyncio.to_thread(evaluate_branches, store, pid, body.branches, body.base_branch,
-                                             project.get("org_id"))
+                                             a.org_id)
         except KeyError as exc:
             raise HTTPException(404, f"branch '{exc.args[0]}' not found") from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         if body.create_decision:
-            result["decision"] = decision_from_evaluation(store, pid, result, body.actor, body.title)
+            result["decision"] = decision_from_evaluation(store, pid, result, a.actor, body.title)
         return result
 
     @app.post("/api/projects/{pid}/decisions/{did}/adopt")
-    async def adopt(pid: str, did: str, body: AdoptIn):
+    async def adopt(pid: str, did: str, body: AdoptIn, a=Depends(authz.project("edit"))):
+        actor = a.actor
         d = decision_or_404(pid, did)
         if d["status"] not in ("proposed", "accepted"):
             raise HTTPException(409, f"{did} is {d['status']}; only proposed or accepted decisions can be adopted")
@@ -244,20 +245,20 @@ def register_routes(app: FastAPI, store: Any, *, project_or_404: Callable[[str],
         current = store.get_state(pid, target)
         if current is None:
             raise HTTPException(404, f"branch '{target}' not found")
-        safety = store.commit(pid, target, f"Before adopting {source} ({did})", body.actor, current)
+        safety = store.commit(pid, target, f"Before adopting {source} ({did})", actor, current)
         with store.transaction(pid, target) as current:
             if current is None:
                 raise HTTPException(404, f"branch '{target}' not found")
             adopted = with_bumped_revs(chosen_state, current)
             store.save_state(pid, target, adopted)
             summary = [f"adopted {source} ({did})"]
-            store.log_activity(pid, target, body.actor, summary, adopted.rev)
-        await sync_to_live_doc(pid, target, current, adopted, body.actor)
-        version = store.commit(pid, target, f"Adopted {source} ({did})", body.actor, adopted)
-        decision = update_decision(store, pid, did, {"status": "accepted"}, body.actor)
-        await broadcast(pid, target, {"type": "state", "state": adopted.model_dump(), "actor": body.actor,
+            store.log_activity(pid, target, actor, summary, adopted.rev)
+        await sync_to_live_doc(pid, target, current, adopted, actor)
+        version = store.commit(pid, target, f"Adopted {source} ({did})", actor, adopted)
+        decision = update_decision(store, pid, did, {"status": "accepted"}, actor)
+        await broadcast(pid, target, {"type": "state", "state": adopted.model_dump(), "actor": actor,
                                       "summary": summary})
-        await broadcast(pid, target, {"type": "versions", "actor": body.actor})
+        await broadcast(pid, target, {"type": "versions", "actor": actor})
         return {"version": version["number"], "safety_version": safety["number"], "branch": target,
                 "source_branch": source, "decision": decision}
 

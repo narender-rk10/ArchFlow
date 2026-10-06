@@ -8,8 +8,10 @@ import { api } from "../api";
 import { useCollab } from "../collab";
 import { useRealtime } from "../realtime";
 import type {
-  Activity, Analysis, ArchNode, Branch, Catalog, CatalogItem, Diff, Issue, Op, Project, User, Version,
+  Activity, Analysis, ArchNode, Branch, Catalog, CatalogItem, Diff, Issue, Me, Op, Project, Role, User, Version,
 } from "../types";
+import { can } from "../types";
+import { UserMenu } from "./UserMenu";
 import { ArchNodeComponent, TYPE_META, type ArchFlowNode, type DiffMark } from "./ArchNode";
 import { CommandBar, type LogEntry } from "./CommandBar";
 import { ConnectDialog } from "./ConnectDialog";
@@ -30,6 +32,8 @@ interface Props {
   themeToggle: React.ReactNode;
   onBranch: (branch: string) => void;
   onExit: () => void;
+  me: Me;
+  onLogout: () => void;
 }
 
 const nodeTypes = { arch: ArchNodeComponent };
@@ -44,7 +48,7 @@ export function Workspace(props: Props) {
   );
 }
 
-function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, onExit }: Props) {
+function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranch, onExit, onLogout }: Props) {
   const flow = useReactFlow<ArchFlowNode, Edge>();
   const [project, setProject] = useState<Project | null>(null);
   const [branches, setBranches] = useState<Branch[]>([]);
@@ -70,6 +74,10 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
   // Diagram level shown on the canvas: "" = system (HLD), else the id of the component whose internals are open.
   const [level, setLevel] = useState("");
   const [generating, setGenerating] = useState(false);
+  // Your role in the project's org (from the API). Viewers and reviewers get a read-only workspace; the API
+  // and the collab server enforce the same rules, this only shapes the UI.
+  const [role, setRole] = useState<Role | null>(null);
+  const readOnly = role !== null && !can(role, "edit");
   const clipboard = useRef<{ nodes: ArchNode[]; edges: { source: string; target: string; protocol: string; label: string }[] } | null>(null);
   const wrapper = useRef<HTMLDivElement>(null);
 
@@ -124,10 +132,13 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
       setProject(p.project);
       setBranches(p.branches);
       setHeadVersion(p.head_version);
+      setRole(p.role);
+      // AI is on when the server or the org (its own keys) has a provider configured.
+      api.health().then((h) => setAi({ available: p.ai_available, model: h.llm?.groups?.reasoning?.[0] ?? h.model }))
+        .catch(() => setAi({ available: p.ai_available, model: "" }));
     }).catch((e) => setLoadError(e.message));
     refreshMeta();
     api.catalog().then(setCatalog).catch(() => {});
-    api.health().then((h) => setAi({ available: !!h.llm?.available, model: h.llm?.groups?.reasoning?.[0] ?? h.model })).catch(() => {});
   }, [pid, branch, refreshMeta]);
 
   // ---- realtime ----
@@ -158,12 +169,13 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
   const { apply, setCursor, setSelection, undo, redo } = live;
   const send = useCallback((ops: Op[]) => {
     if (!ops.length) return;
+    if (readOnly) { toast(`You have ${role} access: ask an admin for the developer role to edit.`); return; }
     try {
       apply(ops);
     } catch (e) {
       toast(`⚠ ${(e as Error).message}`);
     }
-  }, [apply, toast]);
+  }, [apply, toast, readOnly, role]);
 
   // ---- derived view state ----
   const issuesByNode = useMemo(() => {
@@ -280,6 +292,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
   }, [send]);
 
   const onDrop = useCallback((e: React.DragEvent) => {
+    if (readOnly) return;
     const raw = e.dataTransfer.getData(DRAG_MIME);
     if (!raw) return;
     e.preventDefault();
@@ -296,7 +309,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
       ...(type === "endpoint" ? { name: "GET /resource", props: { method: "GET", path: "/resource" } } : {}),
       ...(type === "table" ? { name: "new_table", props: { columns: "id uuid pk, created_at timestamptz" } } : {}),
     } }]);
-  }, [flow, send, level]);
+  }, [flow, send, level, readOnly]);
 
   const lastCursor = useRef(0);
   const onMouseMove = useCallback((e: React.MouseEvent) => {
@@ -345,13 +358,13 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
       if (mod && e.key === "c") { if (copySelection()) e.preventDefault(); }
       else if (mod && e.key === "v") { e.preventDefault(); paste(); }
       else if (mod && e.key === "d") { e.preventDefault(); if (copySelection()) paste(); }
-      else if (mod && !e.shiftKey && e.key.toLowerCase() === "z") { e.preventDefault(); undo(); }
-      else if (mod && (e.key.toLowerCase() === "y" || (e.shiftKey && e.key.toLowerCase() === "z"))) { e.preventDefault(); redo(); }
+      else if (mod && !e.shiftKey && e.key.toLowerCase() === "z") { e.preventDefault(); if (!readOnly) undo(); }
+      else if (mod && (e.key.toLowerCase() === "y" || (e.shiftKey && e.key.toLowerCase() === "z"))) { e.preventDefault(); if (!readOnly) redo(); }
       else if (e.key === "Escape") { setTraced(null); setSearch(""); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [copySelection, paste]);
+  }, [copySelection, paste, readOnly]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- AI ----
   const logId = useRef(0);
@@ -445,11 +458,12 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
       <header className="topbar">
         <button className="ghost brand-btn" onClick={onExit} title="All projects"><span className="logo">▲</span></button>
         <div className="title">{project?.name ?? "…"}</div>
+        {readOnly && <span className="ro-badge" title="Your role can view and comment on decisions, but not edit">Read only · {role}</span>}
         <div className="branch">
           <select value={branch} onChange={(e) => onBranch(e.target.value)} aria-label="Branch">
             {branches.map((b) => <option key={b.name} value={b.name}>⎇ {b.name}</option>)}
           </select>
-          {newBranch === null ? (
+          {readOnly ? null : newBranch === null ? (
             <button className="small" onClick={() => setNewBranch("experiment/")}>New branch</button>
           ) : (
             <form className="row gap" onSubmit={(e) => { e.preventDefault(); createBranch(newBranch.trim(), null); setNewBranch(null); }}>
@@ -476,7 +490,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
             {ai.available ? "AI on" : "AI off · templates"}
           </span>
         )}
-        <select className="convert" value="" disabled={converting} aria-label="Convert architecture to another platform"
+        <select className="convert" value="" disabled={converting || readOnly} hidden={readOnly} aria-label="Convert architecture to another platform"
           title="Swap every recognised component for its equivalent on another platform"
           onChange={async (e) => {
             const target = e.target.value;
@@ -504,6 +518,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
         <button className="primary" onClick={() => setPromptFor({ nodeIds: selectedNodeIds, requirementIds: [] })}>
           ⚙ Vibe code{selectedNodeIds.length ? ` (${selectedNodeIds.length})` : ""}
         </button>
+        <UserMenu me={me} user={user} role={role} onLogout={onLogout} />
       </header>
 
       <aside className="sidebar">
@@ -516,7 +531,10 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
             </button>
           ))}
         </nav>
-        {state && tab === "design" && (
+        {state && tab === "design" && readOnly && (
+          <p className="muted small pad">The design chat creates and changes architectures, which needs the developer role or above.</p>
+        )}
+        {state && tab === "design" && !readOnly && (
           <DesignChat pid={pid} branch={branch} user={user} aiAvailable={ai?.available ?? true} canvasEmpty={Object.keys(state.nodes).length === 0}
             onApplied={(r) => {
               if (r.branch !== branch) { onBranch(r.branch); return; }
@@ -526,7 +544,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
             }} />
         )}
         {state && tab === "requirements" && (
-          <RequirementsPanel state={state} issues={analysis?.requirement_issues ?? []} traced={traced} onTrace={setTraced}
+          <RequirementsPanel state={state} issues={analysis?.requirement_issues ?? []} traced={traced} onTrace={setTraced} readOnly={readOnly}
             send={send} onPrompt={(rid) => setPromptFor({ nodeIds: [], requirementIds: [rid] })} />
         )}
         {tab === "issues" && <IssuesPanel analysis={analysis} onFocus={focusIssue} onAsk={runAsk} />}
@@ -535,7 +553,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
             onCommit={commit} onDiff={showDiff} onRestore={restore} onBranchFrom={(v, name) => createBranch(name, v)} />
         )}
         {tab === "decisions" && (
-          <DecisionsPanel pid={pid} branches={branches} user={user} toast={toast}
+          <DecisionsPanel pid={pid} branches={branches} user={user} role={role ?? undefined} toast={toast}
             onAdopted={(r) => { refreshMeta(); toast(`Adopted ${r.source} into ${r.branch} (${r.decisionId}) · v${r.version}`); }} />
         )}
       </aside>
@@ -546,9 +564,10 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
           nodes={nodes} edges={edges} nodeTypes={nodeTypes}
           onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onDelete={onDelete}
           onNodeDragStop={onNodeDragStop} onConnect={onConnect}
+          nodesDraggable={!readOnly} nodesConnectable={!readOnly} edgesReconnectable={!readOnly}
           onNodeDoubleClick={(_, n) => { if (!n.id.startsWith("ghost:") && n.data.model.type !== "note") openLevel(n.id); }}
           zoomOnDoubleClick={false}
-          deleteKeyCode={["Delete", "Backspace"]} multiSelectionKeyCode={["Shift", "Meta", "Control"]}
+          deleteKeyCode={readOnly ? null : ["Delete", "Backspace"]} multiSelectionKeyCode={["Shift", "Meta", "Control"]}
           selectionKeyCode="Shift" colorMode={colorMode} fitView fitViewOptions={{ padding: 0.15 }} minZoom={0.1} maxZoom={2.5} proOptions={{ hideAttribution: true }}
         >
           <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
@@ -563,7 +582,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
             ))}
           </ViewportPortal>
         </ReactFlow>
-        <Palette catalog={catalog} />
+        {!readOnly && <Palette catalog={catalog} />}
         {diff && <div className="diff-banner">Diff: v{diff.from} → working · {diff.data.total_changes} change(s) <button className="small" onClick={() => setDiff(null)}>Exit</button></div>}
         {traced && <div className="diff-banner">Tracing {traced} <button className="small" onClick={() => setTraced(null)}>Clear</button></div>}
         {level && (
@@ -583,7 +602,7 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
             <h3>{state.nodes[level]?.name}: low-level design</h3>
             <p className="muted">Generate components, API endpoints, tables and events from this component's connections
               and requirements, or drag elements from the palette.</p>
-            <button className="primary" disabled={generating} onClick={() => generateLld(level)}>
+            <button className="primary" disabled={generating || readOnly} onClick={() => generateLld(level)}>
               {generating ? "Generating…" : "Generate low-level design"}
             </button>
           </div>
@@ -595,20 +614,21 @@ function WorkspaceInner({ pid, branch, user, colorMode, themeToggle, onBranch, o
               “Build an AI customer-support platform where customers use WhatsApp and web.”</p>
           </div>
         )}
-        <CommandBar log={log} selectionCount={selectedNodeIds.length} aiBusy={aiBusy} onCommand={runCommand} onAsk={runAsk} />
+        <CommandBar log={log} selectionCount={selectedNodeIds.length} aiBusy={aiBusy} onCommand={runCommand} onAsk={runAsk}
+          readOnly={readOnly} />
         <div className="toasts">{toasts.map((t) => <div key={t.id} className="toast">{t.text}</div>)}</div>
       </main>
 
       <aside className="rightbar">
         {state && (
           <Inspector catalog={catalog} state={state} nodeIds={selectedNodeIds} edgeIds={selectedEdgeIds} send={send}
-            pid={pid} branch={branch} onOpenInternals={openLevel}
+            pid={pid} branch={branch} onOpenInternals={openLevel} readOnly={readOnly}
             onPrompt={() => setPromptFor({ nodeIds: selectedNodeIds, requirementIds: [] })} />
         )}
       </aside>
 
       {connectOpen && project && (
-        <ConnectDialog orgId={project.org_id ?? "org-default"} user={user} onClose={() => setConnectOpen(false)} />
+        <ConnectDialog orgId={project.org_id ?? "org-default"} canManage={can(role, "admin")} onClose={() => setConnectOpen(false)} />
       )}
       {promptFor && <PromptDialog pid={pid} branch={branch} nodeIds={promptFor.nodeIds} requirementIds={promptFor.requirementIds}
         onClose={() => setPromptFor(null)} />}
