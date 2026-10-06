@@ -151,12 +151,19 @@ export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pi
     <div className="inspector empty">
       <p className="muted small">{readOnly ? "Select a component or connection to see its details. You have read-only access."
         : "Select a component or connection to edit it."}</p>
-      <ul className="muted small tips">
-        <li>Drag components from the palette onto the canvas.</li>
-        <li>Drag from a handle to another component to connect.</li>
-        <li>Shift-drag to box-select; Delete removes.</li>
-        <li>Type commands like “Add Redis between Order Service and Orders DB”.</li>
-      </ul>
+      {readOnly ? (
+        <ul className="muted small tips">
+          <li>Double-click a component to open its internals.</li>
+          <li>Use Ask to question the architecture, e.g. “What happens if the database fails?”.</li>
+        </ul>
+      ) : (
+        <ul className="muted small tips">
+          <li>Drag components from the palette onto the canvas.</li>
+          <li>Drag from a handle to another component to connect.</li>
+          <li>Shift-drag to box-select; Delete removes.</li>
+          <li>Type commands like “Add Redis between Order Service and Orders DB”.</li>
+        </ul>
+      )}
     </div>
   );
 }
