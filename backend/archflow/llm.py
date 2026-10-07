@@ -6,6 +6,7 @@ Public API (synchronous; callers wrap these in ``asyncio.to_thread``):
     status() -> dict
     complete_json(system, messages, schema, *, group="reasoning", org_id=None, max_tokens=8000) -> dict
     complete_tools(system, messages, tools, *, group="reasoning", org_id=None, max_tokens=8000) -> (text, calls)
+    stream_text(system, messages, *, group="reasoning", org_id=None, max_tokens=8000) -> Iterator[str]
     LLMUnavailable, LLMRefused
 
 Resilience is layered:
@@ -54,12 +55,12 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterator, Protocol
 
 log = logging.getLogger("archflow.llm")
 
 __all__ = ["LLMUnavailable", "LLMRefused", "LLMInvalidOutput", "available", "status",
-           "complete_json", "complete_tools", "set_org_key_resolver", "invalidate_org"]
+           "complete_json", "complete_tools", "stream_text", "set_org_key_resolver", "invalidate_org"]
 
 
 # Thinking models (Gemini 3.x, Claude, GPT-5) spend output tokens on reasoning before answering; a small
@@ -680,6 +681,49 @@ def complete_json(system: str, messages: list[dict], schema: dict, *, group: str
                 {"role": "user", "content": f"That response was invalid: {exc}. Reply again with only a JSON "
                                             "object that conforms to the required schema."},
             ]
+
+
+def stream_text(system: str, messages: list[dict], *, group: str = "reasoning", org_id: str | None = None,
+                max_tokens: int = 8000) -> Iterator[str]:
+    """Yield a plain-text answer in chunks as the model writes it.
+
+    Retries and provider fallback apply until a provider accepts the request. Some providers only report a
+    rate limit once the stream is read; if the stream fails before any text arrived, the answer is fetched
+    again without streaming (full retry/fallback path). A failure after text was sent raises LLMUnavailable.
+    """
+    resp = _dispatch(group, org_id, messages=_msgs(system, messages),
+                     max_tokens=max(max_tokens, MIN_OUTPUT_TOKENS), stream=True)
+    if _get(resp, "choices") is not None:  # the provider answered in one piece
+        msg, finish = _message(resp)
+        text = _get(msg, "content") or ""
+        _check_refusal(finish, text)
+        if text:
+            yield text
+        return
+    sent = False
+    try:
+        for chunk in resp:
+            choices = _get(chunk, "choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            _check_refusal(_get(choice, "finish_reason"), None)
+            text = _get(_get(choice, "delta"), "content") if _get(choice, "delta") is not None else None
+            if text:
+                sent = True
+                yield text
+    except LLMRefused:
+        raise
+    except Exception as exc:  # noqa: BLE001 - classified below
+        if _classify(exc) == "refused":
+            raise LLMRefused("The model declined this request (content policy)") from exc
+        if sent:
+            log.warning("llm stream interrupted group=%s org=%s type=%s", group, org_id, type(exc).__name__)
+            raise LLMUnavailable(f"The answer was interrupted ({type(exc).__name__}). Try again.") from exc
+        log.info("llm stream failed before any text (%s); retrying without streaming", type(exc).__name__)
+        text, _ = complete_tools(system, messages, [], group=group, org_id=org_id, max_tokens=max_tokens)
+        if text:
+            yield text
 
 
 def complete_tools(system: str, messages: list[dict], tools: list[dict], *, group: str = "reasoning",

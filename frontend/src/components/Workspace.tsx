@@ -6,21 +6,27 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useCollab } from "../collab";
+import { useAssistant } from "../assistant";
+import { exportCanvasImage, exportName } from "../exportImage";
+import { touchRecent } from "../recent";
 import { useRealtime } from "../realtime";
 import type {
-  Activity, Analysis, ArchNode, Branch, Catalog, CatalogItem, Diff, Issue, Me, Op, Project, Role, User, Version,
+  Activity, Analysis, ArchNode, Branch, Catalog, CatalogItem, Diff, Issue, Me, MemoryItem, Op, Project, Role, User, Version,
 } from "../types";
 import { can } from "../types";
 import { UserMenu } from "./UserMenu";
 import { ArchNodeComponent, TYPE_META, type ArchFlowNode, type DiffMark } from "./ArchNode";
 import { CodeDialog } from "./CodeDialog";
-import { CommandBar, type LogEntry } from "./CommandBar";
+import { CommandBar } from "./CommandBar";
 import { ConnectDialog } from "./ConnectDialog";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { DesignChat } from "./DesignChat";
 import { PromptDialog } from "./Dialogs";
+import { ProjectSwitcher } from "./ProjectSwitcher";
 import { Inspector } from "./Inspector";
 import { IssuesPanel } from "./IssuesPanel";
+import type { EntityLinks } from "./Markdown";
+import { MemoryDialog } from "./MemoryDialog";
 import { DRAG_MIME, Palette } from "./Palette";
 import { RequirementsPanel } from "./RequirementsPanel";
 import { VersionsPanel } from "./VersionsPanel";
@@ -33,6 +39,8 @@ interface Props {
   themeToggle: React.ReactNode;
   onBranch: (branch: string) => void;
   onExit: () => void;
+  /** Switch to another project (the switcher passes the branch you last used there). */
+  onOpenProject: (pid: string, branch: string) => void;
   me: Me;
   onLogout: () => void;
 }
@@ -49,7 +57,7 @@ export function Workspace(props: Props) {
   );
 }
 
-function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranch, onExit, onLogout }: Props) {
+function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranch, onExit, onOpenProject, onLogout }: Props) {
   const flow = useReactFlow<ArchFlowNode, Edge>();
   const [project, setProject] = useState<Project | null>(null);
   const [branches, setBranches] = useState<Branch[]>([]);
@@ -62,7 +70,10 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const [search, setSearch] = useState("");
   const [diff, setDiff] = useState<{ from: number; data: Diff } | null>(null);
   const [promptFor, setPromptFor] = useState<{ nodeIds: string[]; requirementIds: string[] } | null>(null);
-  const [log, setLog] = useState<LogEntry[]>([]);
+  const [memory, setMemory] = useState<MemoryItem[]>([]);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  // Latest server event about a conversation, for the design chat (the assistant hook gets it directly).
+  const [designRemote, setDesignRemote] = useState<{ id: string; at: number } | null>(null);
   const [toasts, setToasts] = useState<{ id: number; text: string }[]>([]);
   const [loadError, setLoadError] = useState("");
   const [connectOpen, setConnectOpen] = useState(false);
@@ -76,6 +87,51 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   // Diagram level shown on the canvas: "" = system (HLD), else the id of the component whose internals are open.
   const [level, setLevel] = useState("");
   const [generating, setGenerating] = useState(false);
+  // Canvas full screen: only the canvas is shown, and the browser goes full screen when it allows it.
+  const [canvasFull, setCanvasFull] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  // Ctrl/⌘+K opens the project switcher from anywhere in the workspace.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSwitcherOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  const canvasFullRef = useRef(false);
+  canvasFullRef.current = canvasFull;
+  const toggleCanvasFull = useCallback(() => {
+    const next = !canvasFullRef.current;
+    if (next && !document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => { /* not allowed: CSS only */ });
+    if (!next && document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+    setCanvasFull(next);
+  }, []);
+  useEffect(() => {
+    // Leaving browser full screen (Esc, F11) also leaves canvas full screen.
+    const onChange = () => { if (!document.fullscreenElement) setCanvasFull(false); };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+  useEffect(() => {
+    // F toggles canvas full screen, Esc leaves it (when you are not typing or in a dialog).
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      if (document.querySelector(".modal-backdrop, .command-bar.full")) return;
+      if ((e.key === "f" || e.key === "F") && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); toggleCanvasFull(); }
+      else if (e.key === "Escape" && canvasFull && !document.fullscreenElement) setCanvasFull(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [canvasFull, toggleCanvasFull]);
+  useEffect(() => {
+    const t = window.setTimeout(() => flow.fitView({ padding: 0.15, duration: 300 }), 120); // after the layout changes
+    return () => window.clearTimeout(t);
+  }, [canvasFull, flow]);
   // Your role in the project's org (from the API). Viewers and reviewers get a read-only workspace; the API
   // and the collab server enforce the same rules, this only shapes the UI.
   const [role, setRole] = useState<Role | null>(null);
@@ -143,6 +199,13 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
     api.catalog().then(setCatalog).catch(() => {});
   }, [pid, branch, refreshMeta]);
 
+  useEffect(() => { if (project) touchRecent(project.id, project.name, project.org_id ?? "", branch); }, [project, branch]);
+
+  // ---- AI conversations and project memory ----
+  const assistant = useAssistant(pid, branch, user.name);
+  const loadMemory = useCallback(() => { api.memory(pid).then(setMemory).catch(() => {}); }, [pid]);
+  useEffect(() => { loadMemory(); }, [loadMemory]);
+
   // ---- realtime ----
   const activityTimer = useRef<number | undefined>(undefined);
   const rt = useRealtime(pid, branch, user, {
@@ -151,6 +214,11 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
       activityTimer.current = window.setTimeout(() => api.activity(pid, branch).then(setActivity).catch(() => {}), 400);
     },
     onVersions: refreshMeta,
+    onConversation: (id) => { assistant.onRemote(id); setDesignRemote({ id, at: Date.now() }); },
+    onMemory: (_actor, added) => {
+      loadMemory();
+      if (added.length) toast(`✦ Remembered: ${added.join(" · ")}`);
+    },
   });
 
   // ---- analysis (debounced on every revision) ----
@@ -369,31 +437,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   }, [copySelection, paste, readOnly]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- AI ----
-  const logId = useRef(0);
-  const updateLog = (id: number, patch: Partial<LogEntry>) => setLog((l) => l.map((e) => (e.id === id ? { ...e, ...patch } : e)));
-
-  const runCommand = async (text: string) => {
-    const id = ++logId.current;
-    setLog((l) => [...l, { id, kind: "command", text, pending: true }]);
-    try {
-      const r = await api.command(pid, branch, text, selectedNodeIds, user.name);
-      updateLog(id, { pending: false, explanation: r.explanation, summary: r.summary, questions: r.questions,
-        engine: r.engine, error: r.applied ? undefined : r.error });
-    } catch (e) {
-      updateLog(id, { pending: false, error: (e as Error).message });
-    }
-  };
-
-  const runAsk = async (question: string) => {
-    const id = ++logId.current;
-    setLog((l) => [...l, { id, kind: "ask", text: question, pending: true }]);
-    try {
-      const r = await api.ask(pid, branch, question);
-      updateLog(id, { pending: false, answer: r.answer });
-    } catch (e) {
-      updateLog(id, { pending: false, error: (e as Error).message });
-    }
-  };
+  const runAsk = (question: string) => { assistant.ask(question); };
 
   const generateLld = async (nodeId: string) => {
     setGenerating(true);
@@ -433,33 +477,57 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
     } catch (e) { toast(`⚠ ${(e as Error).message}`); }
   };
 
+  /** Select components and bring them into view (switching diagram level if they live in another one). */
+  const focusNodes = (nodeIds: string[]) => {
+    if (!nodeIds.length) return;
+    const first = stateRef.current?.nodes[nodeIds[0]];
+    if (first && levelOf(first) !== level) setLevel(levelOf(first));
+    const ids = new Set(nodeIds);
+    setNodes((ns) => ns.map((n) => ({ ...n, selected: ids.has(n.id) })));
+    flow.fitView({ nodes: nodeIds.map((id) => ({ id })), padding: 0.6, duration: 400, maxZoom: 1.2 });
+  };
   const focusIssue = (i: Issue) => {
     if (i.requirement_ids[0]) { setTraced(i.requirement_ids[0]); setTab("requirements"); }
-    if (i.node_ids.length) {
-      const first = state?.nodes[i.node_ids[0]];
-      if (first && levelOf(first) !== level) setLevel(levelOf(first));
-      const ids = new Set(i.node_ids);
-      setNodes((ns) => ns.map((n) => ({ ...n, selected: ids.has(n.id) })));
-      flow.fitView({ nodes: i.node_ids.map((id) => ({ id })), padding: 0.6, duration: 400, maxZoom: 1.2 });
-    }
+    focusNodes(i.node_ids);
   };
+
+  // Component names and requirement IDs in AI answers link to the canvas. focusNodes reads the latest state
+  // through refs, so the links only need rebuilding when component names change.
+  const focusRef = useRef(focusNodes);
+  focusRef.current = focusNodes;
+  const componentNames = Object.values(state?.nodes ?? {}).filter((n) => n.type !== "note")
+    .map((n) => `${n.id}\u0000${n.name}`).join("\u0001");
+  const entityLinks: EntityLinks = useMemo(() => ({
+    components: componentNames ? componentNames.split("\u0001").map((s) => { const [id, name] = s.split("\u0000"); return { id, name }; }) : [],
+    onComponent: (id: string) => focusRef.current([id]),
+    onRequirement: (id: string) => { setTraced(id); setTab("requirements"); },
+  }), [componentNames]);
 
   const onSearchEnter = () => {
     if (highlight?.size) flow.fitView({ nodes: [...highlight].map((id) => ({ id })), padding: 0.5, duration: 400, maxZoom: 1.2 });
   };
 
   if (loadError) {
-    return <div className="picker"><p className="error">{loadError}</p><button onClick={onExit}>Back to projects</button></div>;
+    return (
+      <div className="picker">
+        <p className="error">{loadError}</p>
+        <div className="row">
+          {branch !== "main" && <button className="primary" onClick={() => onBranch("main")}>Open the main branch</button>}
+          <button onClick={onExit}>Back to projects</button>
+        </div>
+      </div>
+    );
   }
 
   const others = live.peers.filter((p) => p.clientId !== live.selfId);
   const aiBusy = rt.aiStatus.status === "thinking" ? `AI is applying “${rt.aiStatus.text}” for ${rt.aiStatus.actor}` : null;
 
   return (
-    <div className="workspace">
+    <div className={`workspace ${canvasFull ? "canvas-full" : ""}`}>
       <header className="topbar">
         <button className="ghost brand-btn" onClick={onExit} title="All projects"><span className="logo">▲</span></button>
-        <div className="title">{project?.name ?? "…"}</div>
+        <ProjectSwitcher me={me} current={project} open={switcherOpen} onOpenChange={setSwitcherOpen}
+          onOpen={onOpenProject} onHome={onExit} />
         {readOnly && <span className="ro-badge" title="Your role can view and comment on decisions, but not edit">Read only · {role}</span>}
         <div className="branch">
           <select value={branch} onChange={(e) => onBranch(e.target.value)} aria-label="Branch">
@@ -509,6 +577,28 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           <option value="aws">AWS</option><option value="azure">Azure</option>
           <option value="gcp">Google Cloud</option><option value="oss">Open source (self-hosted)</option>
         </select>
+        <select className="convert" value="" disabled={exporting} aria-label="Export this diagram"
+          title="Export the diagram you are looking at (the system, or a component's internals)"
+          onChange={async (e) => {
+            const kind = e.target.value as "png" | "svg" | "html" | "";
+            if (!kind) return;
+            setExporting(true);
+            const name = exportName(project?.name ?? "diagram", branch, level ? state?.nodes[level]?.name ?? level : "");
+            try {
+              if (kind === "html") toast(`Saved ${await api.exportDiagram(pid, branch, level)}`);
+              else {
+                await exportCanvasImage(nodes.filter((n) => !n.id.startsWith("ghost:")), kind, name);
+                toast(`Saved ${name}.${kind}`);
+              }
+            } catch (err) { toast(`⚠ ${(err as Error).message}`); }
+            finally { setExporting(false); }
+          }}>
+          <option value="">{exporting ? "Exporting…" : "⤓ Export"}</option>
+          <option value="png">PNG image</option>
+          <option value="svg">SVG image</option>
+          <option value="html">Interactive diagram (HTML)</option>
+        </select>
+        <button className="small" onClick={toggleCanvasFull} title="Full-screen canvas (F)" aria-label="Full-screen canvas">⛶</button>
         <button className="small" onClick={() => setCodeOpen(true)}
           title="Analyse a repository: reconstruct its architecture, check drift against this design and change impact">⟨/⟩ Code</button>
         <button className="small" onClick={() => setConnectOpen(true)} title="Connect Claude, Codex or other agents over MCP">⌘ Connect AI</button>
@@ -540,6 +630,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         )}
         {state && tab === "design" && !readOnly && (
           <DesignChat pid={pid} branch={branch} user={user} aiAvailable={ai?.available ?? true} canvasEmpty={Object.keys(state.nodes).length === 0}
+            remote={designRemote}
             onApplied={(r) => {
               if (r.branch !== branch) { onBranch(r.branch); return; }
               refreshMeta();
@@ -587,6 +678,9 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           </ViewportPortal>
         </ReactFlow>
         {!readOnly && <Palette catalog={catalog} />}
+        {canvasFull && (
+          <button className="canvas-exit-full" onClick={toggleCanvasFull} title="Exit full screen (Esc or F)">✕ Exit full screen</button>
+        )}
         {diff && <div className="diff-banner">Diff: v{diff.from} → working · {diff.data.total_changes} change(s) <button className="small" onClick={() => setDiff(null)}>Exit</button></div>}
         {traced && <div className="diff-banner">Tracing {traced} <button className="small" onClick={() => setTraced(null)}>Clear</button></div>}
         {level && (
@@ -618,8 +712,9 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
               “Build an AI customer-support platform where customers use WhatsApp and web.”</p>
           </div>
         )}
-        <CommandBar log={log} selectionCount={selectedNodeIds.length} aiBusy={aiBusy} onCommand={runCommand} onAsk={runAsk}
-          readOnly={readOnly} />
+        <CommandBar assistant={assistant} selection={selectedNodeIds} aiBusy={aiBusy} links={entityLinks}
+          memoryCount={memory.length} onOpenMemory={() => setMemoryOpen(true)} meId={me.user.id} isAdmin={can(role, "admin")}
+          userName={user.name} readOnly={readOnly} />
         <div className="toasts">{toasts.map((t) => <div key={t.id} className="toast">{t.text}</div>)}</div>
       </main>
 
@@ -638,6 +733,10 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         <CodeDialog pid={pid} branch={branch} readOnly={readOnly} toast={toast} onClose={() => setCodeOpen(false)}
           onOpenBranch={(name) => { if (name !== branch) onBranch(name); }}
           onFocus={(i) => { setTab("issues"); focusIssue(i); }} />
+      )}
+      {memoryOpen && (
+        <MemoryDialog pid={pid} branch={branch} items={memory} readOnly={readOnly} onChanged={loadMemory}
+          onClose={() => setMemoryOpen(false)} />
       )}
       {promptFor && <PromptDialog pid={pid} branch={branch} nodeIds={promptFor.nodeIds} requirementIds={promptFor.requirementIds}
         onClose={() => setPromptFor(null)} />}

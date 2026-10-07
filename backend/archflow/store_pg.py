@@ -26,8 +26,9 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from .models import ProjectState
-from .store import (CODE_GRAPH_COLS, DECISION_COLS, DECISION_JSON_FIELDS, DEFAULT_ORG_ID, DEFAULT_ORG_NAME,
-                    check_decision_fields, code_graph_id, decision_id)
+from .store import (CODE_GRAPH_COLS, CONVERSATION_COLS, CONVERSATION_FIELDS, DECISION_COLS, DECISION_JSON_FIELDS,
+                    DEFAULT_ORG_ID, DEFAULT_ORG_NAME, MEMORY_COLS, MESSAGE_COLS, check_decision_fields,
+                    check_memory_fields, code_graph_id, conversation_id, decision_id, memory_id)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 MIGRATION_LOCK_KEY = 0x41524346  # "ARCF": pg_advisory_lock key for the migration runner
@@ -582,3 +583,100 @@ class PostgresStore:
         cols = CODE_GRAPH_COLS + (", graph" if with_graph else "")
         return self._code_graph(self._one(f"SELECT {cols} FROM code_graphs WHERE project_id=%s AND status='ready' "
                                           "ORDER BY created_at DESC, id DESC LIMIT 1", (pid,)), with_graph)
+
+    # ---- conversations (AI chat threads) -----------------------------------
+    _CONV_SELECT = (f"SELECT {CONVERSATION_COLS}, (SELECT COUNT(*) FROM conversation_messages m "
+                    "WHERE m.conversation_id = c.id) AS message_count FROM conversations c")
+
+    def create_conversation(self, pid: str, branch: str, kind: str, title: str, created_by: str,
+                            created_by_id: str | None = None) -> dict[str, Any]:
+        cid = conversation_id()
+        with self._conn() as conn:
+            conn.execute("INSERT INTO conversations (id, project_id, branch, kind, title, created_by, created_by_id) "
+                         "VALUES (%s, %s, %s, %s, %s, %s, %s)", (cid, pid, branch, kind, title, created_by, created_by_id))
+        return self.get_conversation(cid)
+
+    def get_conversation(self, cid: str) -> dict[str, Any] | None:
+        return _row(self._one(f"{self._CONV_SELECT} WHERE id=%s", (cid,)))
+
+    def list_conversations(self, pid: str, kind: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        where, params = "project_id=%s", [pid]
+        if kind:
+            where += " AND kind=%s"
+            params.append(kind)
+        rows = self._all(f"{self._CONV_SELECT} WHERE {where} ORDER BY updated_at DESC, id DESC LIMIT %s",
+                         (*params, limit))
+        return [_row(r) for r in rows]
+
+    def update_conversation(self, cid: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        data = {k: v for k, v in fields.items() if k in CONVERSATION_FIELDS}
+        if data:
+            sets = ", ".join(f"{k}=%s" for k in data)
+            with self._conn() as conn:
+                conn.execute(f"UPDATE conversations SET {sets}, updated_at = now() WHERE id=%s", (*data.values(), cid))
+        return self.get_conversation(cid)
+
+    def delete_conversation(self, cid: str) -> bool:
+        with self._conn() as conn:
+            return conn.execute("DELETE FROM conversations WHERE id=%s", (cid,)).rowcount > 0
+
+    def add_message(self, cid: str, role: str, mode: str, content: str, data: dict[str, Any] | None,
+                    author: str) -> dict[str, Any]:
+        with self._conn() as conn, conn.transaction():
+            # Serialize message numbering per conversation across processes.
+            conn.execute("SELECT 1 FROM conversations WHERE id=%s FOR UPDATE", (cid,))
+            seq = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM conversation_messages "
+                               "WHERE conversation_id=%s", (cid,)).fetchone()["n"]
+            row = conn.execute(
+                f"INSERT INTO conversation_messages (conversation_id, seq, role, mode, content, data, author) "
+                f"VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING {MESSAGE_COLS}",
+                (cid, seq, role, mode, content, Jsonb(data or {}), author)).fetchone()
+            conn.execute("UPDATE conversations SET updated_at = now() WHERE id=%s", (cid,))
+        return _row(row)
+
+    def list_messages(self, cid: str, after_seq: int = 0) -> list[dict[str, Any]]:
+        rows = self._all(f"SELECT {MESSAGE_COLS} FROM conversation_messages WHERE conversation_id=%s AND seq > %s "
+                         "ORDER BY seq", (cid, after_seq))
+        return [_row(r) for r in rows]
+
+    def delete_messages_from(self, cid: str, seq: int) -> int:
+        """Delete messages with seq >= ``seq`` (regenerate, clear); the summary is reset if it covered them."""
+        with self._conn() as conn, conn.transaction():
+            n = conn.execute("DELETE FROM conversation_messages WHERE conversation_id=%s AND seq >= %s",
+                             (cid, seq)).rowcount
+            conn.execute("UPDATE conversations SET summary = CASE WHEN summarized_seq >= %s THEN '' ELSE summary END, "
+                         "summarized_seq = CASE WHEN summarized_seq >= %s THEN 0 ELSE summarized_seq END, "
+                         "updated_at = now() WHERE id=%s", (seq, seq, cid))
+        return n
+
+    # ---- project memory (facts every AI call sees) -----------------------------
+    def list_memory(self, pid: str) -> list[dict[str, Any]]:
+        rows = self._all(f"SELECT {MEMORY_COLS} FROM project_memory WHERE project_id=%s "
+                         "ORDER BY pinned DESC, created_at DESC, id DESC", (pid,))
+        return [_row(r) for r in rows]
+
+    def get_memory(self, pid: str, mid: str) -> dict[str, Any] | None:
+        return _row(self._one(f"SELECT {MEMORY_COLS} FROM project_memory WHERE project_id=%s AND id=%s", (pid, mid)))
+
+    def add_memory(self, pid: str, text: str, *, category: str = "fact", pinned: bool = False, source: str = "user",
+                   conversation_id: str | None = None, created_by: str = "anonymous") -> dict[str, Any]:
+        data = check_memory_fields({"text": text, "category": category, "pinned": pinned})
+        mid = memory_id()
+        with self._conn() as conn:
+            conn.execute("INSERT INTO project_memory (id, project_id, text, category, pinned, source, conversation_id, "
+                         "created_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                         (mid, pid, data["text"], data["category"], data["pinned"], source, conversation_id, created_by))
+        return self.get_memory(pid, mid)
+
+    def update_memory(self, pid: str, mid: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        data = check_memory_fields(fields)
+        if data:
+            sets = ", ".join(f"{k}=%s" for k in data)
+            with self._conn() as conn:
+                conn.execute(f"UPDATE project_memory SET {sets}, updated_at = now() WHERE project_id=%s AND id=%s",
+                             (*data.values(), pid, mid))
+        return self.get_memory(pid, mid)
+
+    def delete_memory(self, pid: str, mid: str) -> bool:
+        with self._conn() as conn:
+            return conn.execute("DELETE FROM project_memory WHERE project_id=%s AND id=%s", (pid, mid)).rowcount > 0

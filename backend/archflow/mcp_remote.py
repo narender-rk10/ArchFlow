@@ -25,11 +25,13 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 from . import auth, authz, catalog, lld
+from . import conversations as conversations_mod
 from . import decisions as decisions_mod
 from .analysis import full_analysis, trace_requirement
 from .diff import diff_states, diff_to_text
 from .models import NODE_TYPES, ProjectState
 from .ops import OpError, ConflictError, resolve_node
+from .store import MEMORY_CATEGORIES
 from .templates import TEMPLATES, build_template
 from .vibe import TARGETS, build_prompt
 
@@ -445,6 +447,47 @@ def build_remote_mcp(services: Services) -> MCPServer:
             d = decisions_mod.decision_from_evaluation(store, project_id, result, p.actor, title or None)
             result["decision"] = {"id": d["id"], "title": d["title"], "status": d["status"], "chosen": d["chosen"]}
         return result
+
+    # ---- project memory and conversations ----
+    @mcp.tool()
+    def get_project_memory(project_id: str) -> list[dict[str, Any]]:
+        """Facts the team has settled for this project (cloud, compliance, budget, preferences, decisions), pinned
+        first. ArchFlow's own AI follows them; respect them in your work too."""
+        project_for(Principal(store), project_id)
+        return [{k: m[k] for k in ("id", "text", "category", "pinned", "source", "created_by", "created_at")}
+                for m in store.list_memory(project_id)]
+
+    @mcp.tool()
+    def remember(project_id: str, text: str, category: str = "fact", pinned: bool = False) -> dict[str, Any]:
+        """Add a fact to the project memory so every future AI answer and design takes it into account.
+        One short, self-contained sentence. category: constraint | preference | decision | requirement | context | fact."""
+        p = Principal(store)
+        p.require_write()
+        project_for(p, project_id)
+        if category not in MEMORY_CATEGORIES:
+            raise ToolError(f"category must be one of {', '.join(MEMORY_CATEGORIES)}")
+        item = conversations_mod.add_fact(store, project_id, text, category=category, pinned=pinned, source="mcp",
+                                          created_by=p.actor)
+        if item is None:
+            raise ToolError("Not added: the project memory already has this fact, or it is full.")
+        return item
+
+    @mcp.tool()
+    def list_conversations(project_id: str, kind: str = "") -> list[dict[str, Any]]:
+        """The team's AI conversations in ArchFlow, newest first. kind: assistant (questions and edits) | design."""
+        project_for(Principal(store), project_id)
+        return [{k: c[k] for k in ("id", "kind", "title", "branch", "created_by", "message_count", "updated_at")}
+                for c in store.list_conversations(project_id, kind or None)]
+
+    @mcp.tool()
+    def get_conversation(project_id: str, conversation_id: str) -> dict[str, Any]:
+        """One conversation as a transcript, with the running summary of its older turns."""
+        project_for(Principal(store), project_id)
+        conv = store.get_conversation(conversation_id)
+        if not conv or conv["project_id"] != project_id:
+            raise ToolError(f"conversation {conversation_id} not found")
+        return {"id": conv["id"], "kind": conv["kind"], "title": conv["title"], "summary": conv["summary"],
+                "transcript": conversations_mod.transcript(store.list_messages(conversation_id))}
 
     # ---- repository analysis (code graph) ----
     def codegraph_call(fn, *args, **kw):

@@ -175,6 +175,42 @@ CREATE TABLE IF NOT EXISTS code_graphs (
     summary TEXT NOT NULL DEFAULT '{}',  -- JSON, see codegraph/normalize.summarize
     graph BLOB                       -- zlib-compressed normalized graph JSON (codegraph/__init__.py)
 );
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,             -- cv-<hex>
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    branch TEXT NOT NULL,            -- where it started (a design chat follows the draft branch it created)
+    kind TEXT NOT NULL CHECK (kind IN ('assistant', 'design')),
+    title TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',             -- running summary of the turns folded out of the context window
+    summarized_seq INTEGER NOT NULL DEFAULT 0,    -- messages with seq <= this are covered by summary
+    created_by TEXT NOT NULL,        -- display name
+    created_by_id TEXT,              -- user id (rename/delete rights)
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    mode TEXT NOT NULL DEFAULT 'ask',             -- ask | command | design | note
+    content TEXT NOT NULL DEFAULT '',
+    data TEXT NOT NULL DEFAULT '{}',              -- JSON: card, answer, applied, changes, questions, engine, error
+    author TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (conversation_id, seq)
+);
+CREATE TABLE IF NOT EXISTS project_memory (
+    id TEXT PRIMARY KEY,             -- mem-<hex>
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    text TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'fact',        -- see MEMORY_CATEGORIES
+    pinned INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'user',          -- user | ai | design-chat | mcp
+    conversation_id TEXT,                         -- where it was learned (no FK: survives deleting the chat)
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 MEMBERSHIPS_DDL = """
@@ -197,6 +233,8 @@ CREATE INDEX IF NOT EXISTS idx_memberships_user ON memberships(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_invites_org ON invites(org_id);
 CREATE INDEX IF NOT EXISTS idx_code_graphs_project ON code_graphs(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_project_memory_project ON project_memory(project_id);
 """
 
 USER_COLS = "id, email, name, created_at, last_login_at"
@@ -219,6 +257,40 @@ CODE_GRAPH_COLS = "id, project_id, source, repo_url, commit_sha, created_at, cre
 
 def code_graph_id() -> str:
     return f"cg-{secrets.token_hex(6)}"
+
+
+# ---- conversations and project memory (shared by both stores, see conversations.py) ----
+CONVERSATION_KINDS = ("assistant", "design")
+MESSAGE_MODES = ("ask", "command", "design", "note")
+MEMORY_CATEGORIES = ("constraint", "preference", "decision", "requirement", "context", "fact")
+CONVERSATION_COLS = ("id, project_id, branch, kind, title, summary, summarized_seq, created_by, created_by_id, "
+                     "created_at, updated_at")
+CONVERSATION_FIELDS = ("title", "summary", "summarized_seq", "branch")
+MESSAGE_COLS = "seq, role, mode, content, data, author, created_at"
+MEMORY_COLS = "id, text, category, pinned, source, conversation_id, created_by, created_at, updated_at"
+MEMORY_FIELDS = ("text", "category", "pinned")
+
+
+def conversation_id() -> str:
+    return f"cv-{secrets.token_hex(6)}"
+
+
+def memory_id() -> str:
+    return f"mem-{secrets.token_hex(5)}"
+
+
+def check_memory_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Keep only updatable memory fields and validate them; raises ValueError."""
+    out = {k: v for k, v in fields.items() if k in MEMORY_FIELDS and v is not None}
+    if "text" in out:
+        out["text"] = str(out["text"]).strip()
+        if not out["text"]:
+            raise ValueError("text must not be empty")
+    if "category" in out and out["category"] not in MEMORY_CATEGORIES:
+        raise ValueError(f"category must be one of {', '.join(MEMORY_CATEGORIES)}")
+    if "pinned" in out:
+        out["pinned"] = bool(out["pinned"])
+    return out
 
 
 def decision_id(seq: int) -> str:
@@ -783,6 +855,112 @@ class Store:
         cols = CODE_GRAPH_COLS + (", graph" if with_graph else "")
         return self._code_graph(self._one(f"SELECT {cols} FROM code_graphs WHERE project_id=? AND status='ready' "
                                           "ORDER BY created_at DESC, rowid DESC LIMIT 1", (pid,)), with_graph)
+
+    # ---- conversations (AI chat threads) -----------------------------------
+    def create_conversation(self, pid: str, branch: str, kind: str, title: str, created_by: str,
+                            created_by_id: str | None = None) -> dict[str, Any]:
+        cid, ts = conversation_id(), now()
+        with self.lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO conversations (id, project_id, branch, kind, title, created_by, created_by_id, "
+                "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (cid, pid, branch, kind, title, created_by, created_by_id, ts, ts))
+        return self.get_conversation(cid)
+
+    def get_conversation(self, cid: str) -> dict[str, Any] | None:
+        row = self._one(f"SELECT {CONVERSATION_COLS}, (SELECT COUNT(*) FROM conversation_messages m "
+                        "WHERE m.conversation_id = c.id) AS message_count FROM conversations c WHERE id=?", (cid,))
+        return dict(row) if row else None
+
+    def list_conversations(self, pid: str, kind: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        where, params = "project_id=?", [pid]
+        if kind:
+            where += " AND kind=?"
+            params.append(kind)
+        rows = self._all(f"SELECT {CONVERSATION_COLS}, (SELECT COUNT(*) FROM conversation_messages m "
+                         f"WHERE m.conversation_id = c.id) AS message_count FROM conversations c WHERE {where} "
+                         "ORDER BY updated_at DESC, rowid DESC LIMIT ?", (*params, limit))
+        return [dict(r) for r in rows]
+
+    def update_conversation(self, cid: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        data = {k: v for k, v in fields.items() if k in CONVERSATION_FIELDS}
+        if data:
+            sets = ", ".join(f"{k}=?" for k in data)
+            with self.lock, self._conn:
+                self._conn.execute(f"UPDATE conversations SET {sets}, updated_at=? WHERE id=?",
+                                   (*data.values(), now(), cid))
+        return self.get_conversation(cid)
+
+    def delete_conversation(self, cid: str) -> bool:
+        with self.lock, self._conn:
+            return self._conn.execute("DELETE FROM conversations WHERE id=?", (cid,)).rowcount > 0
+
+    def add_message(self, cid: str, role: str, mode: str, content: str, data: dict[str, Any] | None,
+                    author: str) -> dict[str, Any]:
+        ts = now()
+        with self.lock, self._conn:
+            seq = self._conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM conversation_messages "
+                                     "WHERE conversation_id=?", (cid,)).fetchone()[0]
+            self._conn.execute(
+                "INSERT INTO conversation_messages (conversation_id, seq, role, mode, content, data, author, "
+                "created_at) VALUES (?,?,?,?,?,?,?,?)", (cid, seq, role, mode, content, json.dumps(data or {}), author, ts))
+            self._conn.execute("UPDATE conversations SET updated_at=? WHERE id=?", (ts, cid))
+        return {"seq": seq, "role": role, "mode": mode, "content": content, "data": data or {}, "author": author,
+                "created_at": ts}
+
+    def list_messages(self, cid: str, after_seq: int = 0) -> list[dict[str, Any]]:
+        rows = self._all(f"SELECT {MESSAGE_COLS} FROM conversation_messages WHERE conversation_id=? AND seq > ? "
+                         "ORDER BY seq", (cid, after_seq))
+        return [{**dict(r), "data": json.loads(r["data"] or "{}")} for r in rows]
+
+    def delete_messages_from(self, cid: str, seq: int) -> int:
+        """Delete messages with seq >= ``seq`` (regenerate, clear); the summary is reset if it covered them."""
+        with self.lock, self._conn:
+            n = self._conn.execute("DELETE FROM conversation_messages WHERE conversation_id=? AND seq >= ?",
+                                   (cid, seq)).rowcount
+            self._conn.execute("UPDATE conversations SET summary = CASE WHEN summarized_seq >= ? THEN '' ELSE summary END, "
+                               "summarized_seq = CASE WHEN summarized_seq >= ? THEN 0 ELSE summarized_seq END, "
+                               "updated_at=? WHERE id=?", (seq, seq, now(), cid))
+        return n
+
+    # ---- project memory (facts every AI call sees) -----------------------------
+    @staticmethod
+    def _memory(row) -> dict[str, Any] | None:
+        return {**dict(row), "pinned": bool(row["pinned"])} if row else None
+
+    def list_memory(self, pid: str) -> list[dict[str, Any]]:
+        rows = self._all(f"SELECT {MEMORY_COLS} FROM project_memory WHERE project_id=? "
+                         "ORDER BY pinned DESC, created_at DESC, rowid DESC", (pid,))
+        return [self._memory(r) for r in rows]
+
+    def get_memory(self, pid: str, mid: str) -> dict[str, Any] | None:
+        return self._memory(self._one(f"SELECT {MEMORY_COLS} FROM project_memory WHERE project_id=? AND id=?",
+                                      (pid, mid)))
+
+    def add_memory(self, pid: str, text: str, *, category: str = "fact", pinned: bool = False, source: str = "user",
+                   conversation_id: str | None = None, created_by: str = "anonymous") -> dict[str, Any]:
+        data = check_memory_fields({"text": text, "category": category, "pinned": pinned})
+        mid, ts = memory_id(), now()
+        with self.lock, self._conn:
+            self._conn.execute(
+                f"INSERT INTO project_memory (project_id, {MEMORY_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (pid, mid, data["text"], data["category"], int(data["pinned"]), source, conversation_id, created_by,
+                 ts, ts))
+        return self.get_memory(pid, mid)
+
+    def update_memory(self, pid: str, mid: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        data = check_memory_fields(fields)
+        if data:
+            sets = ", ".join(f"{k}=?" for k in data)
+            vals = [int(v) if k == "pinned" else v for k, v in data.items()]
+            with self.lock, self._conn:
+                self._conn.execute(f"UPDATE project_memory SET {sets}, updated_at=? WHERE project_id=? AND id=?",
+                                   (*vals, now(), pid, mid))
+        return self.get_memory(pid, mid)
+
+    def delete_memory(self, pid: str, mid: str) -> bool:
+        with self.lock, self._conn:
+            return self._conn.execute("DELETE FROM project_memory WHERE project_id=? AND id=?", (pid, mid)).rowcount > 0
 
 
 def default_store():

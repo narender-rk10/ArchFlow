@@ -350,3 +350,38 @@ def test_sqlite_migrates_copy_of_dev_db(tmp_path):
         assert raw.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] == n
     raw.close()
     store.close()
+
+
+def test_conversations_and_memory(store, org):
+    pid = store.create_project("Chatty", org_id=org["id"])["id"]
+    a = store.create_conversation(pid, "main", "assistant", "", "Owner", None)
+    d = store.create_conversation(pid, "main", "design", "Idea", "Owner", None)
+    assert a["message_count"] == 0 and a["summarized_seq"] == 0 and a["summary"] == ""
+    m1 = store.add_message(a["id"], "user", "ask", "Why Redis?", {}, "Owner")
+    m2 = store.add_message(a["id"], "assistant", "ask", "Caching.", {"engine": "llm"}, "ArchFlow AI")
+    assert (m1["seq"], m2["seq"]) == (1, 2)
+    assert [m["data"] for m in store.list_messages(a["id"])] == [{}, {"engine": "llm"}]
+    assert [m["seq"] for m in store.list_messages(a["id"], after_seq=1)] == [2]
+    assert {c["id"] for c in store.list_conversations(pid)} == {a["id"], d["id"]}
+    assert [c["id"] for c in store.list_conversations(pid, "design")] == [d["id"]]
+    up = store.update_conversation(a["id"], {"title": "Redis", "summary": "s", "summarized_seq": 1, "branch": "x",
+                                             "kind": "design"})  # kind is not updatable
+    assert (up["title"], up["summary"], up["summarized_seq"], up["branch"], up["kind"], up["message_count"]) == \
+        ("Redis", "s", 1, "x", "assistant", 2)
+    assert store.delete_messages_from(a["id"], 1) == 2
+    assert store.get_conversation(a["id"])["summarized_seq"] == 0
+    assert store.delete_conversation(d["id"]) and store.get_conversation(d["id"]) is None
+
+    f1 = store.add_memory(pid, " Cloud: AWS ", category="constraint", created_by="Owner")
+    f2 = store.add_memory(pid, "Team knows Go", pinned=True, source="ai", conversation_id=a["id"], created_by="AI")
+    assert f1["text"] == "Cloud: AWS" and f1["pinned"] is False and f2["pinned"] is True
+    assert [m["id"] for m in store.list_memory(pid)] == [f2["id"], f1["id"]]  # pinned first
+    assert store.update_memory(pid, f1["id"], {"pinned": True, "text": "Cloud: AWS only", "source": "x"})["pinned"]
+    assert store.get_memory(pid, f1["id"])["source"] == "user"
+    with pytest.raises(ValueError):
+        store.add_memory(pid, "x", category="gossip")
+    with pytest.raises(ValueError):
+        store.update_memory(pid, f1["id"], {"text": "  "})
+    assert store.delete_memory(pid, f2["id"]) and not store.delete_memory(pid, f2["id"])
+    store.delete_project(pid)
+    assert store.get_conversation(a["id"]) is None and store.list_memory(pid) == []

@@ -244,3 +244,28 @@ export interface ReconstructResult {
   dev_tools?: { name: string; image: string; files: string[]; included: boolean }[];
   excluded?: { path: string; role: string; reason: string; files: number }[];
 }
+
+// ---- conversations (shared AI chat threads) and project memory ----
+export type ConversationKind = "assistant" | "design";
+export interface Conversation {
+  id: string; project_id: string; branch: string; kind: ConversationKind; title: string;
+  /** Running summary of older turns the AI no longer sees verbatim. */
+  summary: string; summarized_seq: number;
+  created_by: string; created_by_id: string | null; created_at: string; updated_at: string; message_count: number;
+}
+export interface ConversationMessage {
+  seq: number; role: "user" | "assistant"; mode: "ask" | "command" | "design" | "note"; content: string;
+  data: {
+    engine?: string; error?: string; applied?: boolean | { option: string; branch: string; version: number };
+    summary?: string[]; questions?: string[]; selection?: string[];
+    card?: ChatCard | null; answer?: { option_ids: string[]; other?: string };
+  };
+  author: string; created_at: string;
+}
+export const MEMORY_CATEGORIES = ["constraint", "preference", "decision", "requirement", "context", "fact"] as const;
+export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number];
+export interface MemoryItem {
+  id: string; text: string; category: MemoryCategory; pinned: boolean;
+  source: "user" | "ai" | "design-chat" | "mcp"; conversation_id: string | null;
+  created_by: string; created_at: string; updated_at: string;
+}

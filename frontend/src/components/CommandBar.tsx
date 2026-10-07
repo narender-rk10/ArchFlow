@@ -1,24 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-
-export interface LogEntry {
-  id: number;
-  kind: "command" | "ask";
-  text: string;
-  pending?: boolean;
-  explanation?: string;
-  summary?: string[];
-  questions?: string[];
-  answer?: string;
-  error?: string;
-  engine?: string;
-}
+import type { Assistant } from "../assistant";
+import type { ConversationMessage } from "../types";
+import { Markdown, type EntityLinks } from "./Markdown";
 
 interface Props {
-  log: LogEntry[];
-  selectionCount: number;
+  assistant: Assistant;
+  selection: string[];
   aiBusy: string | null;
-  onCommand: (text: string) => void;
-  onAsk: (text: string) => void;
+  links: EntityLinks;
+  memoryCount: number;
+  onOpenMemory: () => void;
+  /** Your user id and whether you are an org admin: who may rename, clear or delete a thread. */
+  meId: string;
+  isAdmin: boolean;
+  userName: string;
   /** Viewer/reviewer: only "Ask" (questions about the project) is available. */
   readOnly?: boolean;
 }
@@ -30,49 +25,185 @@ const SUGGESTIONS = [
   "Add authentication and PII protection requirements",
 ];
 
-export function CommandBar({ log, selectionCount, aiBusy, onCommand, onAsk, readOnly = false }: Props) {
+function ago(iso: string): string {
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+/** The project assistant: ask questions or edit the canvas in a shared, remembered conversation. */
+export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount, onOpenMemory, meId, isAdmin,
+  userName, readOnly = false }: Props) {
   const [text, setText] = useState("");
   const [modeState, setMode] = useState<"command" | "ask">(readOnly ? "ask" : "command");
   const mode = readOnly ? "ask" : modeState;
   const [expanded, setExpanded] = useState(true);
+  const [tall, setTall] = useState(false);
+  const [full, setFull] = useState(false);
+  const [history, setHistory] = useState(false);
+  const [showSummary, setShowSummary] = useState(false);
+  const [editingTitle, setEditingTitle] = useState<string | null>(null);
+  const [copied, setCopied] = useState<number | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const conv = a.current;
+  const owns = (createdById: string | null) => createdById === meId || isAdmin;
+  const hasLog = a.messages.length > 0 || a.draft !== null || !!a.error;
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
-  }, [log]);
+  }, [a.messages, a.draft?.answer, a.draft === null, a.error]);
+  useEffect(() => { setShowSummary(false); setEditingTitle(null); }, [conv?.id]);
+  // Full screen: Esc leaves it (after closing the history menu, if open).
+  useEffect(() => {
+    if (!full) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || editingTitle !== null || document.querySelector(".modal-backdrop")) return;
+      if (history) setHistory(false); else setFull(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [full, history, editingTitle]);
+  useEffect(() => { if (full) { setExpanded(true); inputRef.current?.focus(); } }, [full]);
 
-  const submit = (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const t = text.trim();
-    if (!t) return;
-    (mode === "command" ? onCommand : onAsk)(t);
+    if (!t || a.busy) return;
     setText("");
     setExpanded(true);
+    setHistory(false);
+    const ok = mode === "command" ? await a.command(t, selection) : await a.ask(t);
+    if (!ok) setText(t); // not sent: keep what was typed
   };
 
+  const copy = async (m: ConversationMessage) => {
+    try { await navigator.clipboard.writeText(m.content); setCopied(m.seq); window.setTimeout(() => setCopied(null), 1200); }
+    catch { /* clipboard unavailable */ }
+  };
+
+  const lastAnswer = [...a.messages].reverse().find((m) => m.role === "assistant");
+  const canRegenerate = !a.busy && lastAnswer?.mode === "ask" && a.messages[a.messages.length - 1] === lastAnswer;
+
+  const renderAssistant = (m: ConversationMessage, isLast: boolean) => (
+    <div key={m.seq} className="cmd-entry bot">
+      {m.content && <Markdown text={m.content} links={links} />}
+      {m.data.summary && m.data.summary.length > 0 && (
+        <ul className="small cmd-changes">{m.data.summary.map((s, i) => <li key={i}>{s}</li>)}</ul>
+      )}
+      {m.data.questions && m.data.questions.length > 0 && (
+        <div className="cmd-questions small">
+          <b>Questions from ArchFlow:</b>
+          <ul>{m.data.questions.map((q, i) => <li key={i}>
+            <button className="link" onClick={() => { setText(`${q} → `); setMode("command"); inputRef.current?.focus(); }}>{q}</button>
+          </li>)}</ul>
+        </div>
+      )}
+      {m.data.error && <div className="error small">{m.data.error}</div>}
+      <div className="cmd-meta">
+        {m.mode === "command" && m.data.engine && <span className="muted tiny">{m.data.engine === "offline" ? "offline parser" : "AI edit"}</span>}
+        {m.content && <button className="ghost tiny-btn" onClick={() => copy(m)} title="Copy answer">{copied === m.seq ? "Copied" : "Copy"}</button>}
+        {isLast && canRegenerate && <button className="ghost tiny-btn" onClick={a.regenerate} title="Answer again">↻ {m.data.error ? "Retry" : "Regenerate"}</button>}
+      </div>
+    </div>
+  );
+
+  const renderUser = (m: ConversationMessage, key: string | number) => (
+    <div key={key} className={`cmd-entry you ${m.mode}`}>
+      <div className="cmd-bubble">
+        {m.author && m.author !== userName && <span className="cmd-author">{m.author}</span>}
+        {m.mode === "command" && <span className="cmd-tag">Edit</span>}
+        {m.content}
+      </div>
+    </div>
+  );
+
   return (
-    <div className="command-bar">
-      {expanded && log.length > 0 && (
-        <div className="cmd-log" ref={logRef}>
-          {log.map((e) => (
-            <div key={e.id} className="cmd-entry">
-              <div className="cmd-you">{e.kind === "ask" ? "?" : "›"} {e.text}</div>
-              {e.pending && <div className="muted small pulse">AI is working…</div>}
-              {e.error && <div className="error small">{e.error}</div>}
-              {e.summary && e.summary.length > 0 && (
-                <ul className="small cmd-changes">{e.summary.map((s, i) => <li key={i}>{s}</li>)}</ul>
-              )}
-              {e.explanation && <div className="small">{e.explanation}</div>}
-              {e.questions && e.questions.length > 0 && (
-                <div className="cmd-questions small">
-                  <b>Questions from ArchFlow:</b>
-                  <ul>{e.questions.map((q, i) => <li key={i}><button className="link" onClick={() => { setText(`${q} → `); setMode("command"); }}>{q}</button></li>)}</ul>
-                </div>
-              )}
-              {e.answer && <div className="small answer">{e.answer}</div>}
-              {e.engine && <div className="muted tiny">{e.engine === "offline" ? "offline parser" : "AI"}</div>}
+    <div className={`command-bar ${full ? "full" : tall && expanded ? "tall" : ""}`}
+      role={full ? "dialog" : undefined} aria-modal={full || undefined} aria-label={full ? "Conversation" : undefined}>
+      {history && (
+        <div className="cmd-history" role="dialog" aria-label="Conversation history">
+          <div className="row between">
+            <b className="small">Conversations</b>
+            <button className="small" onClick={() => { a.open(null); setHistory(false); inputRef.current?.focus(); }}>+ New chat</button>
+          </div>
+          {a.threads.length === 0 && <p className="muted small">No conversations yet. Ask something below to start one.</p>}
+          <ul>
+            {a.threads.map((t) => (
+              <li key={t.id} className={t.id === conv?.id ? "on" : ""}>
+                <button className="cmd-thread" onClick={() => { a.open(t.id); setHistory(false); setExpanded(true); }}>
+                  <span className="cmd-thread-title">{t.title || "Untitled conversation"}</span>
+                  <span className="muted tiny">{t.created_by} · {t.message_count} message{t.message_count === 1 ? "" : "s"} · {ago(t.updated_at)}</span>
+                </button>
+                {owns(t.created_by_id) && (
+                  <button className="ghost tiny-btn" title="Delete conversation" aria-label={`Delete ${t.title}`}
+                    onClick={() => { if (window.confirm(`Delete “${t.title || "this conversation"}” for everyone?`)) a.remove(t.id); }}>✕</button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {expanded && (conv || hasLog || full) && (
+        <div className="cmd-head">
+          {editingTitle !== null ? (
+            <form className="row gap grow" onSubmit={(e) => { e.preventDefault(); a.rename(editingTitle); setEditingTitle(null); }}>
+              <input autoFocus value={editingTitle} maxLength={120} onChange={(e) => setEditingTitle(e.target.value)}
+                onKeyDown={(e) => e.key === "Escape" && setEditingTitle(null)} aria-label="Conversation title" />
+              <button className="small primary" disabled={!editingTitle.trim()}>Save</button>
+            </form>
+          ) : (
+            <span className="cmd-title" title={conv ? `Started by ${conv.created_by}` : undefined}>
+              {conv?.title || "New conversation"}
+              {conv && owns(conv.created_by_id) && <button className="ghost tiny-btn" onClick={() => setEditingTitle(conv.title)} title="Rename">✎</button>}
+            </span>
+          )}
+          <span className="spacer" />
+          {conv && owns(conv.created_by_id) && a.messages.length > 0 && (
+            <button className="ghost tiny-btn" disabled={a.busy} title="Remove every message in this conversation"
+              onClick={() => { if (window.confirm("Clear this conversation for everyone?")) a.clear(); }}>Clear</button>
+          )}
+          <button className="ghost tiny-btn" onClick={() => { a.open(null); inputRef.current?.focus(); }} disabled={a.busy}>+ New chat</button>
+          {!full && <button className="ghost tiny-btn" onClick={() => setTall(!tall)} title={tall ? "Smaller" : "Taller"}>{tall ? "⤓" : "⤒"}</button>}
+        </div>
+      )}
+      {expanded && (hasLog || full) && (
+        <div className="cmd-log" ref={logRef} aria-live="polite">
+          {!hasLog && (
+            <div className="cmd-empty muted">
+              <h3>Ask ArchFlow</h3>
+              <p className="small">Ask about the project or tell it what to change on the canvas. The conversation is saved
+                and shared with your team; press Esc to leave full screen.</p>
             </div>
-          ))}
+          )}
+          {conv?.summary && (
+            <div className="cmd-summary small">
+              <button className="link" onClick={() => setShowSummary(!showSummary)}>
+                {showSummary ? "▾" : "▸"} Earlier messages are summarized for the AI
+              </button>
+              {showSummary && <Markdown text={conv.summary} className="muted" />}
+            </div>
+          )}
+          {a.messages.map((m, i) => m.role === "user" ? renderUser(m, m.seq) : renderAssistant(m, i === a.messages.length - 1))}
+          {a.draft && (
+            <>
+              {!a.draft.regenerate && renderUser(a.draft.user, "draft-user")}
+              <div className="cmd-entry bot">
+                {a.draft.answer
+                  ? <Markdown text={a.draft.answer} links={links} className="streaming" />
+                  : <div className="muted small pulse">{a.draft.mode === "command" ? "AI is editing the canvas…" : "Thinking…"}</div>}
+              </div>
+            </>
+          )}
+          {a.error && (
+            <div className="error small row between">
+              <span>{a.error}</span>
+              <button className="ghost tiny-btn" onClick={a.dismissError} aria-label="Dismiss">✕</button>
+            </div>
+          )}
         </div>
       )}
       <form className="cmd-form" onSubmit={submit}>
@@ -81,17 +212,25 @@ export function CommandBar({ log, selectionCount, aiBusy, onCommand, onAsk, read
           <button type="button" className={mode === "ask" ? "on" : ""} onClick={() => setMode("ask")}>Ask</button>
         </div>
         <input
+          ref={inputRef}
           list="cmd-suggestions"
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder={mode === "command"
-            ? (selectionCount ? `Tell ArchFlow what to change (${selectionCount} selected)…` : "Tell ArchFlow what to change, or describe your product idea…")
-            : "Ask about the project: “Why was Redis added?”, “Which components handle PII?”"}
+            ? (selection.length ? `Tell ArchFlow what to change (${selection.length} selected)…` : "Tell ArchFlow what to change, or describe your product idea…")
+            : a.messages.length ? "Ask a follow-up…" : "Ask about the project: “Why was Redis added?”, “Which components handle PII?”"}
         />
         <datalist id="cmd-suggestions">{SUGGESTIONS.map((s) => <option key={s} value={s} />)}</datalist>
-        <button className="primary" disabled={!text.trim()}>{mode === "command" ? "Apply" : "Ask"}</button>
-        {log.length > 0 && (
-          <button type="button" className="ghost" onClick={() => setExpanded(!expanded)} aria-label="toggle log">{expanded ? "▾" : "▴"}</button>
+        <button className="primary" disabled={!text.trim() || a.busy}>{mode === "command" ? "Apply" : "Ask"}</button>
+        <button type="button" className={`ghost ${history ? "on" : ""}`} onClick={() => { setHistory(!history); a.refreshThreads(); }}
+          title="Conversation history" aria-label="Conversation history">☰</button>
+        <button type="button" className={`ghost ${full ? "on" : ""}`} onClick={() => setFull(!full)}
+          title={full ? "Exit full screen (Esc)" : "Full screen"} aria-label={full ? "Exit full screen" : "Full screen"}
+          aria-pressed={full}>⛶</button>
+        <button type="button" className="ghost mem-btn" onClick={onOpenMemory}
+          title="Project memory: facts every AI answer, edit and design takes into account">◎ {memoryCount}</button>
+        {hasLog && !full && (
+          <button type="button" className="ghost" onClick={() => setExpanded(!expanded)} aria-label="toggle conversation">{expanded ? "▾" : "▴"}</button>
         )}
       </form>
       {aiBusy && <div className="ai-busy small">✦ {aiBusy}</div>}

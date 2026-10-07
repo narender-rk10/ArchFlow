@@ -325,3 +325,48 @@ def test_ai_maps_unavailable(monkeypatch):
     monkeypatch.setattr(ai, "MODE", "auto")
     res = ai.run_command(ProjectState(), "add Redis", [])  # no keys -> offline parser
     assert res.engine == "offline" and res.ops
+
+
+# --------------------------------------------------------------------------- streaming
+def chunk(text=None, finish=None):
+    return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=text), finish_reason=finish)])
+
+
+def stream(*items):
+    """A provider stream: strings become chunks, exceptions are raised when reached."""
+    for item in items:
+        if isinstance(item, BaseException):
+            raise item
+        yield chunk(item)
+
+
+def test_stream_text_yields_chunks(monkeypatch, all_keys):
+    router = install(monkeypatch, {"reasoning": [stream("Hel", "lo ", None, "world")]})
+    assert list(llm.stream_text("sys", [{"role": "user", "content": "hi"}])) == ["Hel", "lo ", "world"]
+    assert router.calls[0]["stream"] is True
+
+
+def test_stream_text_accepts_a_whole_response(monkeypatch, all_keys):
+    install(monkeypatch, {"reasoning": [response("all at once")]})
+    assert list(llm.stream_text("sys", [{"role": "user", "content": "hi"}])) == ["all at once"]
+
+
+def test_stream_failure_before_text_retries_without_streaming(monkeypatch, all_keys):
+    router = install(monkeypatch, {"reasoning": [stream(RateLimitError()), response("recovered")]})
+    assert list(llm.stream_text("sys", [{"role": "user", "content": "hi"}])) == ["recovered"]
+    assert router.calls[0]["stream"] is True and "stream" not in router.calls[1]
+
+
+def test_stream_failure_after_text_raises(monkeypatch, all_keys):
+    install(monkeypatch, {"reasoning": [stream("partial ", InternalServerError())]})
+    out = []
+    with pytest.raises(llm.LLMUnavailable, match="interrupted"):
+        for piece in llm.stream_text("sys", [{"role": "user", "content": "hi"}]):
+            out.append(piece)
+    assert out == ["partial "]
+
+
+def test_stream_refusal(monkeypatch, all_keys):
+    install(monkeypatch, {"reasoning": [iter([chunk("I can"), chunk(None, finish="content_filter")])]})
+    with pytest.raises(llm.LLMRefused):
+        list(llm.stream_text("sys", [{"role": "user", "content": "hi"}]))

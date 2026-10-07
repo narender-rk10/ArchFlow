@@ -23,7 +23,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from . import accounts, ai, auth, catalog, chat, collab_sync, decisions, lld, llm, secrets_box, users
+from . import (accounts, ai, diagram_export, auth, catalog, chat, collab_sync, conversations, decisions, lld, llm,
+               secrets_box, users)
 from .analysis import full_analysis, trace_requirement
 from .codegraph.service import CodeGraphService
 from .codegraph.service import register_routes as register_codegraph_routes
@@ -101,6 +102,8 @@ class TokenIn(BaseModel):
 
 class ChatIn(BaseModel):
     turns: list[dict[str, Any]]
+    # With a design conversation the server keeps the transcript: ``turns`` then only needs the new user turn.
+    conversation_id: str | None = None
     actor: str = ""  # ignored
 
 
@@ -109,6 +112,7 @@ class ChatApplyIn(BaseModel):
     requirements: list[dict[str, Any]] = []
     mode: str = Field("replace", pattern="^(replace|merge|branch)$")
     branch_name: str | None = Field(None, max_length=60, pattern=r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+    conversation_id: str | None = None
     actor: str = ""  # ignored
 
 
@@ -233,7 +237,8 @@ def create_app(store: Store | None = None) -> FastAPI:
     # ---- meta (public: static metadata only) ----
     @app.get("/api/health")
     def api_health():
-        return {"ok": True, "ai_mode": ai.MODE, "model": ai.MODEL, "llm": llm.status()}
+        return {"ok": True, "ai_mode": ai.MODE, "model": ai.MODEL, "llm": llm.status(),
+                "export": {"interactive": diagram_export.available()}}
 
     @app.get("/api/catalog")
     def get_catalog():
@@ -398,6 +403,39 @@ def create_app(store: Store | None = None) -> FastAPI:
         state = state_or_404(pid, branch)
         return lld.views(state, node_or_404(state, node_id))
 
+    # ---- interactive diagram export (ArchFlow renderer, see diagram_export.py) ----
+    def export_response(html: str, name: str) -> HTMLResponse:
+        filename = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")[:80] or "diagram"
+        return HTMLResponse(html, headers={"Content-Disposition": f'attachment; filename="{filename}.html"',
+                                           "Cache-Control": "no-store"})
+
+    async def run_export(fn, *args):
+        try:
+            return await asyncio.to_thread(fn, *args)
+        except diagram_export.ExportUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except diagram_export.ExportError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/projects/{pid}/export/diagram")
+    async def export_diagram(pid: str, branch: str = "main", level: str = "", a: Access = Depends(read)):
+        """The diagram level (system, or a component's internals) as a standalone interactive HTML file."""
+        state = state_or_404(pid, branch)
+        title = a.project["name"] + (f" · {state.nodes[level].name} internals" if level in state.nodes else "")
+        if level and level not in state.nodes:
+            raise HTTPException(404, "component not found")
+        html, _layout = await run_export(diagram_export.export_architecture, state, f"{title} ({branch})", level)
+        return export_response(html, f"{a.project['name']}-{branch}" + (f"-{level}" if level else ""))
+
+    @app.get("/api/projects/{pid}/nodes/{node_id}/export/sequence")
+    async def export_sequence(pid: str, node_id: str, branch: str = "main", a: Access = Depends(read)):
+        """A component's main request flow as a standalone interactive sequence diagram."""
+        state = state_or_404(pid, branch)
+        node = node_or_404(state, node_id)
+        flow = lld.sequence_steps(state, node, lld.api_view(state, node))
+        html = await run_export(diagram_export.export_sequence, flow, f"{node.name}: request flow")
+        return export_response(html, f"{node.name}-request-flow")
+
     # ---- vibe coding ----
     @app.get("/api/prompt-targets")
     def prompt_targets():
@@ -410,13 +448,18 @@ def create_app(store: Store | None = None) -> FastAPI:
                                        body.extra)}
 
     # ---- AI ----
-    async def run_ai_command(pid: str, branch: str, text: str, selection: list[str], actor: str) -> dict[str, Any]:
+    async def run_ai_command(pid: str, branch: str, text: str, selection: list[str], actor: str,
+                             context: str | None = None) -> dict[str, Any]:
+        """Apply a natural-language edit. ``context`` is the conversation context (conversations.command_context);
+        without one the model still gets the project memory."""
         state = state_or_404(pid, branch)
         org_id = project_or_404(pid).get("org_id")
+        if context is None:
+            context = conversations.command_context(store, pid, None)
         room = Hub.key(pid, branch)
         await hub.broadcast(room, {"type": "ai_status", "status": "thinking", "actor": actor, "text": text})
         try:
-            result = await asyncio.to_thread(ai.run_command, state, text, selection, org_id)
+            result = await asyncio.to_thread(ai.run_command, state, text, selection, org_id, context)
         except ai.AIUnavailable as exc:
             await hub.broadcast(room, {"type": "ai_status", "status": "idle"})
             raise HTTPException(503, str(exc)) from exc
@@ -437,17 +480,25 @@ def create_app(store: Store | None = None) -> FastAPI:
     async def ai_command(pid: str, body: CommandIn, branch: str = "main", a: Access = Depends(edit)):
         return await run_ai_command(pid, branch, body.text, body.selection, a.actor)
 
-    @app.post("/api/projects/{pid}/ai/ask")
-    async def ai_ask(pid: str, body: AskIn, branch: str = "main", a: Access = Depends(read)):
-        project = a.project
+    def project_context(pid: str, branch: str) -> str:
+        """The project block the assistant answers from: model, health, versions and recent activity."""
+        project = project_or_404(pid)
         state = state_or_404(pid, branch)
         history = store.list_versions(pid)[:30]
         acts = store.list_activity(pid, branch, 60)
-        context = (f"<project name=\"{project['name']}\" branch=\"{branch}\">\n"
-                   f"<model>\n{ai._state_for_prompt(state)}\n</model>\n"
-                   f"<analysis>\n{json.dumps(full_analysis(state)['health'])}\n</analysis>\n"
-                   f"<versions>\n{json.dumps(history, default=str)}\n</versions>\n"
-                   f"<activity>\n{json.dumps(acts, default=str)}\n</activity>\n</project>")
+        return (f"<project name=\"{project['name']}\" branch=\"{branch}\">\n"
+                f"<model>\n{ai._state_for_prompt(state)}\n</model>\n"
+                f"<analysis>\n{json.dumps(full_analysis(state)['health'])}\n</analysis>\n"
+                f"<versions>\n{json.dumps(history, default=str)}\n</versions>\n"
+                f"<activity>\n{json.dumps(acts, default=str)}\n</activity>\n</project>")
+
+    @app.post("/api/projects/{pid}/ai/ask")
+    async def ai_ask(pid: str, body: AskIn, branch: str = "main", a: Access = Depends(read)):
+        """One-off question (no conversation); the threaded, streamed version is /conversations/{cid}/ask."""
+        context = project_context(pid, branch)
+        memory = conversations.memory_block(store, pid)
+        if memory:
+            context += "\n" + memory
         try:
             answer = await asyncio.to_thread(ai.claude_ask, context, body.question, a.org_id)
         except ai.AIUnavailable as exc:
@@ -463,13 +514,47 @@ def create_app(store: Store | None = None) -> FastAPI:
         return {"changed": len(ops), "summary": summary, "skipped": skipped}
 
     # ---- guided design chat ----
+    def design_conversation(pid: str, cid: str) -> dict[str, Any]:
+        conv = store.get_conversation(cid)
+        if not conv or conv["project_id"] != pid:
+            raise HTTPException(404, "conversation not found")
+        if conv["kind"] != "design":
+            raise HTTPException(409, "That conversation is not a design chat.")
+        return conv
+
     @app.post("/api/projects/{pid}/chat")
     async def chat_turn(pid: str, body: ChatIn, branch: str = "main", a: Access = Depends(edit)):
         state = state_or_404(pid, branch)
-        return await asyncio.to_thread(chat.next_turn, body.turns[-60:], state, a.org_id)
+        memory = conversations.memory_block(store, pid)
+        if not body.conversation_id:  # legacy: the client sends the whole transcript and keeps it
+            return await asyncio.to_thread(chat.next_turn, body.turns[-60:], state, a.org_id, memory)
+        conv = design_conversation(pid, body.conversation_id)
+        new = body.turns[-1] if body.turns else None
+        if not new or new.get("role") != "user":
+            raise HTTPException(422, "Send the new user turn as the last item of 'turns'.")
+        turns = conversations.design_turns(store, conv["id"])
+        asked = turns[-1].get("card") if turns and turns[-1]["role"] == "assistant" else None
+        user_msg = conversations.add_design_turn(store, conv["id"], new, a.actor)
+        if not conv["title"] and not new.get("answer"):
+            store.update_conversation(conv["id"], {"title": conversations.title_from(str(new.get("content") or ""))})
+        if new.get("answer") and asked and asked.get("type") == "question":
+            ids = new["answer"].get("option_ids") or []
+            labels = [o["label"] for o in asked.get("options", []) if o.get("id") in ids]
+            if new["answer"].get("other"):
+                labels.append(str(new["answer"]["other"]))
+            if conversations.learn_design_answer(store, pid, conv["id"], asked, labels, a.actor):
+                await hub.broadcast(Hub.key(pid, branch), {"type": "memory", "actor": a.actor})
+                memory = conversations.memory_block(store, pid)
+        result = await asyncio.to_thread(chat.next_turn, (turns + [new])[-60:], state, a.org_id, memory)
+        msg = conversations.add_design_turn(
+            store, conv["id"], {"role": "assistant", "content": result["message"], "card": result["card"],
+                                "engine": result["engine"]}, a.actor)
+        await hub.broadcast(Hub.key(pid, branch), {"type": "conversation", "id": conv["id"], "actor": a.actor})
+        return {**result, "user_message": user_msg, "assistant_message": msg}
 
     @app.post("/api/projects/{pid}/chat/apply")
     async def chat_apply(pid: str, body: ChatApplyIn, branch: str = "main", a: Access = Depends(edit)):
+        conv = design_conversation(pid, body.conversation_id) if body.conversation_id else None
         target = branch
         if body.mode == "branch":
             target = body.branch_name or f"draft/{chat.slugify(body.option.get('name', 'option'))}"
@@ -482,13 +567,28 @@ def create_app(store: Store | None = None) -> FastAPI:
         version = store.commit(pid, target, f"Applied architecture option: {body.option.get('name', 'option')}",
                                a.actor, new_state)
         await hub.broadcast(Hub.key(pid, target), {"type": "versions", "actor": a.actor})
-        return {"branch": target, "version": version["number"], "summary": summary, "state": new_state.model_dump()}
+        if conv:  # record the choice; a design chat follows the draft branch it created
+            name = body.option.get("name", "option")
+            conversations.add_design_turn(store, conv["id"], {"role": "user", "content": f"Use {name}"}, a.actor, "note")
+            conversations.add_design_turn(store, conv["id"], {
+                "role": "assistant",
+                "content": (f"Created draft “{target}” with {name} (v{version['number']}). Switching to it…"
+                            if body.mode == "branch" else f"Applied {name} to {target} and saved it as v{version['number']}."),
+                "applied": {"option": name, "branch": target, "version": version["number"]}}, a.actor)
+            if target != conv["branch"]:
+                store.update_conversation(conv["id"], {"branch": target})
+        return {"branch": target, "version": version["number"], "summary": summary, "state": new_state.model_dump(),
+                **({"conversation": store.get_conversation(conv["id"])} if conv else {})}
 
     # ---- architecture decisions (ADRs), alternative evaluation (Jev), adopting a draft ----
     async def broadcast_room(pid: str, branch: str, msg: dict[str, Any]) -> None:
         await hub.broadcast(Hub.key(pid, branch), msg)
 
     decisions.register_routes(app, store, authz=authz, sync_to_live_doc=sync_to_live_doc, broadcast=broadcast_room)
+
+    # ---- conversations (threaded, streamed AI chat) and project memory ----
+    conversations.register_routes(app, store, authz=authz, project_context=project_context,
+                                  run_command=run_ai_command, broadcast=broadcast_room)
 
     # ---- real-time collaboration ticket (for the Hocuspocus collab server) ----
     @app.get("/api/projects/{pid}/collab-ticket")

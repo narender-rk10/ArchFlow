@@ -4,10 +4,14 @@ import type { User } from "./types";
 interface Handlers {
   onVersions: () => void;
   onActivity: () => void;
+  /** A conversation got new messages (yours or a teammate's). */
+  onConversation?: (id: string, actor: string) => void;
+  /** Project memory changed; ``added`` lists facts the AI just learned. */
+  onMemory?: (actor: string, added: string[]) => void;
 }
 
 /**
- * Server events per (project, branch): AI status, new versions and activity.
+ * Server events per (project, branch): AI status, new versions, activity, conversations and project memory.
  * Canvas content, presence, cursors and selections sync through Yjs (see collab.ts).
  */
 export function useRealtime(pid: string, branch: string, user: User, handlers: Handlers) {
@@ -30,6 +34,8 @@ export function useRealtime(pid: string, branch: string, user: User, handlers: H
         if (msg.type === "state" || msg.type === "activity") handlersRef.current.onActivity();
         else if (msg.type === "versions") handlersRef.current.onVersions();
         else if (msg.type === "ai_status") setAiStatus(msg);
+        else if (msg.type === "conversation") handlersRef.current.onConversation?.(msg.id, msg.actor ?? "");
+        else if (msg.type === "memory") handlersRef.current.onMemory?.(msg.actor ?? "", msg.added ?? []);
       };
     };
     connect();

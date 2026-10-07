@@ -277,3 +277,30 @@ def test_pat_requires_admin_and_is_owned_by_creator(env):
     rec = created.json()
     assert rec["user_name"] == "Owner" and rec["user_id"] == client.get("/api/me").json()["user"]["id"]
     assert ORIGIN  # clients send the trusted dev origin
+
+
+def test_memory_and_conversation_tools(env):
+    client, store = env
+    pid = client.post("/api/projects", json={"name": "Shop", "template": "blank"}).json()["id"]
+    _, tokens = oauth_login(client)
+    at = tokens["access_token"]
+    err, out, text = tool(client, at, "remember", project_id=pid, text="All data stays in the EU.",
+                          category="constraint", pinned=True)
+    assert not err, text
+    assert client.get(f"/api/projects/{pid}/memory").json()[0]["source"] == "mcp"
+    err, _, text = tool(client, at, "remember", project_id=pid, text="all data stays in the EU")
+    assert err and "already" in text
+    err, _, text = tool(client, at, "get_project_memory", project_id=pid)
+    assert not err and "All data stays in the EU." in text
+
+    conv = client.post(f"/api/projects/{pid}/conversations", json={"kind": "assistant"}).json()
+    store.add_message(conv["id"], "user", "ask", "Why Redis?", {}, "Owner")
+    store.add_message(conv["id"], "assistant", "ask", "For caching.", {}, "ArchFlow AI")
+    err, _, text = tool(client, at, "list_conversations", project_id=pid)
+    assert not err and conv["id"] in text
+    err, out, text = tool(client, at, "get_conversation", project_id=pid, conversation_id=conv["id"])
+    assert not err and json.loads(text)["transcript"] == "User (Owner): Why Redis?\nArchFlow: For caching."
+
+    _, ro = oauth_login(client, access="read", scope="archflow:read")
+    err, _, text = tool(client, ro["access_token"], "remember", project_id=pid, text="Use Kafka")
+    assert err and "read-only" in text

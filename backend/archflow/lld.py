@@ -608,42 +608,61 @@ def _caller_chain(state: ProjectState, node: Node) -> list[Node]:
     return [state.nodes[n] for n in chain]
 
 
-def sequence_mermaid(state: ProjectState, node: Node, rows: list[dict[str, Any]]) -> str:
+def sequence_steps(state: ProjectState, node: Node, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The component's main request flow as data: participants (callers, the component, its dependencies)
+    and steps ``{from, to, label, kind}`` with kind ``call`` | ``async`` | ``return`` | ``activate`` |
+    ``deactivate``. Rendered as Mermaid (``sequence_mermaid``) and exported by diagram_export.sequence_ir."""
     chain = _caller_chain(state, node)
     out, _ = neighbours(state, node)
     deps = [(n, p) for n, p in out if n.type != "note" and n.id not in {c.id for c in chain}]
-    used: dict[str, str] = {}
-    lines = ["sequenceDiagram", "    autonumber"]
+    participants, seen = [], set()
     for n in chain + [d for d, _ in deps]:
-        if n.id in used:
-            continue
-        used[n.id] = _mid(n.name, used)
-        kind = "actor" if n.type == "client" else "participant"
-        lines.append(f"    {kind} {used[n.id]} as {_q(n.name)}")
+        if n.id not in seen:
+            seen.add(n.id)
+            participants.append({"id": n.id, "name": n.name, "type": n.type, "technology": n.technology})
     main = next((r for r in rows if r["method"] == "POST"), rows[0] if rows else None)
     request = f"{main['method']} {main['path']}" if main else "request"
     proto = {(e.source, e.target): e.protocol or e.label for e in state.edges.values()}
+    steps: list[dict[str, str]] = []
     for a, b in zip(chain, chain[1:]):
         p = proto.get((a.id, b.id), "")
         msg = f"{p} {request}" if b.id == node.id else (p or "request")  # the endpoint is this component's API
-        lines.append(f"    {used[a.id]}->>{used[b.id]}: {_q(msg.strip())}")
+        steps.append({"from": a.id, "to": b.id, "label": msg.strip(), "kind": "call"})
     if len(chain) > 1:
-        lines.append(f"    activate {used[node.id]}")
+        steps.append({"from": node.id, "to": node.id, "label": "", "kind": "activate"})
     for dep, p in deps:
         label = (p + " ").lstrip() if p else ""
         if dep.type == "queue":
             ev = next((c.name for c in children(state, node.id) if c.type == "event"), "event")
-            lines.append(f"    {used[node.id]}-){used[dep.id]}: {_q(label + 'publish ' + ev)}")
+            steps.append({"from": node.id, "to": dep.id, "label": label + "publish " + ev, "kind": "async"})
         else:
             verb = {"database": "query / write", "storage": "read / write", "cache": "get / set",
                     "llm": "prompt", "mcp": "tool call", "security": "verify token"}.get(dep.type, "call")
-            lines.append(f"    {used[node.id]}->>{used[dep.id]}: {_q(label + verb)}")
-            lines.append(f"    {used[dep.id]}-->>{used[node.id]}: result")
+            steps.append({"from": node.id, "to": dep.id, "label": label + verb, "kind": "call"})
+            steps.append({"from": dep.id, "to": node.id, "label": "result", "kind": "return"})
     if len(chain) > 1:
-        lines.append(f"    deactivate {used[node.id]}")
+        steps.append({"from": node.id, "to": node.id, "label": "", "kind": "deactivate"})
     for a, b in reversed(list(zip(chain, chain[1:]))):
         status = "201 Created" if main and main["method"] == "POST" else "200 OK"
-        lines.append(f"    {used[b.id]}-->>{used[a.id]}: {status}")
+        steps.append({"from": b.id, "to": a.id, "label": status, "kind": "return"})
+    return {"participants": participants, "steps": steps,
+            "messages": [s for s in steps if s["kind"] in ("call", "async", "return")]}
+
+
+def sequence_mermaid(state: ProjectState, node: Node, rows: list[dict[str, Any]]) -> str:
+    flow = sequence_steps(state, node, rows)
+    used: dict[str, str] = {}
+    lines = ["sequenceDiagram", "    autonumber"]
+    for p in flow["participants"]:
+        used[p["id"]] = _mid(p["name"], used)
+        kind = "actor" if p["type"] == "client" else "participant"
+        lines.append(f"    {kind} {used[p['id']]} as {_q(p['name'])}")
+    arrows = {"call": "->>", "async": "-)", "return": "-->>"}
+    for s in flow["steps"]:
+        if s["kind"] in ("activate", "deactivate"):
+            lines.append(f"    {s['kind']} {used[s['from']]}")
+        else:
+            lines.append(f"    {used[s['from']]}{arrows[s['kind']]}{used[s['to']]}: {_q(s['label'])}")
     return "\n".join(lines)
 
 

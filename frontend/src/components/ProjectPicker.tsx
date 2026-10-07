@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
+import { getRecent, pruneRecent, timeAgo } from "../recent";
 import { can, type Me, type Project, type User } from "../types";
 import { AISettingsDialog, MembersDialog } from "./OrgDialogs";
 import { UserMenu } from "./UserMenu";
@@ -23,6 +24,9 @@ export function ProjectPicker({ me, user, colors, onColor, onOpen, onLogout, onM
   const [template, setTemplate] = useState("ai-customer-support");
   const [error, setError] = useState("");
   const [aiMode, setAiMode] = useState("");
+  const [query, setQuery] = useState("");
+  const [allProjects, setAllProjects] = useState<Project[]>([]);
+  const searchRef = useRef<HTMLInputElement>(null);
   const orgs = me.orgs;
   const [orgId, setOrgId] = useState(() => {
     let saved = "";
@@ -40,10 +44,38 @@ export function ProjectPicker({ me, user, colors, onColor, onOpen, onLogout, onM
     if (!orgId) { setProjects([]); return; }
     api.projects(orgId).then(setProjects).catch((e) => setError(String(e.message)));
   }, [orgId]);
+  // Every project you can see (all organizations), for "Recently opened" and search.
+  useEffect(() => {
+    api.projects().then((list) => { setAllProjects(list); pruneRecent(new Set(list.map((p) => p.id))); }).catch(() => {});
+  }, [orgs.length]);
+  // "/" or Ctrl/Cmd+K focuses the search box.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target as HTMLElement)?.tagName ?? "");
+      if ((e.key === "/" && !typing) || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k")) {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   useEffect(() => {
     api.templates().then(setTemplates).catch(() => {});
     api.health().then((h) => setAiMode(`${h.ai_mode} · ${h.model}`)).catch(() => setError("Backend is not reachable on :8000."));
   }, []);
+
+  const orgNames = useMemo(() => new Map(orgs.map((o) => [o.id, o.name])), [orgs]);
+  const q = query.trim().toLowerCase();
+  // Searching looks across every organization; otherwise the selected organization's projects are listed.
+  const shown = q
+    ? allProjects.filter((p) => p.name.toLowerCase().includes(q) || (p.description ?? "").toLowerCase().includes(q)
+        || (orgNames.get(p.org_id ?? "") ?? "").toLowerCase().includes(q))
+    : projects;
+  const recent = useMemo(() => {
+    const byId = new Map(allProjects.map((p) => [p.id, p]));
+    return getRecent().filter((r) => byId.has(r.pid)).slice(0, 6).map((r) => ({ p: byId.get(r.pid)!, r }));
+  }, [allProjects]);
 
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -109,17 +141,43 @@ export function ProjectPicker({ me, user, colors, onColor, onOpen, onLogout, onM
       )}
 
       <section className="card">
-        <h2>Projects</h2>
-        {org && !can(role, "edit") && <p className="muted small">You have {role} access in {org.name}: you can open and review projects but not change them.</p>}
-        {projects.length === 0 && <p className="muted">No projects yet.</p>}
-        <ul className="project-list">
-          {projects.map((p) => (
-            <li key={p.id}>
-              <button className="link" onClick={() => onOpen(p.id)}>{p.name}</button>
-              <span className="muted small">{new Date(p.created_at).toLocaleString()}</span>
-            </li>
+        <div className="row between">
+          <h2>Projects</h2>
+          <input ref={searchRef} className="picker-search" type="search" value={query} onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search all projects…  ( / )" aria-label="Search projects" />
+        </div>
+        {org && !can(role, "edit") && !q && <p className="muted small">You have {role} access in {org.name}: you can open and review projects but not change them.</p>}
+        {!q && recent.length > 0 && (
+          <>
+            <h3 className="picker-sub">Recently opened</h3>
+            <div className="project-grid">
+              {recent.map(({ p, r }) => (
+                <button key={p.id} className="project-card" onClick={() => onOpen(p.id)}>
+                  <span className="project-avatar" aria-hidden>{p.name.slice(0, 1).toUpperCase()}</span>
+                  <span className="project-card-text">
+                    <b>{p.name}</b>
+                    <span className="muted tiny">{[orgs.length > 1 ? orgNames.get(p.org_id ?? "") : "", `opened ${timeAgo(r.at)}`,
+                      r.branch !== "main" ? `⎇ ${r.branch}` : ""].filter(Boolean).join(" · ")}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+            <h3 className="picker-sub">{org ? `All projects in ${org.name}` : "All projects"}</h3>
+          </>
+        )}
+        {shown.length === 0 && <p className="muted">{q ? `No project matches “${query}”.` : "No projects yet."}</p>}
+        <div className="project-grid">
+          {shown.map((p) => (
+            <button key={p.id} className="project-card" onClick={() => onOpen(p.id)}>
+              <span className="project-avatar" aria-hidden>{p.name.slice(0, 1).toUpperCase()}</span>
+              <span className="project-card-text">
+                <b>{p.name}</b>
+                <span className="muted tiny">{[q && orgs.length > 1 ? orgNames.get(p.org_id ?? "") : "",
+                  p.description, `created ${new Date(p.created_at).toLocaleDateString()}`].filter(Boolean).join(" · ")}</span>
+              </span>
+            </button>
           ))}
-        </ul>
+        </div>
       </section>
 
       {error && <p className="error">{error}</p>}

@@ -416,12 +416,15 @@ def _project_summary(state: ProjectState) -> str:
         "requirements": [f"{r.id} {r.title}" for r in state.requirements.values()]})
 
 
-def llm_turn(turns: list[dict[str, Any]], state: ProjectState, org_id: str | None = None) -> dict[str, Any]:
+def llm_turn(turns: list[dict[str, Any]], state: ProjectState, org_id: str | None = None,
+             memory: str = "") -> dict[str, Any]:
     from . import llm  # imported lazily so the offline path never depends on provider configuration
 
     asked = sum(1 for t in turns if t.get("role") == "assistant" and (t.get("card") or {}).get("type") == "question")
     system = CHAT_SYSTEM.format(max_q=MAX_QUESTIONS, types=", ".join(NODE_TYPES))
-    user = (f"Existing project: {_project_summary(state)}\n\nConversation so far:\n{transcript_text(turns)}\n\n"
+    user = (f"Existing project: {_project_summary(state)}\n\n"
+            + (f"{memory}\nDo not ask about anything the project memory already settles.\n\n" if memory else "")
+            + f"Conversation so far:\n{transcript_text(turns)}\n\n"
             f"Questions asked so far: {asked}." + (" You must propose now." if asked >= MAX_QUESTIONS else ""))
     data = llm.complete_json(system, [{"role": "user", "content": user}], _schema(), group="reasoning", org_id=org_id)
 
@@ -476,13 +479,15 @@ def _clean_arch(a: dict, i: int) -> dict:
             "recommended": i == 0, "components": comps, "connections": conns}
 
 
-def next_turn(turns: list[dict[str, Any]], state: ProjectState, org_id: str | None = None) -> dict[str, Any]:
-    """Return {"message", "card", "engine"} for the next assistant turn."""
+def next_turn(turns: list[dict[str, Any]], state: ProjectState, org_id: str | None = None,
+              memory: str = "") -> dict[str, Any]:
+    """Return {"message", "card", "engine"} for the next assistant turn. ``memory`` is the project memory block
+    (conversations.memory_block); only the LLM interviewer uses it."""
     try:
         from . import llm
         if llm.available(org_id):
             try:
-                return {**llm_turn(turns, state, org_id), "engine": "llm"}
+                return {**llm_turn(turns, state, org_id, memory), "engine": "llm"}
             except (llm.LLMUnavailable, llm.LLMRefused, ValueError, KeyError, TypeError) as exc:
                 log.warning("LLM interviewer failed (%s); using offline interviewer", exc)
     except ImportError:

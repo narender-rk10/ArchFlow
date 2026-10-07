@@ -1,0 +1,14 @@
+{
+  "name": "archflow-renderer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "ArchFlow's diagram renderer: typed JSON \u2192 interactive HTML (architecture / workflow / sequence / dataflow / lifecycle). Forked from Archify 3.0.1 (MIT).",
+  "license": "MIT",
+  "bin": {
+    "archflow-render": "./bin/archflow.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

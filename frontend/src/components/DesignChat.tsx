@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import type { ArchitecturesCard, ArchOption, ChatTurn, ProjectState, QuestionCard, User } from "../types";
+import type {
+  ArchitecturesCard, ArchOption, ChatTurn, Conversation, ConversationMessage, ProjectState, QuestionCard, User,
+} from "../types";
 import { TYPE_META } from "./ArchNode";
 
 interface Props {
@@ -10,40 +12,133 @@ interface Props {
   canvasEmpty: boolean;
   aiAvailable: boolean;
   onApplied: (r: { branch: string; version: number; summary: string[]; state: ProjectState }) => void;
+  /** Latest "conversation changed" event from the server (a teammate answered in a shared design chat). */
+  remote: { id: string; at: number } | null;
 }
 
-const storeKey = (pid: string, branch: string) => `archflow.chat.${pid}.${branch}`;
+// Before design chats were stored on the server they lived in this browser only; they are imported once.
+const legacyKey = (pid: string, branch: string) => `archflow.chat.${pid}.${branch}`;
+const openKey = (pid: string, branch: string) => `archflow.designchat.${pid}.${branch}`;
 
-function load(pid: string, branch: string): ChatTurn[] {
-  try { return JSON.parse(localStorage.getItem(storeKey(pid, branch)) ?? "[]"); } catch { return []; }
+function readLegacy(pid: string, branch: string): ChatTurn[] {
+  try { return JSON.parse(localStorage.getItem(legacyKey(pid, branch)) ?? "[]"); } catch { return []; }
 }
-function save(pid: string, branch: string, turns: ChatTurn[]) {
-  try { localStorage.setItem(storeKey(pid, branch), JSON.stringify(turns)); } catch { /* storage unavailable */ }
+function dropLegacy(pid: string, branch: string) {
+  try { localStorage.removeItem(legacyKey(pid, branch)); } catch { /* storage unavailable */ }
+}
+function readOpen(pid: string, branch: string): string | null {
+  try { return localStorage.getItem(openKey(pid, branch)); } catch { return null; }
+}
+function writeOpen(pid: string, branch: string, id: string | null) {
+  try { if (id) localStorage.setItem(openKey(pid, branch), id); else localStorage.removeItem(openKey(pid, branch)); }
+  catch { /* storage unavailable */ }
 }
 
-/** Guided design chat: the assistant asks multiple-choice questions, then offers architectures to pick from. */
-export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onApplied }: Props) {
-  const [turns, setTurns] = useState<ChatTurn[]>(() => load(pid, branch));
+const toTurn = (m: ConversationMessage): ChatTurn => ({
+  role: m.role, content: m.content, card: m.data.card ?? undefined, answer: m.data.answer,
+  applied: typeof m.data.applied === "object" ? m.data.applied : undefined,
+});
+
+/**
+ * Guided design chat: the assistant asks multiple-choice questions, then offers architectures to pick from.
+ * Chats are stored on the server (shared with the team, kept across reloads); answers become project memory.
+ */
+export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onApplied, remote }: Props) {
+  const [threads, setThreads] = useState<Conversation[]>([]);
+  const [conv, setConv] = useState<Conversation | null>(null);
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [engine, setEngine] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
+  const convRef = useRef<Conversation | null>(null);
+  convRef.current = conv;
+  const busyRef = useRef(false);
 
-  useEffect(() => { save(pid, branch, turns); }, [pid, branch, turns]);
+  const loadThreads = useCallback(async () => {
+    const list = await api.conversations(pid, "design");
+    setThreads(list);
+    return list;
+  }, [pid]);
+
+  const open = useCallback(async (id: string | null) => {
+    setError("");
+    if (!id) { setConv(null); setTurns([]); writeOpen(pid, branch, null); return; }
+    const { messages, ...c } = await api.conversation(pid, id);
+    setConv(c);
+    setTurns(messages.map(toTurn));
+    writeOpen(pid, branch, id);
+  }, [pid, branch]);
+
+  // Reopen this branch's chat (a chat follows the draft branch it created); import a browser-only chat once.
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setConv(null);
+    setTurns([]);
+    (async () => {
+      try {
+        let list = await loadThreads();
+        const legacy = readLegacy(pid, branch);
+        if (legacy.length) {
+          const imported = await api.createConversation(pid, branch, "design", legacy);
+          dropLegacy(pid, branch);
+          list = [imported, ...list];
+          setThreads(list);
+          writeOpen(pid, branch, imported.id);
+        }
+        const wanted = readOpen(pid, branch);
+        const pick = list.find((c) => c.id === wanted) ?? list.find((c) => c.branch === branch);
+        if (!cancelled && pick) await open(pick.id);
+      } catch (e) {
+        if (!cancelled) setError((e as Error).message);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [pid, branch, loadThreads, open]);
+
+  // A teammate took a turn in the chat you have open.
+  useEffect(() => {
+    if (!remote) return;
+    loadThreads().catch(() => {});
+    if (remote.id === convRef.current?.id && !busyRef.current) open(remote.id).catch(() => {});
+  }, [remote, loadThreads, open]);
+
   useEffect(() => { listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" }); }, [turns, busy]);
 
-  const step = async (next: ChatTurn[]) => {
-    setTurns(next);
+  const ensureConv = async (): Promise<Conversation> => {
+    if (convRef.current) return convRef.current;
+    const c = await api.createConversation(pid, branch, "design");
+    setConv(c);
+    convRef.current = c;
+    writeOpen(pid, branch, c.id);
+    setThreads((t) => [c, ...t]);
+    return c;
+  };
+
+  const step = async (turn: ChatTurn) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     setError("");
+    setTurns((t) => [...t, turn]);
+    let c: Conversation | null = null;
     try {
-      const r = await api.chat(pid, branch, next, user.name);
+      c = await ensureConv();
+      const r = await api.chat(pid, branch, [turn], user.name, c.id);
       setEngine(r.engine);
-      setTurns([...next, { role: "assistant", content: r.message, card: r.card }]);
+      setTurns((t) => [...t, { role: "assistant", content: r.message, card: r.card }]);
+      if (!c.title && !turn.answer && turn.content) setConv({ ...c, title: turn.content.slice(0, 60) });
+      loadThreads().catch(() => {});
     } catch (e) {
       setError((e as Error).message);
+      if (c) open(c.id).catch(() => {}); else setTurns((t) => t.slice(0, -1));
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
@@ -53,27 +148,22 @@ export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onAppl
     const t = text.trim();
     if (!t || busy) return;
     setText("");
-    step([...turns, { role: "user", content: t }]);
+    step({ role: "user", content: t });
   };
 
   const answer = (option_ids: string[], other: string, labels: string[]) =>
-    step([...turns, { role: "user", content: labels.join(", "), answer: { option_ids, other: other || undefined } }]);
+    step({ role: "user", content: labels.join(", "), answer: { option_ids, other: other || undefined } });
 
   const apply = async (card: ArchitecturesCard, option: ArchOption, mode: "replace" | "branch") => {
+    const c = convRef.current;
     setBusy(true);
     setError("");
     try {
-      const r = await api.chatApply(pid, branch, option, card.requirements, mode, user.name);
-      const note: ChatTurn = {
-        role: "assistant",
-        content: mode === "branch"
-          ? `Created draft “${r.branch}” with ${option.name} (v${r.version}). Switching to it…`
-          : `Applied ${option.name} to ${r.branch} and saved it as v${r.version}.`,
-        applied: { option: option.name, branch: r.branch, version: r.version },
-      };
-      const next = [...turns, { role: "user" as const, content: `Use ${option.name}` }, note];
-      setTurns(next);
-      if (mode === "branch") save(pid, r.branch, next);  // continue the same conversation on the draft
+      const r = await api.chatApply(pid, branch, option, card.requirements, mode, user.name, undefined, c?.id);
+      if (c) {
+        writeOpen(pid, r.branch, c.id); // continue the same conversation on the draft branch
+        if (r.branch === branch) await open(c.id);
+      }
       onApplied(r);
     } catch (e) {
       setError((e as Error).message);
@@ -82,7 +172,6 @@ export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onAppl
     }
   };
 
-  const reset = () => { setTurns([]); setError(""); };
   const lastIdx = turns.length - 1;
 
   return (
@@ -93,15 +182,29 @@ export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onAppl
           Add <code>GEMINI_API_KEY=…</code> to <code>backend/.env</code> and restart the API to turn it on.
         </div>
       )}
+      {threads.length > 0 && (
+        <div className="dc-bar">
+          <select value={conv?.id ?? ""} disabled={busy} aria-label="Design chats"
+            onChange={(e) => open(e.target.value || null).catch((err) => setError((err as Error).message))}>
+            <option value="">+ New design chat</option>
+            {threads.map((t) => (
+              <option key={t.id} value={t.id}>
+                {(t.title || "Untitled").slice(0, 48)} · {t.branch}{t.created_by !== user.name ? ` · ${t.created_by}` : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       <div className="dc-list" ref={listRef}>
-        {turns.length === 0 && (
+        {loading && <div className="muted small pulse">Loading…</div>}
+        {!loading && turns.length === 0 && (
           <div className="dc-empty">
             <h3>Design with ArchFlow</h3>
             <p className="muted small">Describe what you want to build. I'll ask a few multiple-choice questions, then show
-              you architecture options to pick from.</p>
+              you architecture options to pick from. Your answers are saved to the project memory.</p>
             {["AI customer-support platform on WhatsApp and web", "Food delivery marketplace with live tracking",
               "Internal knowledge assistant over company documents"].map((s) => (
-              <button key={s} className="dc-suggest" onClick={() => step([{ role: "user", content: s }])}>{s}</button>
+              <button key={s} className="dc-suggest" onClick={() => step({ role: "user", content: s })}>{s}</button>
             ))}
           </div>
         )}
@@ -115,7 +218,7 @@ export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onAppl
               {t.content && <div>{t.content}</div>}
               {t.card?.type === "question" && (
                 <QuestionView card={t.card} active={active} answered={turns[i + 1]?.answer}
-                  onAnswer={answer} onSkip={() => step([...turns, { role: "user", content: "Skip — show me the architecture options" }])} />
+                  onAnswer={answer} onSkip={() => step({ role: "user", content: "Skip — show me the architecture options" })} />
               )}
               {t.card?.type === "architectures" && (
                 <ArchitecturesView card={t.card} disabled={busy} canvasEmpty={canvasEmpty}
@@ -134,7 +237,7 @@ export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onAppl
         <div className="row between">
           <span className="muted tiny">{engine === "offline" ? "Offline interviewer (no LLM key)" : engine ? "AI interviewer" : ""}</span>
           <span className="row gap">
-            {turns.length > 0 && <button type="button" className="small" onClick={reset}>New</button>}
+            {turns.length > 0 && <button type="button" className="small" disabled={busy} onClick={() => open(null)}>New</button>}
             <button className="primary small" disabled={!text.trim() || busy}>Send</button>
           </span>
         </div>

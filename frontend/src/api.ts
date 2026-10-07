@@ -3,6 +3,7 @@ import type { Decision, Evaluation } from "./types";
 import type { AIProvider, AISettings, Invite, InviteInfo, Me, Member, Role } from "./types";
 import type { ComponentViews, LldResult } from "./types";
 import type { CodeGraphRecord, CodeJob, CodeOverview, DriftResult, ImpactResult, ReconstructResult } from "./types";
+import type { Conversation, ConversationKind, ConversationMessage, MemoryCategory, MemoryItem } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, public data: any) {
@@ -40,6 +41,64 @@ async function call<T>(method: string, path: string, body?: unknown, params?: Re
 }
 
 const b = (branch: string) => ({ branch });
+
+/** GET a file (the session cookie is sent) and save it under the server's suggested name. */
+async function download(path: string, params: Record<string, string>, fallbackName: string): Promise<string> {
+  const res = await fetch(`/api${path}?${new URLSearchParams(params)}`, { credentials: "include" });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    throw new ApiError(res.status, data);
+  }
+  const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "")?.[1] ?? fallbackName;
+  const url = URL.createObjectURL(await res.blob());
+  Object.assign(document.createElement("a"), { href: url, download: name }).click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+  return name;
+}
+
+export interface StreamHandlers {
+  onStart?: (userMessage: ConversationMessage) => void;
+  onDelta: (text: string) => void;
+}
+
+/**
+ * POST that answers with server-sent events (start → delta… → done). Resolves with the saved assistant message.
+ * Aborting stops reading; the server still finishes and saves the answer.
+ */
+async function stream(path: string, body: unknown, params: Record<string, string>, handlers: StreamHandlers,
+  signal?: AbortSignal): Promise<ConversationMessage> {
+  const res = await fetch(`/api${path}?${new URLSearchParams(params)}`, {
+    method: "POST", credentials: "include", signal,
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok || !res.body) {
+    const data = await res.json().catch(() => null);
+    if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    throw new ApiError(res.status, data);
+  }
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += value;
+    let cut: number;
+    while ((cut = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, cut);
+      buf = buf.slice(cut + 2);
+      const event = /^event: (.*)$/m.exec(block)?.[1];
+      const raw = /^data: (.*)$/m.exec(block)?.[1];
+      if (!event || raw === undefined) continue;
+      const data = JSON.parse(raw);
+      if (event === "start") handlers.onStart?.(data.user_message);
+      else if (event === "delta") handlers.onDelta(data.text);
+      else if (event === "done") return data.message as ConversationMessage;
+    }
+  }
+  throw new Error("The answer stream ended early. Reload the conversation to see the saved answer.");
+}
 
 export const api = {
   // ---- accounts and organizations ----
@@ -106,12 +165,38 @@ export const api = {
       applied: boolean; summary?: string[]; explanation: string; questions: string[];
       engine: string; error?: string; state?: ProjectState;
     }>("POST", `/projects/${pid}/ai/command`, { text, selection, actor }, b(branch)),
-  chat: (pid: string, branch: string, turns: ChatTurn[], actor: string) =>
-    call<{ message: string; card: ChatCard | null; engine: string }>("POST", `/projects/${pid}/chat`, { turns, actor }, b(branch)),
+  /** One design-chat turn. With ``conversation_id`` the server keeps the transcript, so send only the new turn. */
+  chat: (pid: string, branch: string, turns: ChatTurn[], actor: string, conversation_id?: string) =>
+    call<{ message: string; card: ChatCard | null; engine: string; user_message?: ConversationMessage;
+      assistant_message?: ConversationMessage }>("POST", `/projects/${pid}/chat`, { turns, actor, conversation_id }, b(branch)),
   chatApply: (pid: string, branch: string, option: ArchOption, requirements: Record<string, unknown>[],
-    mode: "replace" | "merge" | "branch", actor: string, branch_name?: string) =>
-    call<{ branch: string; version: number; summary: string[]; state: ProjectState }>(
-      "POST", `/projects/${pid}/chat/apply`, { option, requirements, mode, actor, branch_name }, b(branch)),
+    mode: "replace" | "merge" | "branch", actor: string, branch_name?: string, conversation_id?: string) =>
+    call<{ branch: string; version: number; summary: string[]; state: ProjectState; conversation?: Conversation }>(
+      "POST", `/projects/${pid}/chat/apply`, { option, requirements, mode, actor, branch_name, conversation_id }, b(branch)),
+  // ---- conversations and project memory ----
+  conversations: (pid: string, kind?: ConversationKind) =>
+    call<Conversation[]>("GET", `/projects/${pid}/conversations`, undefined, kind ? { kind } : undefined),
+  conversation: (pid: string, cid: string) =>
+    call<Conversation & { messages: ConversationMessage[] }>("GET", `/projects/${pid}/conversations/${cid}`),
+  createConversation: (pid: string, branch: string, kind: ConversationKind, messages: ChatTurn[] = [], title = "") =>
+    call<Conversation>("POST", `/projects/${pid}/conversations`, { kind, messages, title }, b(branch)),
+  renameConversation: (pid: string, cid: string, title: string) =>
+    call<Conversation>("PATCH", `/projects/${pid}/conversations/${cid}`, { title }),
+  deleteConversation: (pid: string, cid: string) => call<null>("DELETE", `/projects/${pid}/conversations/${cid}`),
+  clearConversation: (pid: string, cid: string) => call<null>("DELETE", `/projects/${pid}/conversations/${cid}/messages`),
+  askStream: (pid: string, branch: string, cid: string, question: string, handlers: StreamHandlers, signal?: AbortSignal) =>
+    stream(`/projects/${pid}/conversations/${cid}/ask`, { question }, b(branch), handlers, signal),
+  regenerateStream: (pid: string, branch: string, cid: string, handlers: StreamHandlers, signal?: AbortSignal) =>
+    stream(`/projects/${pid}/conversations/${cid}/regenerate`, undefined, b(branch), handlers, signal),
+  conversationCommand: (pid: string, branch: string, cid: string, text: string, selection: string[]) =>
+    call<{ user_message: ConversationMessage; message: ConversationMessage; state?: ProjectState }>(
+      "POST", `/projects/${pid}/conversations/${cid}/command`, { text, selection }, b(branch)),
+  memory: (pid: string) => call<MemoryItem[]>("GET", `/projects/${pid}/memory`),
+  addMemory: (pid: string, branch: string, text: string, category: MemoryCategory, pinned = false) =>
+    call<MemoryItem>("POST", `/projects/${pid}/memory`, { text, category, pinned }, b(branch)),
+  updateMemory: (pid: string, branch: string, id: string, changes: Partial<Pick<MemoryItem, "text" | "category" | "pinned">>) =>
+    call<MemoryItem>("PATCH", `/projects/${pid}/memory/${id}`, changes, b(branch)),
+  deleteMemory: (pid: string, branch: string, id: string) => call<null>("DELETE", `/projects/${pid}/memory/${id}`, undefined, b(branch)),
   ask: (pid: string, branch: string, question: string) =>
     call<{ answer: string }>("POST", `/projects/${pid}/ai/ask`, { question }, b(branch)),
   // ---- architecture decisions ----
@@ -128,6 +213,11 @@ export const api = {
     call<Evaluation & { decision?: Decision }>("POST", `/projects/${pid}/evaluate`, { branches, actor, create_decision }),
   generateLld: (pid: string, branch: string, nodeId: string, actor: string, replace = false) =>
     call<LldResult>("POST", `/projects/${pid}/nodes/${encodeURIComponent(nodeId)}/lld`, { actor, replace }, b(branch)),
+  /** Interactive diagram of one level (system, or a component's internals), rendered by Archify on the server. */
+  exportDiagram: (pid: string, branch: string, level = "") =>
+    download(`/projects/${pid}/export/diagram`, { branch, level }, "diagram.html"),
+  exportSequence: (pid: string, branch: string, nodeId: string) =>
+    download(`/projects/${pid}/nodes/${encodeURIComponent(nodeId)}/export/sequence`, { branch }, "request-flow.html"),
   views: (pid: string, branch: string, nodeId: string) =>
     call<ComponentViews>("GET", `/projects/${pid}/nodes/${encodeURIComponent(nodeId)}/views`, undefined, b(branch)),
   // ---- repository analysis (code graph) ----
