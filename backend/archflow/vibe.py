@@ -6,8 +6,10 @@ structured implementation brief for a coding agent (Claude Code, Codex, Gemini C
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from .analysis import trace_requirement
-from .models import ProjectState
+from .models import Edge, ProjectState
 
 TARGETS = {
     "claude-code": "Claude Code",
@@ -16,6 +18,40 @@ TARGETS = {
     "aider": "Aider",
     "generic": "a coding agent",
 }
+
+
+@dataclass
+class Scope:
+    """What a brief covers: the components and requirements to build, the connections touching them, and the
+    neighbouring components that are only integrated with (stubbed)."""
+    node_ids: list[str]
+    requirement_ids: list[str]
+    whole_system: bool
+    edges: list[Edge]
+    boundary: list[str]
+
+
+def resolve_scope(state: ProjectState, node_ids: list[str], requirement_ids: list[str]) -> Scope:
+    """Expand a selection: requirements pull in the components tracing to them, components pull in the
+    requirements they implement; nothing selected means the whole system. Notes are never in scope."""
+    node_ids = [n for n in node_ids if n in state.nodes]
+    requirement_ids = [r for r in requirement_ids if r in state.requirements]
+    for rid in requirement_ids:
+        for nid in trace_requirement(state, rid)["node_ids"]:
+            if nid not in node_ids:
+                node_ids.append(nid)
+    for nid in node_ids:
+        for rid in state.nodes[nid].requirement_ids:
+            if rid in state.requirements and rid not in requirement_ids:
+                requirement_ids.append(rid)
+    whole = not node_ids and not requirement_ids
+    if whole:
+        node_ids = [n for n in state.nodes if state.nodes[n].type != "note"]
+        requirement_ids = list(state.requirements)
+    selected = set(node_ids)
+    edges = [e for e in state.edges.values() if e.source in selected or e.target in selected]
+    boundary = sorted(({e.source for e in edges} | {e.target for e in edges}) - selected)
+    return Scope(node_ids, requirement_ids, whole, edges, boundary)
 
 
 def build_prompt(state: ProjectState, project_name: str, node_ids: list[str], requirement_ids: list[str],

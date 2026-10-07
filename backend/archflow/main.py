@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from . import (accounts, ai, diagram_export, auth, catalog, chat, collab_sync, conversations, decisions, lld, llm,
+from . import (accounts, ai, openspec_service, diagram_export, auth, catalog, chat, collab_sync, conversations, decisions, lld, llm,
                secrets_box, users)
 from .analysis import full_analysis, trace_requirement
 from .codegraph.service import CodeGraphService
@@ -75,6 +75,7 @@ class PromptIn(BaseModel):
     requirement_ids: list[str] = []
     target: str = "claude-code"
     extra: str = ""
+
 
 
 class CommandIn(BaseModel):
@@ -585,6 +586,13 @@ def create_app(store: Store | None = None) -> FastAPI:
         await hub.broadcast(Hub.key(pid, branch), msg)
 
     decisions.register_routes(app, store, authz=authz, sync_to_live_doc=sync_to_live_doc, broadcast=broadcast_room)
+
+    # ---- OpenSpec: spec-driven changes stored per project (openspec_service.py) ----
+    def openspec_context(pid: str, branch: str) -> dict[str, Any]:
+        return {"state": state_or_404(pid, branch), "name": project_or_404(pid)["name"],
+                "memory": conversations.memory_block(store, pid), "decisions": store.list_decisions(pid)}
+
+    openspec_service.register_routes(app, store, authz=authz, project_context=openspec_context)
 
     # ---- conversations (threaded, streamed AI chat) and project memory ----
     conversations.register_routes(app, store, authz=authz, project_context=project_context,

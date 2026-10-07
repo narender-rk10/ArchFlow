@@ -25,6 +25,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 from . import auth, authz, catalog, lld
+from . import openspec_service as openspec_mod
 from . import conversations as conversations_mod
 from . import decisions as decisions_mod
 from .analysis import full_analysis, trace_requirement
@@ -215,6 +216,50 @@ def build_remote_mcp(services: Services) -> MCPServer:
         if requirement_id not in state.requirements:
             raise ToolError(f"requirement {requirement_id} not found")
         return build_prompt(state, project["name"], [], [requirement_id], target if target in TARGETS else "generic")
+
+    @mcp.tool()
+    async def generate_change_spec(project_id: str, requirement_ids: list[str] | None = None,
+                                   component_ids: list[str] | None = None, target: str = "claude-code",
+                                   extra: str = "", branch: str = "main") -> dict[str, Any]:
+        """Write a spec-driven change with OpenSpec (proposal, specs, design, tasks; validated with
+        `openspec validate --strict`) from the design, and store it in the project. Takes 1-2 minutes.
+        Returns the files for openspec/changes/<change_id>/: save them in the repository, then work through
+        tasks.md. Nothing selected = the whole system."""
+        p = Principal(store)
+        p.require_write()
+        project, state = project_for(p, project_id, branch)
+        try:
+            change = await asyncio.to_thread(
+                openspec_mod.generate, store, project_id, state, project["name"], component_ids or [],
+                requirement_ids or [], actor=p.actor, branch=branch, target=target if target in TARGETS else "generic",
+                extra=extra[:4000], memory=conversations_mod.memory_block(store, project_id),
+                decisions=store.list_decisions(project_id), org_id=p.org_id)
+        except (ValueError, openspec_mod.OpenSpecError) as exc:
+            raise ToolError(str(exc)) from exc
+        files = openspec_mod.change_files(store, project_id, change)
+        return {"change_id": change["change_id"], "title": change["title"], "status": change["status"],
+                "engine": change["engine"], "validation": change["validation"],
+                "files": {f"openspec/changes/{change['change_id']}/{k}": v for k, v in files.items()}}
+
+    @mcp.tool()
+    def get_openspec(project_id: str) -> dict[str, Any]:
+        """The project's OpenSpec state: living specs (capabilities) and changes with status and validation."""
+        project_for(Principal(store), project_id)
+        return {"specs": [f["path"] for f in store.list_openspec_files(project_id, "openspec/specs/", with_content=False)],
+                "changes": [{k: c[k] for k in ("change_id", "title", "status", "engine", "updated_at")}
+                            for c in store.list_openspec_changes(project_id)]}
+
+    @mcp.tool()
+    def get_openspec_file(project_id: str, path: str) -> str:
+        """One OpenSpec file, e.g. openspec/specs/order-lookup/spec.md or openspec/changes/<id>/tasks.md."""
+        project_for(Principal(store), project_id)
+        try:
+            f = store.get_openspec_file(project_id, openspec_mod.safe_path(path))
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        if not f:
+            raise ToolError(f"{path} not found")
+        return f["content"]
 
     @mcp.tool()
     def generate_coding_prompt(project_id: str, component_ids: list[str] | None = None, target: str = "claude-code",

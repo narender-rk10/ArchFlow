@@ -591,3 +591,47 @@ button.ghost.on { color: var(--primary); }
 .project-card-text b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .project-card-text .tiny { overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 @media (max-width: 900px) { .switcher-org { display: none; } .switcher-trigger { max-width: 180px; } }
+
+/* ---------- vibe coding (OpenSpec) ---------- */
+.modal.vibe { width: min(1000px, 100%); height: min(88vh, 900px); }
+.vibe-help { margin: 0; }
+.vibe-busy { padding: 18px; border: 1px dashed var(--border); border-radius: 8px; color: var(--primary); }
+.vibe-empty { padding: 28px 18px; border: 1px dashed var(--border); border-radius: 8px; text-align: center; }
+.vibe-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.vibe-engine { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+.vibe-engine.llm { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); background: color-mix(in srgb, var(--primary) 8%, var(--panel)); }
+.vibe-tabs { flex-wrap: wrap; }
+.vibe-doc { white-space: normal; font-size: 13px; }
+.warn { color: var(--warn); }
+
+/* ---------- OpenSpec workspace ---------- */
+.os-panel { flex: 1; min-height: 0; display: grid; grid-template-columns: 230px 1fr; gap: 12px; }
+.os-side { border-right: 1px solid var(--border); padding-right: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.os-side ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.os-new { width: 100%; }
+.os-group { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 10px 0 2px; cursor: default; }
+.os-archived summary { cursor: pointer; }
+.os-empty { margin: 2px 0; }
+.os-item { width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; white-space: normal;
+  background: none; border: 1px solid transparent; padding: 5px 7px; border-radius: 7px; }
+.os-item.on { background: color-mix(in srgb, var(--primary) 10%, var(--panel)); border-color: color-mix(in srgb, var(--primary) 30%, var(--border)); }
+.os-item-title { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.os-item-meta { display: flex; gap: 6px; align-items: center; max-width: 100%; overflow: hidden; }
+.os-item-meta .tiny { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.os-badge { font-size: 10px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--border); white-space: nowrap; }
+.os-badge.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+.os-badge.bad { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+.os-zip { margin-top: auto; }
+.os-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }
+.os-new-form h4 { margin: 0 0 4px; }
+.os-steps { list-style: none; padding: 12px 14px; margin: 8px 0 0; border: 1px dashed var(--border); border-radius: 8px; display: flex; flex-direction: column; gap: 6px; }
+.os-steps li { color: var(--muted); font-size: 13px; }
+.os-steps li.done { color: var(--text); }
+.os-steps li.current { color: var(--primary); font-weight: 600; }
+.os-step-mark { display: inline-block; width: 16px; text-align: center; }
+.os-doc { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+.os-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.os-issues { margin: 0; padding: 8px 10px 8px 26px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; display: flex; flex-direction: column; gap: 3px; }
+.os-target { font-size: 12px; max-width: 170px; }
+.os-editor { resize: none; font-size: 12px; line-height: 1.5; }
+@media (max-width: 760px) { .os-panel { grid-template-columns: 1fr; } .os-side { border-right: none; border-bottom: 1px solid var(--border); padding: 0 0 8px; max-height: 200px; } }

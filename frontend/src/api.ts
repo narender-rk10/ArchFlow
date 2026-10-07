@@ -4,6 +4,7 @@ import type { AIProvider, AISettings, Invite, InviteInfo, Me, Member, Role } fro
 import type { ComponentViews, LldResult } from "./types";
 import type { CodeGraphRecord, CodeJob, CodeOverview, DriftResult, ImpactResult, ReconstructResult } from "./types";
 import type { Conversation, ConversationKind, ConversationMessage, MemoryCategory, MemoryItem } from "./types";
+import type { OpenSpecChange, OpenSpecJob, OpenSpecOverview } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, public data: any) {
@@ -160,6 +161,22 @@ export const api = {
   promptTargets: () => call<{ key: string; name: string }[]>("GET", "/prompt-targets"),
   prompt: (pid: string, branch: string, node_ids: string[], requirement_ids: string[], target: string, extra: string) =>
     call<{ prompt: string }>("POST", `/projects/${pid}/prompt`, { node_ids, requirement_ids, target, extra }, b(branch)),
+  // ---- OpenSpec ----
+  openspec: (pid: string) => call<OpenSpecOverview>("GET", `/projects/${pid}/openspec`),
+  openspecNew: (pid: string, branch: string, node_ids: string[], requirement_ids: string[], target: string, extra: string, use_ai: boolean) =>
+    call<OpenSpecJob>("POST", `/projects/${pid}/openspec/changes`, { node_ids, requirement_ids, target, extra, use_ai }, b(branch)),
+  openspecJob: (pid: string, id: string) => call<OpenSpecJob>("GET", `/projects/${pid}/openspec/jobs/${id}`),
+  openspecChange: (pid: string, cid: string, target: string) =>
+    call<{ change: OpenSpecChange; dir: string; files: Record<string, string>; prompt: string }>(
+      "GET", `/projects/${pid}/openspec/changes/${cid}`, undefined, { target }),
+  openspecSaveFile: (pid: string, cid: string, path: string, content: string) =>
+    call<OpenSpecChange>("PUT", `/projects/${pid}/openspec/changes/${cid}/files`, { path, content }),
+  openspecValidate: (pid: string, cid: string) => call<OpenSpecChange>("POST", `/projects/${pid}/openspec/changes/${cid}/validate`),
+  openspecArchive: (pid: string, cid: string) => call<OpenSpecChange>("POST", `/projects/${pid}/openspec/changes/${cid}/archive`),
+  openspecDelete: (pid: string, cid: string) => call<null>("DELETE", `/projects/${pid}/openspec/changes/${cid}`),
+  openspecFile: (pid: string, path: string) =>
+    call<{ path: string; content: string; updated_by: string; updated_at: string }>("GET", `/projects/${pid}/openspec/file`, undefined, { path }),
+  openspecZip: (pid: string) => download(`/projects/${pid}/openspec.zip`, {}, "openspec.zip"),
   command: (pid: string, branch: string, text: string, selection: string[], actor: string) =>
     call<{
       applied: boolean; summary?: string[]; explanation: string; questions: string[];

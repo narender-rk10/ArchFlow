@@ -269,3 +269,21 @@ export interface MemoryItem {
   source: "user" | "ai" | "design-chat" | "mcp"; conversation_id: string | null;
   created_by: string; created_at: string; updated_at: string;
 }
+
+// ---- OpenSpec (spec-driven changes, stored per project) ----
+export interface OpenSpecIssue { level: "ERROR" | "WARNING" | "INFO"; path?: string; message: string }
+export interface OpenSpecChange {
+  change_id: string; title: string; status: "draft" | "valid" | "invalid" | "archived"; engine: string; branch: string;
+  scope: { node_ids?: string[]; requirement_ids?: string[]; whole_system?: boolean; target?: string; extra?: string };
+  validation: { valid?: boolean; issues?: OpenSpecIssue[]; repairs?: number; notes?: string[]; skipped?: string;
+    archive?: { totals?: Record<string, number> } };
+  archived_as: string | null; created_by: string; created_at: string; updated_at: string;
+}
+export interface OpenSpecOverview {
+  available: boolean; ai: boolean; changes: OpenSpecChange[];
+  specs: { capability: string; path: string; updated_at: string; updated_by: string }[];
+}
+export interface OpenSpecJob {
+  id: string; status: "running" | "done" | "failed"; step: string; steps: { step: string; at: number }[];
+  change_id: string | null; error: string | null; elapsed?: number;
+}

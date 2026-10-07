@@ -211,6 +211,29 @@ CREATE TABLE IF NOT EXISTS project_memory (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS openspec_files (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,              -- relative to the repo root, e.g. openspec/specs/order-lookup/spec.md
+    content TEXT NOT NULL,
+    updated_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, path)
+);
+CREATE TABLE IF NOT EXISTS openspec_changes (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    change_id TEXT NOT NULL,         -- kebab-case; its files live under openspec/changes/<change_id>/
+    title TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'valid', 'invalid', 'archived')),
+    engine TEXT NOT NULL DEFAULT '',  -- openspec+llm | openspec | archflow
+    branch TEXT NOT NULL DEFAULT 'main',
+    scope TEXT NOT NULL DEFAULT '{}',        -- JSON {node_ids, requirement_ids, target, extra}
+    validation TEXT NOT NULL DEFAULT '{}',   -- JSON: last `openspec validate --strict` result
+    archived_as TEXT,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, change_id)
+);
 """
 
 MEMBERSHIPS_DDL = """
@@ -269,6 +292,12 @@ CONVERSATION_FIELDS = ("title", "summary", "summarized_seq", "branch")
 MESSAGE_COLS = "seq, role, mode, content, data, author, created_at"
 MEMORY_COLS = "id, text, category, pinned, source, conversation_id, created_by, created_at, updated_at"
 MEMORY_FIELDS = ("text", "category", "pinned")
+
+
+# ---- OpenSpec (spec-driven changes; see openspec_service.py) ----
+OPENSPEC_STATUSES = ("draft", "valid", "invalid", "archived")
+OPENSPEC_CHANGE_COLS = "change_id, title, status, engine, branch, scope, validation, archived_as, created_by, created_at, updated_at"
+OPENSPEC_CHANGE_FIELDS = ("title", "status", "engine", "branch", "scope", "validation", "archived_as")
 
 
 def conversation_id() -> str:
@@ -962,6 +991,79 @@ class Store:
         with self.lock, self._conn:
             return self._conn.execute("DELETE FROM project_memory WHERE project_id=? AND id=?", (pid, mid)).rowcount > 0
 
+
+    # ---- OpenSpec files and changes ---------------------------------------
+    def list_openspec_files(self, pid: str, prefix: str = "", with_content: bool = True) -> list[dict[str, Any]]:
+        cols = "path, updated_by, updated_at" + (", content" if with_content else "")
+        rows = self._all(f"SELECT {cols} FROM openspec_files WHERE project_id=? AND substr(path, 1, ?) = ? ORDER BY path",
+                         (pid, len(prefix), prefix))
+        return [dict(r) for r in rows]
+
+    def get_openspec_file(self, pid: str, path: str) -> dict[str, Any] | None:
+        row = self._one("SELECT path, content, updated_by, updated_at FROM openspec_files WHERE project_id=? AND path=?",
+                        (pid, path))
+        return dict(row) if row else None
+
+    def write_openspec_files(self, pid: str, files: dict[str, str], actor: str, delete: list[str] | None = None) -> None:
+        """Upsert ``files`` and delete ``delete`` paths in one transaction."""
+        ts = now()
+        with self.lock, self._conn:
+            for path in delete or []:
+                self._conn.execute("DELETE FROM openspec_files WHERE project_id=? AND path=?", (pid, path))
+            for path, content in files.items():
+                self._conn.execute(
+                    "INSERT INTO openspec_files (project_id, path, content, updated_by, updated_at) VALUES (?,?,?,?,?) "
+                    "ON CONFLICT (project_id, path) DO UPDATE SET content=excluded.content, updated_by=excluded.updated_by, "
+                    "updated_at=excluded.updated_at WHERE openspec_files.content <> excluded.content",
+                    (pid, path, content, actor, ts))
+
+    @staticmethod
+    def _openspec_change(row) -> dict[str, Any] | None:
+        if not row:
+            return None
+        d = dict(row)
+        d["scope"] = json.loads(d["scope"] or "{}")
+        d["validation"] = json.loads(d["validation"] or "{}")
+        return d
+
+    def save_openspec_change(self, pid: str, change_id: str, fields: dict[str, Any], actor: str) -> dict[str, Any]:
+        data = {k: v for k, v in fields.items() if k in OPENSPEC_CHANGE_FIELDS}
+        if "status" in data and data["status"] not in OPENSPEC_STATUSES:
+            raise ValueError(f"status must be one of {', '.join(OPENSPEC_STATUSES)}")
+        for k in ("scope", "validation"):
+            if k in data:
+                data[k] = json.dumps(data[k] or {})
+        ts = now()
+        with self.lock, self._conn:
+            exists = self._conn.execute("SELECT 1 FROM openspec_changes WHERE project_id=? AND change_id=?",
+                                        (pid, change_id)).fetchone()
+            if exists:
+                if data:
+                    sets = ", ".join(f"{k}=?" for k in data)
+                    self._conn.execute(f"UPDATE openspec_changes SET {sets}, updated_at=? WHERE project_id=? AND change_id=?",
+                                       (*data.values(), ts, pid, change_id))
+            else:
+                cols = ["project_id", "change_id", "created_by", "created_at", "updated_at", *data]
+                self._conn.execute(f"INSERT INTO openspec_changes ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                                   (pid, change_id, actor, ts, ts, *data.values()))
+        return self.get_openspec_change(pid, change_id)
+
+    def get_openspec_change(self, pid: str, change_id: str) -> dict[str, Any] | None:
+        return self._openspec_change(self._one(
+            f"SELECT {OPENSPEC_CHANGE_COLS} FROM openspec_changes WHERE project_id=? AND change_id=?", (pid, change_id)))
+
+    def list_openspec_changes(self, pid: str) -> list[dict[str, Any]]:
+        rows = self._all(f"SELECT {OPENSPEC_CHANGE_COLS} FROM openspec_changes WHERE project_id=? "
+                         "ORDER BY updated_at DESC, rowid DESC", (pid,))
+        return [self._openspec_change(r) for r in rows]
+
+    def delete_openspec_change(self, pid: str, change_id: str) -> bool:
+        prefix = f"openspec/changes/{change_id}/"
+        with self.lock, self._conn:
+            self._conn.execute("DELETE FROM openspec_files WHERE project_id=? AND substr(path, 1, ?) = ?",
+                               (pid, len(prefix), prefix))
+            return self._conn.execute("DELETE FROM openspec_changes WHERE project_id=? AND change_id=?",
+                                      (pid, change_id)).rowcount > 0
 
 def default_store():
     """Postgres when DATABASE_URL is a postgres URL, otherwise SQLite (ARCHFLOW_DB or backend/data/archflow.db)."""

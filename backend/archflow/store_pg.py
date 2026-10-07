@@ -26,7 +26,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from .models import ProjectState
-from .store import (CODE_GRAPH_COLS, CONVERSATION_COLS, CONVERSATION_FIELDS, DECISION_COLS, DECISION_JSON_FIELDS,
+from .store import (OPENSPEC_CHANGE_COLS, OPENSPEC_CHANGE_FIELDS, OPENSPEC_STATUSES, CODE_GRAPH_COLS, CONVERSATION_COLS, CONVERSATION_FIELDS, DECISION_COLS, DECISION_JSON_FIELDS,
                     DEFAULT_ORG_ID, DEFAULT_ORG_NAME, MEMORY_COLS, MESSAGE_COLS, check_decision_fields,
                     check_memory_fields, code_graph_id, conversation_id, decision_id, memory_id)
 
@@ -680,3 +680,62 @@ class PostgresStore:
     def delete_memory(self, pid: str, mid: str) -> bool:
         with self._conn() as conn:
             return conn.execute("DELETE FROM project_memory WHERE project_id=%s AND id=%s", (pid, mid)).rowcount > 0
+
+    # ---- OpenSpec files and changes ---------------------------------------
+    def list_openspec_files(self, pid: str, prefix: str = "", with_content: bool = True) -> list[dict[str, Any]]:
+        cols = "path, updated_by, updated_at" + (", content" if with_content else "")
+        rows = self._all(f"SELECT {cols} FROM openspec_files WHERE project_id=%s AND left(path, %s) = %s ORDER BY path",
+                         (pid, len(prefix), prefix))
+        return [_row(r) for r in rows]
+
+    def get_openspec_file(self, pid: str, path: str) -> dict[str, Any] | None:
+        return _row(self._one("SELECT path, content, updated_by, updated_at FROM openspec_files "
+                              "WHERE project_id=%s AND path=%s", (pid, path)))
+
+    def write_openspec_files(self, pid: str, files: dict[str, str], actor: str, delete: list[str] | None = None) -> None:
+        with self._conn() as conn, conn.transaction():
+            for path in delete or []:
+                conn.execute("DELETE FROM openspec_files WHERE project_id=%s AND path=%s", (pid, path))
+            for path, content in files.items():
+                conn.execute(
+                    "INSERT INTO openspec_files (project_id, path, content, updated_by) VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT (project_id, path) DO UPDATE SET content=excluded.content, updated_by=excluded.updated_by, "
+                    "updated_at=now() WHERE openspec_files.content <> excluded.content", (pid, path, content, actor))
+
+    def save_openspec_change(self, pid: str, change_id: str, fields: dict[str, Any], actor: str) -> dict[str, Any]:
+        data = {k: v for k, v in fields.items() if k in OPENSPEC_CHANGE_FIELDS}
+        if "status" in data and data["status"] not in OPENSPEC_STATUSES:
+            raise ValueError(f"status must be one of {', '.join(OPENSPEC_STATUSES)}")
+        for k in ("scope", "validation"):
+            if k in data:
+                data[k] = Jsonb(data[k] or {})
+        with self._conn() as conn, conn.transaction():
+            exists = conn.execute("SELECT 1 FROM openspec_changes WHERE project_id=%s AND change_id=%s FOR UPDATE",
+                                  (pid, change_id)).fetchone()
+            if exists:
+                if data:
+                    sets = ", ".join(f"{k}=%s" for k in data)
+                    conn.execute(f"UPDATE openspec_changes SET {sets}, updated_at=now() WHERE project_id=%s AND change_id=%s",
+                                 (*data.values(), pid, change_id))
+            else:
+                cols = ["project_id", "change_id", "created_by", *data]
+                conn.execute(f"INSERT INTO openspec_changes ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
+                             (pid, change_id, actor, *data.values()))
+        return self.get_openspec_change(pid, change_id)
+
+    def get_openspec_change(self, pid: str, change_id: str) -> dict[str, Any] | None:
+        return _row(self._one(f"SELECT {OPENSPEC_CHANGE_COLS} FROM openspec_changes WHERE project_id=%s AND change_id=%s",
+                              (pid, change_id)))
+
+    def list_openspec_changes(self, pid: str) -> list[dict[str, Any]]:
+        rows = self._all(f"SELECT {OPENSPEC_CHANGE_COLS} FROM openspec_changes WHERE project_id=%s "
+                         "ORDER BY updated_at DESC, change_id", (pid,))
+        return [_row(r) for r in rows]
+
+    def delete_openspec_change(self, pid: str, change_id: str) -> bool:
+        prefix = f"openspec/changes/{change_id}/"
+        with self._conn() as conn, conn.transaction():
+            conn.execute("DELETE FROM openspec_files WHERE project_id=%s AND left(path, %s) = %s", (pid, len(prefix), prefix))
+            return conn.execute("DELETE FROM openspec_changes WHERE project_id=%s AND change_id=%s",
+                                (pid, change_id)).rowcount > 0
+

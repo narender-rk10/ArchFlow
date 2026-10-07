@@ -738,7 +738,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         <MemoryDialog pid={pid} branch={branch} items={memory} readOnly={readOnly} onChanged={loadMemory}
           onClose={() => setMemoryOpen(false)} />
       )}
-      {promptFor && <PromptDialog pid={pid} branch={branch} nodeIds={promptFor.nodeIds} requirementIds={promptFor.requirementIds}
+      {promptFor && <PromptDialog pid={pid} branch={branch} nodeIds={promptFor.nodeIds} requirementIds={promptFor.requirementIds} readOnly={readOnly}
         onClose={() => setPromptFor(null)} />}
     </div>
   );

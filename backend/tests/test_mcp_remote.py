@@ -304,3 +304,23 @@ def test_memory_and_conversation_tools(env):
     _, ro = oauth_login(client, access="read", scope="archflow:read")
     err, _, text = tool(client, ro["access_token"], "remember", project_id=pid, text="Use Kafka")
     assert err and "read-only" in text
+
+
+def test_generate_change_spec_tool(env, monkeypatch):
+    from archflow import llm
+    monkeypatch.setattr(llm, "available", lambda org_id=None: False)
+    client, _ = env
+    pid = client.post("/api/projects", json={"name": "Shop", "template": "ai-customer-support"}).json()["id"]
+    _, ro = oauth_login(client, access="read", scope="archflow:read")
+    err, _, text = tool(client, ro["access_token"], "generate_change_spec", project_id=pid)
+    assert err and "read-only" in text
+    _, rw = oauth_login(client)
+    err, out, text = tool(client, rw["access_token"], "generate_change_spec", project_id=pid, requirement_ids=["REQ-003"])
+    assert not err, text
+    files = json.loads(text)["files"] if not out.get("files") else out["files"]
+    assert any(k.endswith("/tasks.md") and k.startswith("openspec/changes/") for k in files)
+    err, _, text = tool(client, rw["access_token"], "get_openspec", project_id=pid)
+    assert not err and "changes" in text
+    path = next(k for k in files if k.endswith("/proposal.md"))
+    err, _, text = tool(client, rw["access_token"], "get_openspec_file", project_id=pid, path=path)
+    assert not err and "## Why" in text

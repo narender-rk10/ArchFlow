@@ -385,3 +385,25 @@ def test_conversations_and_memory(store, org):
     assert store.delete_memory(pid, f2["id"]) and not store.delete_memory(pid, f2["id"])
     store.delete_project(pid)
     assert store.get_conversation(a["id"]) is None and store.list_memory(pid) == []
+
+
+def test_openspec_files_and_changes(store, org):
+    pid = store.create_project("Specs", org_id=org["id"])["id"]
+    store.write_openspec_files(pid, {"openspec/config.yaml": "schema: spec-driven", "openspec/changes/a/proposal.md": "p",
+                                     "openspec/changes/a/specs/x/spec.md": "s"}, "Owner")
+    assert [f["path"] for f in store.list_openspec_files(pid, "openspec/changes/a/")] == [
+        "openspec/changes/a/proposal.md", "openspec/changes/a/specs/x/spec.md"]
+    assert "content" not in store.list_openspec_files(pid, with_content=False)[0]
+    store.write_openspec_files(pid, {"openspec/changes/a/proposal.md": "p2"}, "Bob", delete=["openspec/config.yaml"])
+    f = store.get_openspec_file(pid, "openspec/changes/a/proposal.md")
+    assert (f["content"], f["updated_by"]) == ("p2", "Bob") and store.get_openspec_file(pid, "openspec/config.yaml") is None
+    c = store.save_openspec_change(pid, "a", {"title": "A", "scope": {"node_ids": ["x"]}, "validation": {"valid": True}}, "Owner")
+    assert (c["status"], c["scope"], c["validation"], c["created_by"]) == ("draft", {"node_ids": ["x"]}, {"valid": True}, "Owner")
+    c = store.save_openspec_change(pid, "a", {"status": "archived", "archived_as": "2026-01-01-a"}, "Bob")
+    assert (c["status"], c["archived_as"], c["title"]) == ("archived", "2026-01-01-a", "A")
+    with pytest.raises(ValueError):
+        store.save_openspec_change(pid, "a", {"status": "done"}, "Bob")
+    assert [x["change_id"] for x in store.list_openspec_changes(pid)] == ["a"]
+    assert store.delete_openspec_change(pid, "a") and store.list_openspec_files(pid, "openspec/changes/a/") == []
+    store.delete_project(pid)
+    assert store.list_openspec_files(pid) == []
