@@ -1,5 +1,6 @@
 import { Handle, Position, type NodeProps, type Node } from "@xyflow/react";
 import { memo } from "react";
+import { brandIcon } from "../brandIcons";
 import type { ArchNode as ArchNodeModel, NodeType } from "../types";
 import { VENDOR_STYLE } from "./Palette";
 
@@ -46,6 +47,7 @@ export type ArchFlowNode = Node<ArchNodeData, "arch">;
 function ArchNodeView({ data, selected }: NodeProps<ArchFlowNode>) {
   const { model, dimmed, highlighted, diff, remote, issues, childCount } = data;
   const meta = TYPE_META[model.type] ?? TYPE_META.service;
+  const logo = brandIcon(model.technology, model.name);
   const ring = remote?.[0]?.color;
   const cls = ["arch-node", `t-${model.type}`, selected && "selected", dimmed && "dimmed", highlighted && "highlighted",
     diff && `diff-${diff}`].filter(Boolean).join(" ");
@@ -63,7 +65,10 @@ function ArchNodeView({ data, selected }: NodeProps<ArchFlowNode>) {
       <Handle type="target" position={Position.Top} />
       <Handle type="target" position={Position.Left} id="l" />
       <div className="an-head">
-        <span className="an-glyph" aria-hidden>{meta.glyph}</span>
+        {logo ? (
+          <svg className={`an-logo ${logo.dark ? "dark-mark" : ""}`} viewBox="0 0 24 24" role="img" aria-label={logo.title}
+            style={{ ["--brand" as string]: logo.hex }}><title>{logo.title}</title><path d={logo.path} /></svg>
+        ) : <span className="an-glyph" aria-hidden>{meta.glyph}</span>}
         <span className="an-type">{meta.label}</span>
         {model.vendor && VENDOR_STYLE[model.vendor] && (
           <span className="vbadge" style={{ ["--vc" as string]: VENDOR_STYLE[model.vendor].color }}>{VENDOR_STYLE[model.vendor].short}</span>

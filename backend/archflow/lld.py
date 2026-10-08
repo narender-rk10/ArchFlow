@@ -346,22 +346,35 @@ Element types:
 - table: one database table owned by this component; set columns as "name type [pk|fk]" comma-separated
 - event: one domain event it publishes or consumes (PascalCase, past tense, e.g. OrderPlaced)
 
-Rules: 3-6 endpoints for an API-facing component; tables only for databases it actually uses; events only if \
-it talks to a queue/stream; 6-20 elements in total. Connections go from caller to callee (endpoint → \
-controller → service → repository → table; publisher → event). Use requirement_ids from the given \
-requirements where an element implements one. Keys are short unique identifiers referenced by connections."""
+Rules:
+- Cover the full lifecycle of each entity this component owns: create, read one, list (e.g. "my bookings" for \
+the caller), and every state change the requirements imply (cancel, reschedule, refund, approve, …). Read \
+"primary_requirements" (traced to this component) fully, and also implement any part of "other_requirements" \
+that falls to this component (e.g. cancellation rules stated under payments).
+- API-facing components: usually 4-10 endpoints. Tables only for databases it actually uses; enforce invariants \
+with keys (e.g. a "uk" column so a slot cannot be booked twice) and add status/expiry columns for holds and states.
+- Events only if it talks to a queue/stream: one per state change other components care about (e.g. \
+BookingConfirmed and BookingCancelled).
+- 8-30 elements in total. Connections go from caller to callee (endpoint → controller → service → repository → \
+table; publisher → event). Use requirement_ids from the given requirements where an element implements one. \
+Keys are short unique identifiers referenced by connections."""
 
 
 def _llm_prompt(state: ProjectState, node: Node) -> str:
     out, inc = neighbours(state, node)
-    reqs = [state.requirements[r].model_dump(include={"id", "title", "description", "acceptance_criteria"})
-            for r in node.requirement_ids if r in state.requirements]
+    fields = {"id", "title", "description", "acceptance_criteria"}
+    primary = [state.requirements[r].model_dump(include=fields) for r in node.requirement_ids if r in state.requirements]
+    # The rest give context: rules for this component are often written under another requirement (cancellation
+    # under payments, audit under security). Functional ones in full, the others as titles.
+    other = [r.model_dump(include=fields) if r.kind == "functional" else {"id": r.id, "title": r.title}
+             for r in state.requirements.values() if r.id not in node.requirement_ids][:40]
     payload = {
         "component": {"id": node.id, "name": node.name, "type": node.type, "technology": node.technology,
                       "description": node.description},
         "calls": [{"name": n.name, "type": n.type, "technology": n.technology, "protocol": p} for n, p in out],
         "called_by": [{"name": n.name, "type": n.type, "protocol": p} for n, p in inc],
-        "requirements": reqs,
+        "primary_requirements": primary,
+        "other_requirements": other,
     }
     return f"Design the internals of this component:\n{json.dumps(payload, indent=1)}"
 
@@ -608,42 +621,61 @@ def _caller_chain(state: ProjectState, node: Node) -> list[Node]:
     return [state.nodes[n] for n in chain]
 
 
-def sequence_mermaid(state: ProjectState, node: Node, rows: list[dict[str, Any]]) -> str:
+def sequence_steps(state: ProjectState, node: Node, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The component's main request flow as data: participants (callers, the component, its dependencies)
+    and steps ``{from, to, label, kind}`` with kind ``call`` | ``async`` | ``return`` | ``activate`` |
+    ``deactivate``. Rendered as Mermaid (``sequence_mermaid``) and exported by diagram_export.sequence_ir."""
     chain = _caller_chain(state, node)
     out, _ = neighbours(state, node)
     deps = [(n, p) for n, p in out if n.type != "note" and n.id not in {c.id for c in chain}]
-    used: dict[str, str] = {}
-    lines = ["sequenceDiagram", "    autonumber"]
+    participants, seen = [], set()
     for n in chain + [d for d, _ in deps]:
-        if n.id in used:
-            continue
-        used[n.id] = _mid(n.name, used)
-        kind = "actor" if n.type == "client" else "participant"
-        lines.append(f"    {kind} {used[n.id]} as {_q(n.name)}")
+        if n.id not in seen:
+            seen.add(n.id)
+            participants.append({"id": n.id, "name": n.name, "type": n.type, "technology": n.technology})
     main = next((r for r in rows if r["method"] == "POST"), rows[0] if rows else None)
     request = f"{main['method']} {main['path']}" if main else "request"
     proto = {(e.source, e.target): e.protocol or e.label for e in state.edges.values()}
+    steps: list[dict[str, str]] = []
     for a, b in zip(chain, chain[1:]):
         p = proto.get((a.id, b.id), "")
         msg = f"{p} {request}" if b.id == node.id else (p or "request")  # the endpoint is this component's API
-        lines.append(f"    {used[a.id]}->>{used[b.id]}: {_q(msg.strip())}")
+        steps.append({"from": a.id, "to": b.id, "label": msg.strip(), "kind": "call"})
     if len(chain) > 1:
-        lines.append(f"    activate {used[node.id]}")
+        steps.append({"from": node.id, "to": node.id, "label": "", "kind": "activate"})
     for dep, p in deps:
         label = (p + " ").lstrip() if p else ""
         if dep.type == "queue":
             ev = next((c.name for c in children(state, node.id) if c.type == "event"), "event")
-            lines.append(f"    {used[node.id]}-){used[dep.id]}: {_q(label + 'publish ' + ev)}")
+            steps.append({"from": node.id, "to": dep.id, "label": label + "publish " + ev, "kind": "async"})
         else:
             verb = {"database": "query / write", "storage": "read / write", "cache": "get / set",
                     "llm": "prompt", "mcp": "tool call", "security": "verify token"}.get(dep.type, "call")
-            lines.append(f"    {used[node.id]}->>{used[dep.id]}: {_q(label + verb)}")
-            lines.append(f"    {used[dep.id]}-->>{used[node.id]}: result")
+            steps.append({"from": node.id, "to": dep.id, "label": label + verb, "kind": "call"})
+            steps.append({"from": dep.id, "to": node.id, "label": "result", "kind": "return"})
     if len(chain) > 1:
-        lines.append(f"    deactivate {used[node.id]}")
+        steps.append({"from": node.id, "to": node.id, "label": "", "kind": "deactivate"})
     for a, b in reversed(list(zip(chain, chain[1:]))):
         status = "201 Created" if main and main["method"] == "POST" else "200 OK"
-        lines.append(f"    {used[b.id]}-->>{used[a.id]}: {status}")
+        steps.append({"from": b.id, "to": a.id, "label": status, "kind": "return"})
+    return {"participants": participants, "steps": steps,
+            "messages": [s for s in steps if s["kind"] in ("call", "async", "return")]}
+
+
+def sequence_mermaid(state: ProjectState, node: Node, rows: list[dict[str, Any]]) -> str:
+    flow = sequence_steps(state, node, rows)
+    used: dict[str, str] = {}
+    lines = ["sequenceDiagram", "    autonumber"]
+    for p in flow["participants"]:
+        used[p["id"]] = _mid(p["name"], used)
+        kind = "actor" if p["type"] == "client" else "participant"
+        lines.append(f"    {kind} {used[p['id']]} as {_q(p['name'])}")
+    arrows = {"call": "->>", "async": "-)", "return": "-->>"}
+    for s in flow["steps"]:
+        if s["kind"] in ("activate", "deactivate"):
+            lines.append(f"    {s['kind']} {used[s['from']]}")
+        else:
+            lines.append(f"    {used[s['from']]}{arrows[s['kind']]}{used[s['to']]}: {_q(s['label'])}")
     return "\n".join(lines)
 
 

@@ -84,11 +84,22 @@ export interface Invite {
   id: string; org_id: string; email: string | null; role: Role; created_by: string | null; created_at: string; expires_at: number;
 }
 export interface InviteInfo { org_name: string; role: Role; email: string | null; expires_at: number }
-export type AIProvider = "gemini" | "anthropic" | "openai";
+export type AIProvider = string; // gemini, anthropic, openai, openrouter, mistral, groq, deepseek, xai, azure, openai_compatible
+export type AIGroup = "reasoning" | "fast";
+export interface AIProviderInfo {
+  id: AIProvider; label: string; key: "required" | "optional"; params: Record<string, string>; required_params: string[];
+  docs: string | null; examples: Record<AIGroup, string>; server_key: boolean;
+}
+export interface AIModelChoice { provider: AIProvider; model: string }
+export interface AIConfig { reasoning: AIModelChoice[]; fast: AIModelChoice[]; params: Record<AIProvider, Record<string, string>> }
 export interface AISettings {
+  /** False when the server cannot encrypt keys (ARCHFLOW_SECRET_KEY and no data directory): keys cannot be saved. */
   enabled: boolean;
   providers: Record<AIProvider, { configured: boolean; last4: string | null; updated_at: string | null }>;
+  catalog: AIProviderInfo[]; config: AIConfig; defaults: Record<AIGroup, string[]>; effective: Record<AIGroup, string[]>;
+  available: boolean;
 }
+export interface AITestResult { ok: boolean; group: AIGroup; model?: string; chain?: string[]; latency_ms?: number; reply?: string; error?: string }
 
 export interface ApiToken {
   id: string; kind: "pat" | "refresh"; name: string; user_name: string; access: "read" | "write";
@@ -161,7 +172,7 @@ export interface ChatTurn {
 export type DecisionStatus = "proposed" | "accepted" | "rejected" | "superseded";
 export interface DecisionAlternative { name: string; branch?: string | null; summary: string; pros: string[]; cons: string[] }
 export interface Evaluation {
-  engine: "jev" | "llm" | "heuristic";
+  engine: "llm" | "heuristic";
   recommended: string;
   alternatives: string[];
   criteria: string[];
@@ -205,7 +216,8 @@ export interface CodeSummary {
   frameworks: { name: string; kind: string; files: number }[];
   entry_points: { path: string; kind: string; name: string }[];
   manifests: { path: string; kind: string; name: string }[];
-  compose_services: { name: string; image: string; build: string | null }[];
+  compose_services: { name: string; image: string; build: string | null; files?: string[]; dev_tool?: boolean }[];
+  dev_tools?: { name: string; image: string; files: string[] }[];  // excluded from the reconstructed architecture
   dockerfiles: number; k8s: number; terraform: number;
   communities: { id: number; size: number; label: string; paths: string[] }[];
   god_nodes: { id: string; name: string; degree: number }[];
@@ -240,4 +252,58 @@ export interface ImpactResult {
 export interface ReconstructResult {
   branch: string; version: number; code_graph_id: string; engine: string; components: number; connections: number;
   requirements_linked: number;
+  dev_tools?: { name: string; image: string; files: string[]; included: boolean }[];
+  excluded?: { path: string; role: string; reason: string; files: number }[];
+}
+
+// ---- conversations (shared AI chat threads) and project memory ----
+export type ConversationKind = "assistant" | "design";
+export interface Conversation {
+  id: string; project_id: string; branch: string; kind: ConversationKind; title: string;
+  /** Running summary of older turns the AI no longer sees verbatim. */
+  summary: string; summarized_seq: number;
+  created_by: string; created_by_id: string | null; created_at: string; updated_at: string; message_count: number;
+}
+export interface ConversationMessage {
+  seq: number; role: "user" | "assistant"; mode: "ask" | "command" | "design" | "note"; content: string;
+  data: {
+    engine?: string; error?: string; applied?: boolean | { option: string; branch: string; version: number };
+    summary?: string[]; questions?: string[]; selection?: string[];
+    card?: ChatCard | null; answer?: { option_ids: string[]; other?: string };
+  };
+  author: string; created_at: string;
+}
+export const MEMORY_CATEGORIES = ["constraint", "preference", "decision", "requirement", "context", "fact"] as const;
+export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number];
+export interface MemoryItem {
+  id: string; text: string; category: MemoryCategory; pinned: boolean;
+  source: "user" | "ai" | "design-chat" | "mcp"; conversation_id: string | null;
+  created_by: string; created_at: string; updated_at: string;
+}
+
+// ---- OpenSpec (spec-driven changes, stored per project) ----
+export interface OpenSpecIssue { level: "ERROR" | "WARNING" | "INFO"; path?: string; message: string }
+export interface OpenSpecChange {
+  change_id: string; title: string; status: "draft" | "valid" | "invalid" | "archived"; engine: string; branch: string;
+  scope: { node_ids?: string[]; requirement_ids?: string[]; whole_system?: boolean; target?: string; extra?: string };
+  validation: { valid?: boolean; issues?: OpenSpecIssue[]; repairs?: number; notes?: string[]; skipped?: string;
+    archive?: { totals?: Record<string, number> } };
+  archived_as: string | null; created_by: string; created_at: string; updated_at: string;
+}
+export interface OpenSpecOverview {
+  available: boolean; ai: boolean; changes: OpenSpecChange[];
+  specs: { capability: string; path: string; updated_at: string; updated_by: string }[];
+}
+export interface OpenSpecJob {
+  id: string; status: "running" | "done" | "failed"; step: string; steps: { step: string; at: number }[];
+  change_id: string | null; error: string | null; elapsed?: number;
+}
+
+// ---- AI usage and budgets ----
+export interface AIUsageRow { key: string; calls: number; prompt_tokens: number; completion_tokens: number; cost_usd: number; name?: string }
+export interface AIUsageReport {
+  days: number; month_start: string; month_spend_usd: number; used_percent: number | null; status: "ok" | "warning" | "blocked";
+  budget: { monthly_limit_usd: number | null; alert_percent: number; updated_by: string | null; updated_at: string | null };
+  total: { calls: number; prompt_tokens: number; completion_tokens: number; cost_usd: number };
+  by_feature: AIUsageRow[]; by_model: AIUsageRow[]; by_project: AIUsageRow[]; daily: AIUsageRow[];
 }

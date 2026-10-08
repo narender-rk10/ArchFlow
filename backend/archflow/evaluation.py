@@ -1,46 +1,34 @@
 """Evaluate 2–4 architecture alternatives (draft branches) against the project's requirements.
 
-Three engines, tried in order; the result always says which one produced it (``engine``):
+Two engines, tried in order; the result always says which one produced it (``engine``):
 
-1. ``"jev"``: the Jev decision API (``POST https://thejevai.com/v1/systemone``) when ``JEV_API_KEY`` is set.
-   One ``choice`` question ("which alternative best satisfies the requirements?") plus one ``score``
-   question per (criterion, alternative) on a 1–5 scale.
-2. ``"llm"``: the LLM gateway (``llm.complete_json``) with an equivalent JSON schema.
-3. ``"heuristic"``: a deterministic offline estimate from the model's structure (component counts,
+1. ``"llm"``: the LLM gateway (``llm.complete_json``, any provider LiteLLM supports) scores every alternative
+   on every criterion (1–5) and picks the best fit for the requirements.
+2. ``"heuristic"``: a deterministic offline estimate from the model's structure (component counts,
    caches, queues, auth, replicas) and ``analysis.health``.
 
 Result shape::
 
-    {"engine": "jev" | "llm" | "heuristic", "recommended": <branch>, "alternatives": [<branch>, ...],
+    {"engine": "llm" | "heuristic", "recommended": <branch>, "alternatives": [<branch>, ...],
      "criteria": [...], "scores": {branch: {criterion: number 1..5}}, "totals": {branch: number},
      "rationale": str, "confidence": float | None, "notes": [why earlier engines were skipped], "raw": ...}
-
-Environment: JEV_API_KEY, JEV_API_URL (default https://thejevai.com/v1/systemone), JEV_MODEL (jev-latest),
-JEV_TIMEOUT seconds (60), JEV_MAX_ATTEMPTS (4), JEV_BACKOFF_BASE (0.5), JEV_BACKOFF_CAP (20).
-The API key is never logged.
 """
 
 from __future__ import annotations
 
-import email.utils
 import json
 import logging
 import os
-import random
 import re
-import time
-from typing import Any, Callable
-
-import httpx
+from typing import Any
 
 from . import llm
 from .analysis import health, validate_architecture
 from .models import ProjectState
 
-log = logging.getLogger("archflow.jev")
+log = logging.getLogger("archflow.evaluation")
 
-DEFAULT_URL = "https://thejevai.com/v1/systemone"
-ENGINES = ("jev", "llm", "heuristic")
+ENGINES = ("llm", "heuristic")
 
 # Criterion -> what a 5 means. Every scale is "higher is better" (cost 5 = cheapest).
 CRITERIA: dict[str, str] = {
@@ -64,14 +52,6 @@ SCALE = [
 NFR_WEIGHTS = {"cost": "cost", "scalability": "scalability", "performance": "performance", "latency": "performance",
                "security": "security", "privacy": "security", "availability": "reliability",
                "reliability": "reliability", "observability": "operability", "maintainability": "operability"}
-
-
-class JevError(RuntimeError):
-    """The Jev API failed (after retries) or returned something unusable."""
-
-
-class JevUnavailable(JevError):
-    """No JEV_API_KEY configured."""
 
 
 # --------------------------------------------------------------------------- state building
@@ -141,94 +121,8 @@ def build_state(requirements: ProjectState, alternatives: dict[str, ProjectState
     }
 
 
-def build_questions(branches: list[str]) -> dict[str, Any]:
-    keys = option_keys(branches)
-    questions: dict[str, Any] = {
-        "best": {
-            "type": "choice",
-            "instructions": "Which alternative architecture best satisfies the requirements, including the "
-                            "non-functional requirements (NFRs)? Weigh critical and high-priority requirements most.",
-            "criteria": {k: f"Alternative {k} (branch '{b}')" for k, b in keys.items()},
-        }
-    }
-    for crit, desc in CRITERIA.items():
-        for k, b in keys.items():
-            questions[f"score_{crit}_{k}"] = {
-                "type": "score",
-                "instructions": f"Rate alternative {k} (branch '{b}') on {desc}, given the requirements.",
-                "criteria": SCALE,
-            }
-    return questions
-
-
-def build_payload(requirements: ProjectState, alternatives: dict[str, ProjectState]) -> dict[str, Any]:
-    return {"state": build_state(requirements, alternatives), "model": os.environ.get("JEV_MODEL", "jev-latest"),
-            "questions": build_questions(list(alternatives))}
-
-
 # --------------------------------------------------------------------------- HTTP client
-def _retry_after(resp: httpx.Response) -> float | None:
-    value = resp.headers.get("retry-after")
-    if value is None:
-        return None
-    try:
-        return max(0.0, float(value))
-    except ValueError:
-        parsed = email.utils.parsedate_tz(value)
-        return max(0.0, email.utils.mktime_tz(parsed) - time.time()) if parsed else None
-
-
-def _backoff(attempt: int, base: float, cap: float) -> float:
-    """Exponential backoff with full jitter."""
-    return random.uniform(0, min(cap, base * (2 ** attempt)))
-
-
-def _retryable(status: int) -> bool:
-    return status in (408, 429, 529) or status >= 500
-
-
-def call_jev(payload: dict[str, Any], *, api_key: str | None = None, url: str | None = None,
-             transport: httpx.BaseTransport | None = None, sleep: Callable[[float], None] = time.sleep,
-             max_attempts: int | None = None) -> dict[str, Any]:
-    """POST the payload to the Jev API with retries on 408/429/529/5xx and network errors."""
-    key = api_key or os.environ.get("JEV_API_KEY", "")
-    if not key:
-        raise JevUnavailable("JEV_API_KEY is not set")
-    url = url or os.environ.get("JEV_API_URL", DEFAULT_URL)
-    attempts = max(1, max_attempts or int(os.environ.get("JEV_MAX_ATTEMPTS", 4)))
-    base = float(os.environ.get("JEV_BACKOFF_BASE", 0.5))
-    cap = float(os.environ.get("JEV_BACKOFF_CAP", 20))
-    timeout = float(os.environ.get("JEV_TIMEOUT", 60))
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    last = ""
-    with httpx.Client(timeout=timeout, transport=transport) as client:
-        for attempt in range(attempts):
-            wait: float | None = None
-            try:
-                resp = client.post(url, json=payload, headers=headers)
-            except httpx.HTTPError as exc:
-                last = f"network error: {type(exc).__name__}"
-            else:
-                if resp.status_code < 300:
-                    try:
-                        data = resp.json()
-                    except ValueError as exc:
-                        raise JevError("Jev returned invalid JSON") from exc
-                    if not isinstance(data, dict) or not isinstance(data.get("answers"), dict):
-                        raise JevError("Jev response has no 'answers' object")
-                    return data
-                last = f"HTTP {resp.status_code}"
-                if not _retryable(resp.status_code):
-                    detail = resp.text[:300]
-                    raise JevError(f"Jev request failed: HTTP {resp.status_code} {detail}".strip())
-                wait = _retry_after(resp)
-            if attempt + 1 < attempts:
-                delay = min(cap, wait) if wait is not None else _backoff(attempt, base, cap)
-                log.info("jev attempt %d failed (%s); retrying in %.2fs", attempt + 1, last, delay)
-                sleep(delay)
-    raise JevError(f"Jev request failed after {attempts} attempts ({last})")
-
-
+# --------------------------------------------------------------------------- scoring helpers
 def _num(value: Any) -> float | None:
     try:
         return float(value)
@@ -236,42 +130,6 @@ def _num(value: Any) -> float | None:
         return None
 
 
-def parse_response(resp: dict[str, Any], branches: list[str]) -> dict[str, Any]:
-    """Turn a Jev response into the common result shape (engine 'jev')."""
-    keys = option_keys(branches)
-    answers = resp.get("answers") or {}
-    best = answers.get("best") or {}
-    choice = best.get("choice")
-    if choice not in keys:
-        # tolerate an answer that names the branch instead of the option key
-        rev = {b: k for k, b in keys.items()}
-        choice = rev.get(choice)
-    probs = {keys[k]: round(p, 3) for k, v in (best.get("probabilities") or {}).items()
-             if k in keys and (p := _num(v)) is not None}
-    scores: dict[str, dict[str, float]] = {b: {} for b in branches}
-    for crit in CRITERIA:
-        for k, b in keys.items():
-            ans = answers.get(f"score_{crit}_{k}") or {}
-            s = _num(ans.get("score"))
-            if s is None:
-                continue
-            # Jev scores are 0-based indexes into the criteria levels (0..4); our scale is 1..5.
-            scores[b][crit] = round(min(5.0, max(1.0, s + 1)), 2)
-    if not any(scores.values()) and choice is None:
-        raise JevError("Jev response contained no usable answers")
-    recommended = keys[choice] if choice else None
-    out = _finish("jev", branches, scores, recommended, "", None)
-    conf = _num(best.get("confidence"))
-    out["confidence"] = round(conf, 3) if conf is not None else None
-    out["probabilities"] = probs
-    pct = f" ({round(100 * probs[out['recommended']])}% probability)" if out["recommended"] in probs else ""
-    out["rationale"] = (f"Jev picked '{out['recommended']}' as the best fit for the requirements{pct}. "
-                        + _strengths_text(out))
-    out["raw"] = {"model": resp.get("model"), "usage": resp.get("usage"), "elapsed": resp.get("elapsed")}
-    return out
-
-
-# --------------------------------------------------------------------------- scoring helpers
 def criterion_weights(requirements: ProjectState) -> dict[str, float]:
     w = {c: 1.0 for c in CRITERIA}
     for r in requirements.requirements.values():
@@ -313,16 +171,6 @@ def _strengths_text(result: dict[str, Any]) -> str:
 
 
 # --------------------------------------------------------------------------- engines
-def evaluate_jev(requirements: ProjectState, alternatives: dict[str, ProjectState], **kw: Any) -> dict[str, Any]:
-    branches = list(alternatives)
-    resp = call_jev(build_payload(requirements, alternatives), **kw)
-    out = parse_response(resp, branches)
-    # Jev's choice is authoritative for 'recommended'; totals use the NFR weights for display.
-    weighted = _finish("jev", branches, out["scores"], out["recommended"], "", criterion_weights(requirements))
-    out["totals"] = weighted["totals"]
-    return out
-
-
 LLM_SYSTEM = """You are a principal software architect. Compare the candidate architectures (alternatives) for one \
 system against its requirements, especially the non-functional requirements. Score every alternative on every \
 criterion from 1 to 5 where higher is always better (for cost, 5 means cheapest). Be concrete and fair; base the \
@@ -440,26 +288,16 @@ def evaluate_heuristic(requirements: ProjectState, alternatives: dict[str, Proje
         f"observability and the architecture health score). '{out['recommended']}' has the best weighted average "
         f"({out['totals'][out['recommended']]} / 5)"
         + (f", with extra weight on {', '.join(emphasis)} from the NFRs" if emphasis else "") + ". "
-        + _strengths_text(out) + " Configure JEV_API_KEY or an LLM key for a requirement-aware evaluation.")
+        + _strengths_text(out) + " Configure an LLM key (AI settings) for a requirement-aware evaluation.")
     return out
 
 
 def evaluate(requirements: ProjectState, alternatives: dict[str, ProjectState],
              org_id: str | None = None) -> dict[str, Any]:
-    """Run the engine chain jev → llm → heuristic. ``alternatives`` maps branch name → state (2–4)."""
+    """Run the engine chain llm → heuristic. ``alternatives`` maps branch name → state (2–4)."""
     if not 2 <= len(alternatives) <= 4:
         raise ValueError("compare between 2 and 4 alternatives")
     notes: list[str] = []
-    if os.environ.get("JEV_API_KEY"):
-        try:
-            out = evaluate_jev(requirements, alternatives)
-            out["notes"] = notes
-            return out
-        except JevError as exc:
-            log.warning("Jev evaluation failed, falling back: %s", exc)
-            notes.append(f"Jev unavailable: {exc}")
-    else:
-        notes.append("JEV_API_KEY not set")
     if llm.available(org_id):
         try:
             out = evaluate_llm(requirements, alternatives, org_id=org_id)

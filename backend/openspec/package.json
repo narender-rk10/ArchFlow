@@ -1,0 +1,11 @@
+{
+  "name": "archflow-openspec",
+  "private": true,
+  "description": "OpenSpec CLI used by the ArchFlow API (archflow/openspec_service.py). Install: npm ci --omit=dev",
+  "dependencies": {
+    "@fission-ai/openspec": "1.14.1"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}

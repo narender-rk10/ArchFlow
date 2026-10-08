@@ -1,0 +1,83 @@
+# ArchFlow production stack: web (nginx + app) → api (FastAPI) → postgres, plus collab (Hocuspocus).
+#
+#   cp .env.example .env    # then set the "required" values below
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Put TLS in front of the web service (load balancer, Caddy, Cloudflare) and set ARCHFLOW_PUBLIC_URL to that
+# https:// origin. The API runs one worker: live updates and background jobs are in-process (see docs/deploy.md).
+
+# Required in .env: POSTGRES_PASSWORD, ARCHFLOW_INTERNAL_TOKEN, ARCHFLOW_SECRET_KEY, ARCHFLOW_PUBLIC_URL, and at
+# least one LLM key (GEMINI_API_KEY, ANTHROPIC_API_KEY or OPENAI_API_KEY) for the AI features.
+
+name: archflow
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: archflow
+      POSTGRES_USER: archflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U archflow -d archflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+      args:
+        EXTRAS: ${ARCHFLOW_BUILD_EXTRAS:-codegraph}
+    image: ${ARCHFLOW_IMAGE_PREFIX:-archflow}/api:${ARCHFLOW_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://archflow:${POSTGRES_PASSWORD}@postgres:5432/archflow
+      ARCHFLOW_COLLAB_URL: http://collab:1234
+      ARCHFLOW_INTERNAL_TOKEN: ${ARCHFLOW_INTERNAL_TOKEN:?set ARCHFLOW_INTERNAL_TOKEN in .env}
+      ARCHFLOW_SECRET_KEY: ${ARCHFLOW_SECRET_KEY:?set ARCHFLOW_SECRET_KEY in .env}
+      ARCHFLOW_PUBLIC_URL: ${ARCHFLOW_PUBLIC_URL:?set ARCHFLOW_PUBLIC_URL (https://your-domain) in .env}
+      ARCHFLOW_ALLOWED_ORIGINS: ${ARCHFLOW_ALLOWED_ORIGINS:-${ARCHFLOW_PUBLIC_URL}}
+    volumes:
+      - apidata:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  collab:
+    build: ./collab
+    image: ${ARCHFLOW_IMAGE_PREFIX:-archflow}/collab:${ARCHFLOW_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      COLLAB_PORT: "1234"
+      ARCHFLOW_API: http://api:8000
+      ARCHFLOW_INTERNAL_TOKEN: ${ARCHFLOW_INTERNAL_TOKEN:?set ARCHFLOW_INTERNAL_TOKEN in .env}
+    depends_on:
+      api:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: ${ARCHFLOW_IMAGE_PREFIX:-archflow}/web:${ARCHFLOW_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "${ARCHFLOW_HTTP_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+      collab:
+        condition: service_started
+
+volumes:
+  pgdata:
+  apidata:

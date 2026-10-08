@@ -1,6 +1,5 @@
-"""Architecture decisions: store (SQLite + Postgres when TEST_DATABASE_URL is set), the Jev client, the
-jev → llm → heuristic fallback chain, the REST endpoints (evaluate / create / adopt) and the MCP tools.
-No network: Jev is mocked with httpx.MockTransport, the LLM with monkeypatch."""
+"""Architecture decisions: store (SQLite + Postgres when TEST_DATABASE_URL is set), the llm → heuristic
+evaluation chain, the REST endpoints (evaluate / create / adopt) and the MCP tools. No network: the LLM is faked."""
 
 import json
 import os
@@ -8,11 +7,10 @@ import os
 os.environ.setdefault("ARCHFLOW_DB", ":memory:")
 os.environ["ARCHFLOW_AI"] = "offline"
 
-import httpx  # noqa: E402
 import pytest  # noqa: E402
 from authhelp import new_client, signup  # noqa: E402
 
-from archflow import jev, llm  # noqa: E402
+from archflow import evaluation, llm  # noqa: E402
 from archflow.main import create_app  # noqa: E402
 from archflow.models import ProjectState  # noqa: E402
 from archflow.ops import apply_ops  # noqa: E402
@@ -21,11 +19,6 @@ from archflow.store import Store  # noqa: E402
 from test_mcp_remote import BASE, oauth_login, tool  # noqa: E402
 
 PG_URL = os.environ.get("TEST_DATABASE_URL", "")
-
-
-@pytest.fixture(autouse=True)
-def no_jev_key(monkeypatch):
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
 
 
 # ---------------------------------------------------------------- sample states
@@ -112,153 +105,46 @@ def test_store_decisions_crud(store):
     assert store.list_decisions(pid) == []
 
 
-# ---------------------------------------------------------------- jev client
-def jev_answers(branches, choice_key="B", score=3.0):
-    keys = jev.option_keys(branches)
-    answers = {"best": {"type": "choice", "choice": choice_key, "confidence": 0.8,
-                        "probabilities": {k: (0.7 if k == choice_key else 0.3 / (len(keys) - 1)) for k in keys}}}
-    for c in jev.CRITERIA:
-        for k in keys:
-            answers[f"score_{c}_{k}"] = {"type": "score", "score": score + (0.5 if k == choice_key else 0),
-                                         "confidence": 0.9}
-    return {"model": "jev-1.13.0", "answers": answers, "usage": {"input_tokens": 10, "output_tokens": 5},
-            "elapsed": 0.4}
-
-
-def test_payload_shape():
-    alts = {"draft/simple": simple_state(), "draft/scaled": scaled_state()}
-    payload = jev.build_payload(jev.merged_requirements(None, alts), alts)
-    assert payload["model"] == "jev-latest"
-    st = payload["state"]
-    assert st["requirements"][0]["category"] == "performance"
-    assert st["alternatives"]["A"]["branch"] == "draft/simple"
-    comps = {c["name"]: c for c in st["alternatives"]["B"]["components"]}
-    assert comps["Cache"] == {"name": "Cache", "type": "cache", "technology": "Redis"}
-    assert "App -> Cache" in st["alternatives"]["B"]["connections"]
-    q = payload["questions"]
-    assert q["best"]["type"] == "choice" and set(q["best"]["criteria"]) == {"A", "B"}
-    assert len(q) == 1 + len(jev.CRITERIA) * 2
-    s = q["score_security_B"]
-    assert s["type"] == "score" and len(s["criteria"]) == 5 and "draft/scaled" in s["instructions"]
-    json.dumps(payload)  # serialisable
-
-
-def test_call_jev_request_and_parse():
-    seen = {}
-    branches = ["draft/simple", "draft/scaled"]
-
-    def handler(request: httpx.Request):
-        seen["auth"] = request.headers["authorization"]
-        seen["url"] = str(request.url)
-        seen["body"] = json.loads(request.content)
-        return httpx.Response(200, json=jev_answers(branches))
-
-    alts = {"draft/simple": simple_state(), "draft/scaled": scaled_state()}
-    resp = jev.call_jev(jev.build_payload(ProjectState(), alts), api_key="k-test",
-                        transport=httpx.MockTransport(handler))
-    assert seen["auth"] == "Bearer k-test" and seen["url"] == jev.DEFAULT_URL
-    assert seen["body"]["model"] == "jev-latest" and "best" in seen["body"]["questions"]
-
-    out = jev.parse_response(resp, branches)
-    assert out["engine"] == "jev" and out["recommended"] == "draft/scaled"
-    assert out["scores"]["draft/scaled"]["cost"] == 4.5 and out["scores"]["draft/simple"]["cost"] == 4.0  # 0-based → 1..5
-    assert out["confidence"] == 0.8 and out["probabilities"]["draft/scaled"] == 0.7
-    assert "draft/scaled" in out["rationale"] and out["raw"]["model"] == "jev-1.13.0"
-
-
-def test_call_jev_retries_with_backoff_and_retry_after():
-    calls, sleeps = [], []
-    responses = [httpx.Response(429, headers={"Retry-After": "2"}), httpx.Response(529), httpx.Response(503),
-                 httpx.Response(200, json={"answers": {}})]
-
-    def handler(request):
-        calls.append(1)
-        return responses[len(calls) - 1]
-
-    out = jev.call_jev({"x": 1}, api_key="k", transport=httpx.MockTransport(handler), sleep=sleeps.append,
-                       max_attempts=4)
-    assert out == {"answers": {}} and len(calls) == 4
-    assert sleeps[0] == 2.0  # Retry-After honoured
-    assert all(0 <= s <= 20 for s in sleeps) and len(sleeps) == 3
-
-
-def test_call_jev_gives_up_and_does_not_retry_4xx():
-    calls, sleeps = [], []
-
-    def flaky(request):
-        calls.append(1)
-        raise httpx.ConnectError("boom")
-
-    with pytest.raises(jev.JevError, match="after 3 attempts"):
-        jev.call_jev({}, api_key="k", transport=httpx.MockTransport(flaky), sleep=sleeps.append, max_attempts=3)
-    assert len(calls) == 3 and len(sleeps) == 2
-
-    calls.clear()
-
-    def unauthorized(request):
-        calls.append(1)
-        return httpx.Response(401, json={"detail": "bad key"})
-
-    with pytest.raises(jev.JevError, match="401"):
-        jev.call_jev({}, api_key="k", transport=httpx.MockTransport(unauthorized), sleep=sleeps.append)
-    assert len(calls) == 1
-    with pytest.raises(jev.JevUnavailable):
-        jev.call_jev({})
-
-
 # ---------------------------------------------------------------- fallback chain
 ALTS = {"draft/simple": simple_state(), "draft/scaled": scaled_state()}
-REQS = jev.merged_requirements(None, ALTS)
+REQS = evaluation.merged_requirements(None, ALTS)
 
 
 def test_heuristic_engine_when_nothing_configured():
-    out = jev.evaluate(REQS, ALTS)
+    out = evaluation.evaluate(REQS, ALTS)
     assert out["engine"] == "heuristic"
-    assert set(out["scores"]) == set(ALTS) and set(out["scores"]["draft/simple"]) == set(jev.CRITERIA)
+    assert set(out["scores"]) == set(ALTS) and set(out["scores"]["draft/simple"]) == set(evaluation.CRITERIA)
     s, b = out["scores"]["draft/simple"], out["scores"]["draft/scaled"]
     assert b["scalability"] > s["scalability"] and b["security"] > s["security"] and s["cost"] > b["cost"]
     assert all(1 <= v <= 5 for sc in out["scores"].values() for v in sc.values())
-    assert out["recommended"] in ALTS and "JEV_API_KEY not set" in out["notes"]
-    assert jev.evaluate(REQS, ALTS) == out  # deterministic
+    assert out["recommended"] in ALTS and "no LLM configured" in out["notes"]
+    assert evaluation.evaluate(REQS, ALTS) == out  # deterministic
     with pytest.raises(ValueError):
-        jev.evaluate(REQS, {"a": simple_state()})
+        evaluation.evaluate(REQS, {"a": simple_state()})
 
 
-def test_jev_engine_used_when_key_set(monkeypatch):
-    monkeypatch.setenv("JEV_API_KEY", "k-test")
-    monkeypatch.setattr(jev, "call_jev", lambda payload, **kw: jev_answers(list(ALTS), choice_key="A"))
-    out = jev.evaluate(REQS, ALTS)
-    assert out["engine"] == "jev" and out["recommended"] == "draft/simple" and out["notes"] == []
-
-
-def test_llm_fallback_when_jev_fails(monkeypatch):
-    monkeypatch.setenv("JEV_API_KEY", "k-test")
-
-    def failing(payload, **kw):
-        raise jev.JevError("HTTP 529")
-
+def test_llm_engine_then_heuristic_fallback(monkeypatch):
     seen = {}
 
     def fake_complete_json(system, messages, schema, **kw):
         seen["schema"], seen["group"] = schema, kw.get("group")
-        row = {c: 3 for c in jev.CRITERIA}
+        row = {c: 3 for c in evaluation.CRITERIA}
         return {"recommended": "B", "rationale": "B meets the latency NFR thanks to the cache.",
                 "scores": [{"alternative": "A", **row}, {"alternative": "B", **row, "performance": 5}]}
 
-    monkeypatch.setattr(jev, "call_jev", failing)
     monkeypatch.setattr(llm, "available", lambda *a, **k: True)
     monkeypatch.setattr(llm, "complete_json", fake_complete_json)
-    out = jev.evaluate(REQS, ALTS)
+    out = evaluation.evaluate(REQS, ALTS)
     assert out["engine"] == "llm" and out["recommended"] == "draft/scaled"
     assert out["scores"]["draft/scaled"]["performance"] == 5 and "cache" in out["rationale"]
-    assert any("Jev unavailable" in n for n in out["notes"])
+    assert out["notes"] == []
     assert seen["schema"]["properties"]["recommended"]["enum"] == ["A", "B"] and seen["group"] == "reasoning"
 
     def llm_down(*a, **kw):
         raise llm.LLMUnavailable("all tiers down")
 
     monkeypatch.setattr(llm, "complete_json", llm_down)
-    out = jev.evaluate(REQS, ALTS)
+    out = evaluation.evaluate(REQS, ALTS)
     assert out["engine"] == "heuristic" and any("LLM evaluation failed" in n for n in out["notes"])
 
 

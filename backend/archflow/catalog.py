@@ -158,6 +158,7 @@ _ENTRIES: list[tuple[str, str, str, str]] = [
     ("oss-react", "oss", "client.web", "React web app"),
     ("oss-react-native", "oss", "client.mobile", "React Native app"),
     ("oss-nginx", "oss", "edge.lb", "NGINX"),
+    ("oss-traefik", "oss", "edge.lb", "Traefik"),
     ("oss-kong", "oss", "edge.gateway", "Kong Gateway"),
     ("oss-docker", "oss", "compute.container", "Docker containers"),
     ("oss-kubernetes", "oss", "compute.kubernetes", "Kubernetes"),
@@ -260,6 +261,7 @@ _ALIASES = {
     "oss-docker": ["docker"], "oss-nginx": ["nginx"], "oss-elasticsearch": ["elasticsearch", "opensearch"],
     "oss-react": ["react"], "oss-react-native": ["react native"], "oss-kong": ["kong"], "oss-minio": ["minio"],
     "oss-rabbitmq": ["rabbitmq"], "oss-keycloak": ["keycloak"], "oss-qdrant": ["qdrant"], "oss-pgvector": ["pgvector"],
+    "oss-traefik": ["traefik"],
 }
 
 

@@ -10,6 +10,7 @@ legacy data, including ``org-default``). Later signups join the org of their inv
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import threading
 import time
@@ -18,7 +19,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from . import llm, secrets_box, users
+from . import ai_providers, llm, secrets_box, users
 from .auth import hash_secret
 from .authz import RANK, ROLES, Access, Authz
 
@@ -58,11 +59,15 @@ class InviteIn(BaseModel):
     role: str = Field("developer", pattern=ROLE_PATTERN)
 
 
-class AISettingsIn(BaseModel):
-    """Per provider: a key sets it, "" or null clears it, an omitted field is left unchanged."""
-    gemini: str | None = Field(None, max_length=500)
-    anthropic: str | None = Field(None, max_length=500)
-    openai: str | None = Field(None, max_length=500)
+class AIConfigIn(BaseModel):
+    """Model choices per group ([] = server defaults) and provider parameters (endpoints, API versions)."""
+    reasoning: list[dict[str, Any]] = Field(default_factory=list, max_length=4)
+    fast: list[dict[str, Any]] = Field(default_factory=list, max_length=4)
+    params: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class AITestIn(BaseModel):
+    group: str = Field("reasoning", pattern="^(reasoning|fast)$")
 
 
 # --------------------------------------------------------------------------- helpers
@@ -96,10 +101,16 @@ def join_with_invite(store, invite: dict[str, Any], user: dict[str, Any]) -> Non
 
 
 def ai_settings_payload(store, org_id: str) -> dict[str, Any]:
-    rows = {r["provider"]: r for r in store.list_ai_keys(org_id)}
-    return {"enabled": True, "providers": {
+    """Everything the AI settings screen needs. Key values are never returned (only the last 4 characters)."""
+    enabled = secrets_box.enabled()
+    rows = {r["provider"]: r for r in store.list_ai_keys(org_id)} if enabled else {}
+    status = llm.status(org_id)
+    return {"enabled": enabled, "providers": {
         p: {"configured": p in rows, "last4": rows[p]["last4"] if p in rows else None,
-            "updated_at": rows[p]["updated_at"] if p in rows else None} for p in secrets_box.PROVIDERS}}
+            "updated_at": rows[p]["updated_at"] if p in rows else None} for p in secrets_box.PROVIDERS},
+        "catalog": ai_providers.catalog(), "config": store.get_ai_config(org_id) or {"reasoning": [], "fast": [], "params": {}},
+        "defaults": {g: llm.default_chain(g) for g in ai_providers.GROUPS}, "effective": status["groups"],
+        "available": status["available"]}
 
 
 def require_secrets() -> None:
@@ -278,14 +289,19 @@ def register_routes(app: FastAPI, store: Any, authz: Authz) -> None:
     # ---- org AI provider keys (bring your own key) ----
     @app.get("/api/orgs/{org_id}/ai-settings")
     def get_ai_settings(a: Access = Depends(authz.org("admin"))):
-        require_secrets()
         return ai_settings_payload(store, a.org_id)
 
     @app.put("/api/orgs/{org_id}/ai-settings")
-    def put_ai_settings(body: AISettingsIn, a: Access = Depends(authz.org("admin"))):
+    def put_ai_settings(body: dict[str, str | None], a: Access = Depends(authz.org("admin"))):
+        """Per provider: a key sets it, "" or null clears it, an omitted provider is left unchanged."""
         require_secrets()
-        for provider in body.model_fields_set:
-            value = (getattr(body, provider) or "").strip()
+        unknown = [p for p in body if p not in secrets_box.PROVIDERS]
+        if unknown:
+            raise HTTPException(422, f"Unknown provider: {', '.join(unknown)}")
+        for provider, raw in body.items():
+            value = (raw or "").strip()
+            if len(value) > 500:
+                raise HTTPException(422, f"The {provider} key is too long.")
             if not value:
                 store.delete_ai_key(a.org_id, provider)
                 continue
@@ -295,3 +311,19 @@ def register_routes(app: FastAPI, store: Any, authz: Authz) -> None:
             store.set_ai_key(a.org_id, provider, ciphertext, value[-4:], a.user["id"])
         llm.invalidate_org(a.org_id)
         return ai_settings_payload(store, a.org_id)
+
+    @app.put("/api/orgs/{org_id}/ai-config")
+    def put_ai_config(body: AIConfigIn, a: Access = Depends(authz.org("admin"))):
+        """Which models the org uses for each group (in fallback order); empty = the server's defaults."""
+        try:
+            config = ai_providers.normalize_config(body.model_dump())
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        store.set_ai_config(a.org_id, config, a.user["id"])
+        llm.invalidate_org(a.org_id)
+        return ai_settings_payload(store, a.org_id)
+
+    @app.post("/api/orgs/{org_id}/ai-test")
+    async def test_ai(body: AITestIn, a: Access = Depends(authz.org("admin"))):
+        """Make one tiny real call with the org's current settings and report the result."""
+        return await asyncio.to_thread(llm.test_connection, a.org_id, body.group)

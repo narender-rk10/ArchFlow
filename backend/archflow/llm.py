@@ -6,6 +6,7 @@ Public API (synchronous; callers wrap these in ``asyncio.to_thread``):
     status() -> dict
     complete_json(system, messages, schema, *, group="reasoning", org_id=None, max_tokens=8000) -> dict
     complete_tools(system, messages, tools, *, group="reasoning", org_id=None, max_tokens=8000) -> (text, calls)
+    stream_text(system, messages, *, group="reasoning", org_id=None, max_tokens=8000) -> Iterator[str]
     LLMUnavailable, LLMRefused
 
 Resilience is layered:
@@ -53,13 +54,19 @@ import re
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterator, Protocol
+
+from . import ai_providers
 
 log = logging.getLogger("archflow.llm")
 
 __all__ = ["LLMUnavailable", "LLMRefused", "LLMInvalidOutput", "available", "status",
-           "complete_json", "complete_tools", "set_org_key_resolver", "invalidate_org"]
+           "complete_json", "complete_tools", "stream_text", "set_org_key_resolver", "invalidate_org",
+           "LLMBudgetExceeded", "usage_scope", "set_usage_scope", "set_usage_hooks", "budget_block", "estimate_cost",
+           "set_org_config_resolver", "test_connection"]
 
 
 # Thinking models (Gemini 3.x, Claude, GPT-5) spend output tokens on reasoning before answering; a small
@@ -150,6 +157,11 @@ def _keys(provider: str, org_keys: dict[str, str] | None = None) -> list[str | N
     if provider in _KEY_ENVS:
         key = next((os.environ[e].strip() for e in _KEY_ENVS[provider] if os.environ.get(e, "").strip()), "")
         return [key] if key else []
+    if provider in ai_providers.PROVIDERS:  # openrouter, mistral, groq, azure, openai_compatible, ...
+        key = (org_keys or {}).get(provider) or ai_providers.env_key(provider)
+        if provider == "openai_compatible":
+            return [key or ai_providers.NO_KEY]
+        return [key] if key else []
     return [None]
 
 
@@ -176,10 +188,28 @@ class Tier:
     name: str            # router model_name, e.g. "reasoning" or "reasoning#2"
     model: str           # LiteLLM model id, e.g. "gemini/gemini-3.1-pro-preview"
     keys: tuple          # API keys (never logged)
+    params: tuple = ()   # extra LiteLLM params, e.g. (("api_base", "https://..."), ("api_version", "..."))
+    provider: str = ""   # ArchFlow provider id when chosen in an org's AI config
 
 
-def _tiers(group: str, org_keys: dict[str, str] | None = None) -> list[Tier]:
+def _tiers(group: str, org_keys: dict[str, str] | None = None, org_cfg: dict[str, Any] | None = None) -> list[Tier]:
+    """The group's provider chain: the org's own (AI settings) when it chose models, else the server defaults.
+    Tiers without usable credentials are left out."""
     tiers: list[Tier] = []
+    chain = (org_cfg or {}).get(group) or []
+    if chain:
+        for i, entry in enumerate(chain):
+            provider = entry["provider"]
+            if provider not in ai_providers.PROVIDERS:
+                continue
+            params = (org_cfg or {}).get("params", {}).get(provider, {})
+            if any(not params.get(r) for r in ai_providers.PROVIDERS[provider].get("required_params", [])):
+                continue
+            keys = _keys(provider, org_keys)
+            if keys:
+                tiers.append(Tier(group if i == 0 else f"{group}#{i + 1}", ai_providers.litellm_model(provider, entry["model"]),
+                                  tuple(keys), tuple(sorted(params.items())), provider))
+        return tiers
     for i, model in enumerate(_group_models(group)):
         keys = _keys(_provider(model), org_keys)
         if keys:
@@ -206,6 +236,27 @@ def set_org_key_resolver(resolver: OrgKeyResolver | None) -> None:
     _org_key_resolver = resolver
 
 
+OrgConfigResolver = Callable[[str], "dict[str, Any]"]
+_org_config_resolver: OrgConfigResolver | None = None
+
+
+def set_org_config_resolver(resolver: OrgConfigResolver | None) -> None:
+    """Register ``resolver(org_id) -> {"reasoning": [{provider, model}], "fast": [...], "params": {...}}`` (the
+    org's model choices from AI settings, see ai_providers.normalize_config). Empty chains mean server defaults."""
+    global _org_config_resolver
+    _org_config_resolver = resolver
+
+
+def _org_config(org_id: str | None) -> dict[str, Any]:
+    if not org_id or _org_config_resolver is None:
+        return {}
+    try:
+        return _org_config_resolver(org_id) or {}
+    except Exception:  # noqa: BLE001 - a broken config store must not take AI down
+        log.exception("could not load the AI config of org %s; using server defaults", org_id)
+        return {}
+
+
 def _org_keys(org_id: str | None) -> dict[str, str]:
     if not org_id or _org_key_resolver is None:
         return {}
@@ -217,17 +268,124 @@ def _org_keys(org_id: str | None) -> dict[str, str]:
 
 
 def available(org_id: str | None = None) -> bool:
+    """True when a provider is configured (environment or the org's own keys) and the org's monthly AI budget is
+    not used up, so callers fall back to their offline paths when it is."""
     if _mode() == "offline":
         return False
-    org_keys = _org_keys(org_id)
-    return any(_tiers(g, org_keys) for g in GROUPS)
+    org_keys, org_cfg = _org_keys(org_id), _org_config(org_id)
+    if not any(_tiers(g, org_keys, org_cfg) for g in GROUPS):
+        return False
+    return budget_block(org_id) is None
 
 
-def status() -> dict:
+# --------------------------------------------------------------------------- usage, cost and budgets
+class LLMBudgetExceeded(LLMUnavailable):
+    """The organization's monthly AI budget is used up."""
+
+
+# The request's attribution, set by the API per request (main.py middleware): which project and feature an LLM
+# call is made for. asyncio.to_thread copies context, so worker threads see it too.
+_usage_scope: ContextVar[dict[str, str]] = ContextVar("archflow_llm_usage_scope", default={})
+
+
+@contextmanager
+def usage_scope(**fields: str) -> Iterator[None]:
+    token = _usage_scope.set({**_usage_scope.get(), **{k: v for k, v in fields.items() if v}})
+    try:
+        yield
+    finally:
+        _usage_scope.reset(token)
+
+
+def set_usage_scope(**fields: str) -> None:
+    """Set the attribution for the rest of the current context (one request)."""
+    _usage_scope.set({**_usage_scope.get(), **{k: v for k, v in fields.items() if v}})
+
+
+UsageRecorder = Callable[[dict[str, Any]], None]
+BudgetCheck = Callable[[str], "str | None"]  # org_id -> reason it is blocked, or None
+_usage_recorder: UsageRecorder | None = None
+_budget_check: BudgetCheck | None = None
+
+# USD per million (input, output) tokens, used when LiteLLM does not know a model's price. Keys are matched as
+# substrings of the model name, longest first. Override or extend with ARCHFLOW_LLM_PRICES='{"model": [in, out]}'.
+DEFAULT_PRICES: dict[str, tuple[float, float]] = {
+    "gemini-3.8-flash": (0.30, 2.50), "gemini-3.1-pro": (2.00, 12.00), "flash": (0.30, 2.50), "gemini": (1.25, 10.00),
+    "claude-opus": (15.00, 75.00), "claude-sonnet": (3.00, 15.00), "claude-haiku": (1.00, 5.00), "claude": (3.00, 15.00),
+    "gpt-5-mini": (0.25, 2.00), "gpt-5": (1.25, 10.00), "gpt-4o-mini": (0.15, 0.60), "gpt-4o": (2.50, 10.00),
+}
+
+
+def set_usage_hooks(recorder: UsageRecorder | None, budget_check: BudgetCheck | None) -> None:
+    """``recorder(event)`` stores one call's usage; ``budget_check(org_id)`` returns why the org may not call
+    models right now (monthly budget used up), or None. Wired to the store in main.create_app."""
+    global _usage_recorder, _budget_check
+    _usage_recorder, _budget_check = recorder, budget_check
+
+
+def budget_block(org_id: str | None) -> str | None:
+    if not org_id or _budget_check is None:
+        return None
+    try:
+        return _budget_check(org_id)
+    except Exception:  # noqa: BLE001 - a broken budget store must not take AI down
+        log.exception("budget check failed for org %s", org_id)
+        return None
+
+
+def _prices() -> dict[str, tuple[float, float]]:
+    prices = dict(DEFAULT_PRICES)
+    raw = os.environ.get("ARCHFLOW_LLM_PRICES", "")
+    if raw:
+        try:
+            prices.update({k: (float(v[0]), float(v[1])) for k, v in json.loads(raw).items()})
+        except (ValueError, TypeError, IndexError):
+            log.warning("ARCHFLOW_LLM_PRICES is not valid JSON {model: [input, output]}; using defaults")
+    return prices
+
+
+def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int, resp: Any = None) -> tuple[float, str]:
+    """(USD, source): LiteLLM's price list when it knows the model, else ARCHFLOW_LLM_PRICES / the defaults."""
+    if resp is not None:
+        try:
+            import litellm
+
+            cost = float(litellm.completion_cost(completion_response=resp) or 0)
+            if cost > 0:
+                return cost, "litellm"
+        except Exception:  # noqa: BLE001 - unknown model or response shape
+            pass
+    name = (model or "").lower()
+    prices = _prices()
+    key = next((k for k in sorted(prices, key=len, reverse=True) if k.lower() in name), None)
+    if key is None:
+        return 0.0, "unknown"
+    pin, pout = prices[key]
+    return (prompt_tokens * pin + completion_tokens * pout) / 1_000_000, "table"
+
+
+def _record(org_id: str | None, group: str, model: str, prompt_tokens: int, completion_tokens: int,
+            latency_ms: float, resp: Any = None, estimated: bool = False) -> None:
+    if _usage_recorder is None:
+        return
+    cost, source = estimate_cost(model, prompt_tokens, completion_tokens, resp)
+    scope = _usage_scope.get()
+    try:
+        _usage_recorder({"org_id": org_id or "", "project_id": scope.get("project_id", ""),
+                         "feature": scope.get("feature", "other"), "group": group, "model": model,
+                         "prompt_tokens": int(prompt_tokens or 0), "completion_tokens": int(completion_tokens or 0),
+                         "cost_usd": round(cost, 6), "cost_source": "estimate" if estimated else source,
+                         "latency_ms": int(latency_ms)})
+    except Exception:  # noqa: BLE001 - never fail a model call because usage could not be stored
+        log.exception("recording LLM usage failed")
+
+
+def status(org_id: str | None = None) -> dict:
+    org_keys, org_cfg = _org_keys(org_id), _org_config(org_id)
     return {
         "mode": _mode(),
-        "groups": {g: [t.model for t in _tiers(g)] for g in GROUPS},
-        "available": available(),
+        "groups": {g: [t.model for t in _tiers(g, org_keys, org_cfg)] for g in GROUPS},
+        "available": available(org_id),
         "circuits": {m: b.state() for m, b in list(_breakers.items())},
     }
 
@@ -243,15 +401,16 @@ _org_routers: "OrderedDict[str, tuple[str, Any]]" = OrderedDict()
 MAX_ORG_ROUTERS = 256
 
 
-def _router_config(org_keys: dict[str, str] | None = None) -> tuple[list[dict], list[dict]]:
+def _router_config(org_keys: dict[str, str] | None = None,
+                   org_cfg: dict[str, Any] | None = None) -> tuple[list[dict], list[dict]]:
     model_list: list[dict] = []
     fallbacks: list[dict] = []
     timeout = _env_float("ARCHFLOW_LLM_TIMEOUT", 120)
     for g in GROUPS:
-        tiers = _tiers(g, org_keys)
+        tiers = _tiers(g, org_keys, org_cfg)
         for t in tiers:
             for i, key in enumerate(t.keys):
-                params: dict[str, Any] = {"model": t.model, "timeout": timeout}
+                params: dict[str, Any] = {"model": t.model, "timeout": timeout, **dict(t.params)}
                 if key:
                     params["api_key"] = key
                 model_list.append({"model_name": t.name, "litellm_params": params,
@@ -284,13 +443,15 @@ def _build_router(model_list: list[dict], fallbacks: list[dict]) -> Any:
     )
 
 
-def _get_router(org_keys: dict[str, str] | None = None, org_id: str | None = None):
-    """The shared LiteLLM Router (rebuilt when env config changes), or an org's own router when it has keys."""
+def _get_router(org_keys: dict[str, str] | None = None, org_id: str | None = None,
+                org_cfg: dict[str, Any] | None = None):
+    """The shared LiteLLM Router (rebuilt when env config changes), or an org's own router when it has its own
+    keys or model choices."""
     global _router, _router_sig
-    model_list, fallbacks = _router_config(org_keys)
+    model_list, fallbacks = _router_config(org_keys, org_cfg)
     sig = hashlib.sha256(json.dumps([model_list, fallbacks], sort_keys=True).encode()).hexdigest()
     with _router_lock:
-        if org_keys and org_id:
+        if (org_keys or _has_chains(org_cfg)) and org_id:
             cached = _org_routers.get(org_id)
             if cached and cached[0] == sig:
                 _org_routers.move_to_end(org_id)
@@ -300,7 +461,8 @@ def _get_router(org_keys: dict[str, str] | None = None, org_id: str | None = Non
             _org_routers.move_to_end(org_id)
             while len(_org_routers) > MAX_ORG_ROUTERS:
                 _org_routers.popitem(last=False)
-            log.info("LLM router configured for org %s (own keys for %s)", org_id, sorted(org_keys))
+            log.info("LLM router configured for org %s (own keys for %s; models %s)", org_id, sorted(org_keys or {}),
+                     {g: [t.model for t in _tiers(g, org_keys, org_cfg)] for g in GROUPS})
             return router
         if _router is not None and sig == _router_sig:
             return _router
@@ -308,6 +470,10 @@ def _get_router(org_keys: dict[str, str] | None = None, org_id: str | None = Non
         _router_sig = sig
         log.info("LLM router configured: %s", {g: [t.model for t in _tiers(g)] for g in GROUPS})
         return _router
+
+
+def _has_chains(org_cfg: dict[str, Any] | None) -> bool:
+    return bool(org_cfg) and any(org_cfg.get(g) for g in GROUPS)
 
 
 def invalidate_org(org_id: str) -> None:
@@ -501,14 +667,18 @@ def _dispatch(group: str, org_id: str | None, **kwargs) -> Any:
     """Call the router tier by tier with backoff, breaker and explicit re-dispatch. Returns a ModelResponse."""
     if _mode() == "offline":
         raise LLMUnavailable("AI is disabled (ARCHFLOW_AI=offline)")
-    org_keys = _org_keys(org_id)
-    tiers = _tiers(group, org_keys)
+    org_keys, org_cfg = _org_keys(org_id), _org_config(org_id)
+    tiers = _tiers(group, org_keys, org_cfg)
     if not tiers:
         raise LLMUnavailable("No LLM provider configured (set GEMINI_API_KEY, ANTHROPIC_API_KEY or OPENAI_API_KEY, "
                              "or add your organization's own key in AI settings)")
+    blocked = budget_block(org_id)
+    if blocked:
+        raise LLMBudgetExceeded(blocked)
     _acquire_org(org_id)
 
-    router = _get_router(org_keys, org_id) if org_keys else _get_router()
+    own = bool(org_keys) or _has_chains(org_cfg)
+    router = _get_router(org_keys, org_id, org_cfg) if own else _get_router()
     max_attempts = max(1, _env_int("ARCHFLOW_LLM_MAX_ATTEMPTS", 5))
     base, cap = _env_float("ARCHFLOW_LLM_BACKOFF_BASE", 0.5), _env_float("ARCHFLOW_LLM_BACKOFF_CAP", 20.0)
     deadline = time.monotonic() + _env_float("ARCHFLOW_LLM_DEADLINE", 120.0)
@@ -519,7 +689,7 @@ def _dispatch(group: str, org_id: str | None, **kwargs) -> Any:
 
     for tier_idx, tier in enumerate(tiers):
         # An org's own key gets its own breaker: one org's bad key must not trip the shared provider circuit.
-        breaker = _breaker(tier.model + (f"@{org_id}" if org_keys.get(_provider(tier.model)) else ""))
+        breaker = _breaker(tier.model + (f"@{org_id}" if tier.provider or org_keys.get(_provider(tier.model)) else ""))
         if not breaker.allow():
             log.info("llm skip model=%s group=%s reason=circuit_open", tier.model, group)
             errors.append(f"{tier.model}: circuit open")
@@ -565,6 +735,14 @@ def _dispatch(group: str, org_id: str | None, **kwargs) -> Any:
                      group, tier.model, getattr(resp, "model", None), org_id, (time.monotonic() - t0) * 1000,
                      (time.monotonic() - started) * 1000, total_calls, tier_idx,
                      getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None))
+            if kwargs.get("stream"):
+                try:  # stream_text records usage once the stream is read
+                    setattr(resp, "_archflow_model", tier.model)
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                _record(org_id, group, tier.model, getattr(usage, "prompt_tokens", 0) or 0,
+                        getattr(usage, "completion_tokens", 0) or 0, (time.monotonic() - t0) * 1000, resp)
             return resp
         if time.monotonic() > deadline:
             break
@@ -682,6 +860,56 @@ def complete_json(system: str, messages: list[dict], schema: dict, *, group: str
             ]
 
 
+def stream_text(system: str, messages: list[dict], *, group: str = "reasoning", org_id: str | None = None,
+                max_tokens: int = 8000) -> Iterator[str]:
+    """Yield a plain-text answer in chunks as the model writes it.
+
+    Retries and provider fallback apply until a provider accepts the request. Some providers only report a
+    rate limit once the stream is read; if the stream fails before any text arrived, the answer is fetched
+    again without streaming (full retry/fallback path). A failure after text was sent raises LLMUnavailable.
+    """
+    resp = _dispatch(group, org_id, messages=_msgs(system, messages),
+                     max_tokens=max(max_tokens, MIN_OUTPUT_TOKENS), stream=True)
+    if _get(resp, "choices") is not None:  # the provider answered in one piece
+        msg, finish = _message(resp)
+        text = _get(msg, "content") or ""
+        _check_refusal(finish, text)
+        if text:
+            yield text
+        return
+    sent = False
+    parts: list[str] = []
+    t0 = time.monotonic()
+    try:
+        for chunk in resp:
+            choices = _get(chunk, "choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            _check_refusal(_get(choice, "finish_reason"), None)
+            text = _get(_get(choice, "delta"), "content") if _get(choice, "delta") is not None else None
+            if text:
+                sent = True
+                parts.append(text)
+                yield text
+        # Streams carry no usage here: estimate ~4 characters per token from the prompt and the answer.
+        prompt_chars = len(system) + sum(len(str(m.get("content", ""))) for m in messages)
+        _record(org_id, group, getattr(resp, "_archflow_model", primary_model(group)), prompt_chars // 4,
+                len("".join(parts)) // 4, (time.monotonic() - t0) * 1000, estimated=True)
+    except LLMRefused:
+        raise
+    except Exception as exc:  # noqa: BLE001 - classified below
+        if _classify(exc) == "refused":
+            raise LLMRefused("The model declined this request (content policy)") from exc
+        if sent:
+            log.warning("llm stream interrupted group=%s org=%s type=%s", group, org_id, type(exc).__name__)
+            raise LLMUnavailable(f"The answer was interrupted ({type(exc).__name__}). Try again.") from exc
+        log.info("llm stream failed before any text (%s); retrying without streaming", type(exc).__name__)
+        text, _ = complete_tools(system, messages, [], group=group, org_id=org_id, max_tokens=max_tokens)
+        if text:
+            yield text
+
+
 def complete_tools(system: str, messages: list[dict], tools: list[dict], *, group: str = "reasoning",
                    org_id: str | None = None, max_tokens: int = 8000) -> tuple[str, list[dict]]:
     """Return (assistant_text, [{"name": str, "arguments": dict}, ...]) for OpenAI-format ``tools``."""
@@ -713,3 +941,26 @@ def complete_tools(system: str, messages: list[dict], tools: list[dict], *, grou
                 continue
         calls.append({"name": name, "arguments": args})
     return (text.strip() if isinstance(text, str) else str(text)), calls
+
+
+def test_connection(org_id: str | None, group: str = "reasoning") -> dict[str, Any]:
+    """One tiny real call through the org's chain for ``group``: {ok, model, latency_ms, reply | error}."""
+    tiers = _tiers(group, _org_keys(org_id), _org_config(org_id))
+    if not tiers:
+        return {"ok": False, "group": group, "error": "No provider with a key is configured for this group."}
+    t0 = time.monotonic()
+    try:
+        with usage_scope(feature="settings"):
+            resp = _dispatch(group, org_id, messages=[{"role": "user", "content": "Reply with the single word: OK"}],
+                             max_tokens=max(64, MIN_OUTPUT_TOKENS))
+        msg, _ = _message(resp)
+        return {"ok": True, "group": group, "model": getattr(resp, "model", None) or tiers[0].model,
+                "chain": [t.model for t in tiers], "latency_ms": int((time.monotonic() - t0) * 1000),
+                "reply": str(_get(msg, "content") or "")[:80]}
+    except (LLMUnavailable, LLMRefused) as exc:
+        return {"ok": False, "group": group, "chain": [t.model for t in tiers], "error": str(exc)[:500]}
+
+
+def default_chain(group: str) -> list[str]:
+    """The server's default model chain for a group (environment / built-in), before checking keys."""
+    return _group_models(group)

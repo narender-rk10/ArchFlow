@@ -23,8 +23,8 @@ Normalized graph (``format: archflow.codegraph/v1``)::
      symbols: [{id, name, file, line, kind (file|class|function|method|symbol), community}],
      edges:   [{source, target, relation, confidence}],          # both ends are symbols
      communities: [{id, size, label, paths: [top dirs]}],
-     detections: {languages, manifests, compose_services, dockerfiles, k8s, terraform, infrastructure,
-                  entry_points, libraries},
+     detections: {languages, manifests, compose_services (merged across compose files), dockerfiles, k8s,
+                  terraform, proxy_routes, infrastructure, frameworks, entry_points},
      analysis: {god_nodes: [{id, name, degree}], import_cycles: [[file, ...]]},
      stats: {files, symbols, edges, communities}}
 """

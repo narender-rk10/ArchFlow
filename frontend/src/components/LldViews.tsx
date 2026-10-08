@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { ComponentViews } from "../types";
+import { MermaidDiagram } from "./MermaidDiagram";
 
 type ViewTab = "api" | "data" | "sequence";
 
@@ -20,6 +21,7 @@ export function LldViews({ pid, branch, nodeId, rev }: Props) {
   const [tab, setTab] = useState<ViewTab>("api");
   const [views, setViews] = useState<ComponentViews | null>(null);
   const [error, setError] = useState("");
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => { setViews(null); }, [nodeId]);
   useEffect(() => {
@@ -54,8 +56,27 @@ export function LldViews({ pid, branch, nodeId, rev }: Props) {
         </ul>
       ) : <p className="muted small">No endpoints yet. Open the internals and generate a low-level design.</p>)}
       {views && tab === "data" && !views.er.mermaid && <p className="muted small">No tables yet.</p>}
-      {views && source && tab !== "api" && <pre className="view-src mono">{source}</pre>}
-      {views && tab !== "api" && source && <p className="muted tiny">Mermaid source: paste into any Mermaid renderer or Markdown.</p>}
+      {views && source && tab !== "api" && (
+        <>
+          <MermaidDiagram source={source} label={tab === "data" ? `Data model of ${views.name}` : `Request flow of ${views.name}`} />
+          {tab === "sequence" && (
+            <div className="row gap">
+              <button className="small" disabled={exporting} title="Save an interactive diagram you can share (HTML)"
+                onClick={async () => {
+                  setExporting(true);
+                  setError("");
+                  try { await api.exportSequence(pid, branch, nodeId); }
+                  catch (e) { setError((e as Error).message); }
+                  finally { setExporting(false); }
+                }}>{exporting ? "Exporting…" : "⤓ Interactive diagram"}</button>
+            </div>
+          )}
+          <details className="view-source">
+            <summary className="muted tiny">Mermaid source (paste into any Mermaid renderer or Markdown)</summary>
+            <pre className="view-src mono">{source}</pre>
+          </details>
+        </>
+      )}
     </div>
   );
 }

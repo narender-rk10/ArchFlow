@@ -138,12 +138,19 @@ the ones they connect to and avoid overlapping existing positions.
 - When the user describes a product idea, act as a requirements interviewer: add well-formed requirements \
 (actors, measurable acceptance criteria, NFRs with numbers), sketch an initial architecture, and use \
 ask_clarifying_questions for the most important open questions (at most 4).
+- Project memory lists facts the team has settled (cloud, compliance, budget, preferences); respect them.
+- The recent conversation tells you what "it", "that" or "the same" refer to. Act only on the current request.
 - If the request is ambiguous or impossible, change nothing and ask a clarifying question instead."""
 
 ASK_SYSTEM = """You are ArchFlow's project assistant. Answer questions about the user's system using only the \
 structured project data provided (requirements, architecture components and connections, version history \
 and activity log). Cite requirement IDs and component names. When you review an architecture, be specific \
-about failure modes, bottlenecks, security and missing pieces, and suggest concrete changes. Be concise."""
+about failure modes, bottlenecks, security and missing pieces, and suggest concrete changes. Be concise.
+
+This is a conversation: use earlier turns (and the summary of older ones) to resolve follow-up questions. \
+Project memory holds facts the team has settled; treat them as true unless the project data contradicts them, \
+and say so when it does. Write in Markdown: short paragraphs, bullet lists, **bold** for key terms, `code` for \
+identifiers. Refer to components by their exact names."""
 
 
 def _tool_to_op(name: str, args: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
@@ -194,9 +201,10 @@ class AIUnavailable(RuntimeError):
     pass
 
 
-def _user_prompt(state: ProjectState, text: str, selection: list[str]) -> str:
+def _user_prompt(state: ProjectState, text: str, selection: list[str], context: str = "") -> str:
     selected = [f"{state.nodes[s].name} ({s})" for s in selection if s in state.nodes]
     return (f"<project_state>\n{_state_for_prompt(state)}\n</project_state>\n\n"
+            + (f"{context}\n\n" if context else "")
             + (f"Currently selected on the canvas: {', '.join(selected)}\n\n" if selected else "")
             + f"Request: {text}")
 
@@ -204,10 +212,14 @@ def _user_prompt(state: ProjectState, text: str, selection: list[str]) -> str:
 MAX_ROUNDS = 3
 
 
-def llm_command(state: ProjectState, text: str, selection: list[str], org_id: str | None = None) -> CommandResult:
+def llm_command(state: ProjectState, text: str, selection: list[str], org_id: str | None = None,
+                context: str = "") -> CommandResult:
     """Turn a request into operations. Thinking models sometimes return only the first step(s) of a plan,
     so each batch is applied to a working copy and the model sees the updated architecture (and any errors)
-    until it stops calling tools — at most MAX_ROUNDS model calls."""
+    until it stops calling tools — at most MAX_ROUNDS model calls.
+
+    ``context`` is the project memory and recent conversation (conversations.command_context), so a follow-up
+    such as "now put a cache in front of it" can refer to earlier turns."""
     from .ops import ConflictError, OpError, apply_ops
 
     result = CommandResult(engine="llm")
@@ -215,11 +227,13 @@ def llm_command(state: ProjectState, text: str, selection: list[str], org_id: st
     done: list[str] = []
     feedback = ""
     for _ in range(MAX_ROUNDS):
-        prompt = _user_prompt(working, text, selection)
+        prompt = _user_prompt(working, text, selection, context)
         if done or feedback:
             prompt += ("\n\nChanges already applied for this request (the project state above includes them):\n"
                        + "\n".join(f"- {d}" for d in done)
                        + (f"\n\nThe last batch was rejected: {feedback}. Fix it." if feedback else "")
+                       + ("\n\nQuestions already asked (do not ask them again):\n"
+                          + "\n".join(f"- {q}" for q in result.questions) if result.questions else "")
                        + "\n\nIf anything in the request is still missing, call the tools for the remaining changes only. "
                          "Otherwise call no tools and reply with one or two sentences describing everything you changed.")
         try:
@@ -252,7 +266,26 @@ def llm_command(state: ProjectState, text: str, selection: list[str], org_id: st
         done += summary
     if not result.explanation and done:
         result.explanation = "Changed: " + "; ".join(done) + "."
+    result.questions = dedupe_questions(result.questions)
     return result
+
+
+def dedupe_questions(questions: list[str]) -> list[str]:
+    """Drop repeated questions, including rewordings from a later round: at least 35% of their longer words, and
+    at least four of them, in common (unrelated questions share well under 10%)."""
+    def words(q: str) -> set[str]:
+        return {w for w in re.findall(r"[a-z0-9]+", q.lower()) if len(w) > 3}
+
+    def same(a: set[str], b: set[str]) -> bool:
+        common = a & b
+        return bool(a and b) and len(common) >= 4 and len(common) / len(a | b) >= 0.35 or (bool(a) and a == b)
+
+    kept: list[tuple[str, set[str]]] = []
+    for q in questions:
+        w = words(q)
+        if q.strip() and not any(same(w, k) for _, k in kept):
+            kept.append((q.strip(), w))
+    return [q for q, _ in kept]
 
 
 claude_command = llm_command  # backwards-compatible name
@@ -272,11 +305,11 @@ def claude_ask(context: str, question: str, org_id: str | None = None) -> str:
 
 
 def run_command(state: ProjectState, text: str, selection: list[str] | None = None,
-                org_id: str | None = None) -> CommandResult:
+                org_id: str | None = None, context: str = "") -> CommandResult:
     selection = selection or []
     if MODE != "offline":
         try:
-            return llm_command(state, text, selection, org_id)
+            return llm_command(state, text, selection, org_id, context)
         except AIUnavailable as exc:
             if MODE in ("claude", "llm"):
                 raise

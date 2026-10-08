@@ -53,8 +53,10 @@ INFRA: dict[str, tuple[str, str, str, str, str]] = {
     "elasticsearch": ("Elasticsearch", "database", "database", "oss-elasticsearch", "Elasticsearch / OpenSearch"),
     "vector": ("Vector database", "database", "database", "", "Vector database"),
     "redis": ("Redis", "cache", "cache", "oss-redis", "Redis"),
+    "memcached": ("Memcached", "cache", "cache", "", "Memcached"),
     "kafka": ("Kafka", "queue", "queue", "oss-kafka", "Apache Kafka"),
     "rabbitmq": ("RabbitMQ", "queue", "queue", "oss-rabbitmq", "RabbitMQ"),
+    "nats": ("NATS", "queue", "queue", "oss-nats", "NATS"),
     "sqs": ("Amazon SQS", "queue", "queue", "aws-sqs", "Amazon SQS"),
     "celery": ("Task queue", "queue", "queue", "", "Celery"),
     "s3": ("Object storage", "storage", "storage", "aws-s3", "Amazon S3"),
@@ -72,8 +74,8 @@ _PY_LIBS: list[tuple[str, str]] = [
     ("elasticsearch", "elasticsearch"), ("opensearchpy", "elasticsearch"),
     ("qdrant_client", "vector"), ("pinecone", "vector"), ("chromadb", "vector"), ("weaviate", "vector"),
     ("pgvector", "vector"),
-    ("redis", "redis"), ("aioredis", "redis"), ("valkey", "redis"),
-    ("kafka", "kafka"), ("confluent_kafka", "kafka"), ("aiokafka", "kafka"),
+    ("redis", "redis"), ("aioredis", "redis"), ("valkey", "redis"), ("pymemcache", "memcached"),
+    ("nats", "nats"), ("kafka", "kafka"), ("confluent_kafka", "kafka"), ("aiokafka", "kafka"),
     ("pika", "rabbitmq"), ("aio_pika", "rabbitmq"), ("amqp", "rabbitmq"), ("aiormq", "rabbitmq"),
     ("celery", "celery"), ("boto3", "s3"), ("aioboto3", "s3"), ("s3fs", "s3"), ("minio", "s3"),
     ("openai", "llm:OpenAI"), ("anthropic", "llm:Anthropic"), ("litellm", "llm:LiteLLM"),
@@ -117,13 +119,95 @@ _OTHER_LIBS: list[tuple[str, str]] = [  # Go / Java / Kotlin import prefixes
 
 LLM_CATALOG = {"OpenAI": "saas-openai", "Anthropic": "saas-anthropic", "Gemini": "saas-gemini", "LiteLLM": "oss-litellm"}
 
-# docker-compose / Kubernetes images → infra key
-_IMAGE_INFRA = [
-    (r"(^|/)(postgres|postgis|pgvector|timescaledb)", "postgresql"), (r"(^|/)(mysql|mariadb)", "mysql"),
-    (r"(^|/)mongo", "mongodb"), (r"(^|/)(redis|valkey|keydb)", "redis"), (r"(^|/)rabbitmq", "rabbitmq"),
-    (r"kafka|redpanda", "kafka"), (r"(^|/)(elasticsearch|opensearch)", "elasticsearch"), (r"(^|/)minio", "s3"),
-    (r"(^|/)qdrant|weaviate|chroma", "vector"),
+# ---- container images ------------------------------------------------------------------------------------
+# Dev/test tooling that is never part of the runtime architecture (DB admin UIs, fake SMTP servers, browser
+# test runners, cloud emulators). Matched against image words and compose service names.
+DEV_TOOL_WORDS = ("adminer", "pgadmin", "pgadmin4", "phpmyadmin", "mongo-express", "redis-commander", "redisinsight",
+                  "mailpit", "mailhog", "maildev", "smtp4dev", "mailcatcher", "playwright", "selenium", "cypress",
+                  "standalone-chrome", "standalone-firefox", "localstack", "wiremock", "kafka-ui", "kafdrop",
+                  "akhq", "dbgate", "cloudbeaver")
+# (image words, node type, display name, catalog id, infra key or None). First match wins; datastores carry an
+# infra key so they merge with the same infrastructure detected from client libraries.
+IMAGE_TYPES: list[tuple[tuple[str, ...], str, str, str, str | None]] = [
+    (("timescaledb",), "database", "TimescaleDB", "oss-postgresql", "postgresql"),
+    (("postgres", "postgresql", "postgis", "pgvector"), "database", "PostgreSQL", "oss-postgresql", "postgresql"),
+    (("mariadb",), "database", "MariaDB", "oss-mysql", "mysql"),
+    (("mysql", "percona"), "database", "MySQL", "oss-mysql", "mysql"),
+    (("mongo", "mongodb"), "database", "MongoDB", "oss-mongodb", "mongodb"),
+    (("elasticsearch",), "database", "Elasticsearch", "oss-elasticsearch", "elasticsearch"),
+    (("opensearch",), "database", "OpenSearch", "oss-elasticsearch", "elasticsearch"),
+    (("qdrant",), "database", "Qdrant", "oss-qdrant", "vector"),
+    (("weaviate",), "database", "Weaviate", "", "vector"),
+    (("chroma", "chromadb"), "database", "Chroma", "", "vector"),
+    (("valkey",), "cache", "Valkey", "oss-redis", "redis"),
+    (("redis", "redis-stack", "redis-stack-server", "keydb"), "cache", "Redis", "oss-redis", "redis"),
+    (("memcached",), "cache", "Memcached", "", "memcached"),
+    (("rabbitmq",), "queue", "RabbitMQ", "oss-rabbitmq", "rabbitmq"),
+    (("redpanda",), "queue", "Redpanda", "oss-kafka", "kafka"),
+    (("kafka", "cp-kafka"), "queue", "Kafka", "oss-kafka", "kafka"),
+    (("nats",), "queue", "NATS", "oss-nats", "nats"),
+    (("minio",), "storage", "MinIO", "oss-minio", "s3"),
+    (("traefik",), "gateway", "Traefik", "oss-traefik", None),
+    (("nginx", "nginx-unprivileged", "openresty"), "gateway", "NGINX", "oss-nginx", None),
+    (("caddy",), "gateway", "Caddy", "", None),
+    (("haproxy",), "gateway", "HAProxy", "", None),
+    (("envoy",), "gateway", "Envoy", "", None),
+    (("kong",), "gateway", "Kong", "oss-kong", None),
+    (("keycloak",), "security", "Keycloak", "oss-keycloak", None),
+    (("authelia",), "security", "Authelia", "", None),
+    (("vault",), "security", "Vault", "oss-vault", None),
+    (("prometheus",), "service", "Prometheus", "oss-prometheus-grafana", None),
+    (("grafana",), "service", "Grafana", "oss-prometheus-grafana", None),
+    (("loki",), "service", "Loki", "oss-prometheus-grafana", None),
+    (("jaeger", "jaegertracing"), "service", "Jaeger", "", None),
+    (("otel-collector", "opentelemetry-collector", "opentelemetry-collector-contrib"), "service",
+     "OpenTelemetry Collector", "", None),
 ]
+# compose file names that only apply to local development / tests
+_DEV_COMPOSE_FILE = re.compile(r"override|(^|[.\-_])(dev|local|test|tests|e2e|debug|ci)([.\-_]|$)", re.I)
+_DEV_SERVICE_NAME = re.compile(r"(^|[-_])(test|tests|e2e|mock|mocks|stub|debug|dev|tools?|admin|mail|smtp|seed|"
+                               r"storybook|docs|playwright|cypress|selenium)([-_]|$)", re.I)
+_DEV_PROFILES = {"dev", "debug", "test", "tests", "e2e", "tools", "tooling", "admin"}
+
+
+def image_words(image: str) -> list[str]:
+    """``registry/org/name:tag`` → path segments and their dash-separated parts (lowercase, no tag/digest)."""
+    img = (image or "").lower().split("@")[0]
+    img = re.sub(r"\$\{[^}]*\}", "", img)
+    segs = [s for s in img.split("/") if s]
+    if segs:
+        segs[-1] = segs[-1].split(":")[0]
+    words: list[str] = []
+    for s in segs[1:] if len(segs) > 1 and ("." in segs[0] or ":" in segs[0]) else segs:  # drop a registry host
+        words.append(s)
+        words.extend(p for p in re.split(r"[-_.]", s) if p)
+    return words
+
+
+def image_type(image: str) -> dict[str, Any] | None:
+    """Known images → {type, name, catalog_id, infra}; None for unknown or dev-tool images."""
+    words = image_words(image)
+    if not words or any(w in DEV_TOOL_WORDS for w in words):
+        return None
+    for keys, ntype, name, cid, infra in IMAGE_TYPES:
+        if any(k in words for k in keys):
+            return {"type": ntype, "name": name, "catalog_id": cid, "infra": infra}
+    return None
+
+
+def is_dev_tool(svc: dict[str, Any]) -> bool:
+    """Dev/test tooling: a known tool image or name, a dev profile, or a dev-looking service that only exists in
+    override/dev compose files."""
+    words = image_words(svc.get("image", "")) + [svc.get("name", "").lower()]
+    words += [p for p in re.split(r"[-_]", svc.get("name", "").lower()) if p]
+    dockerfile = PurePosixPath(svc.get("dockerfile") or "").name.lower()
+    if any(w in DEV_TOOL_WORDS for w in words) or re.search(r"playwright|cypress|selenium|e2e", dockerfile):
+        return True
+    if _DEV_PROFILES & {str(p).lower() for p in svc.get("profiles") or []}:
+        return True
+    files = svc.get("files") or ([svc["file"]] if svc.get("file") else [])
+    only_dev = bool(files) and all(_DEV_COMPOSE_FILE.search(PurePosixPath(f).name) for f in files)
+    return only_dev and bool(_DEV_SERVICE_NAME.search(svc.get("name", "")))
 # Terraform resource types → infra key
 _TF_INFRA = [
     (r"^aws_(db_instance|rds_cluster)|^azurerm_(postgresql|mssql)|^google_sql_database", "postgresql"),
@@ -169,6 +253,25 @@ _TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|spec|testdata|fixtures|e2e)/|(^
 def is_test_path(path: str) -> bool:
     """Tests, fixtures and specs: excluded from infrastructure evidence and entry points."""
     return bool(_TEST_PATH.search(path))
+
+
+_CODEGEN_PATH = re.compile(r"\.gen\.[cm]?[jt]sx?$|\.generated\.\w+$|(^|/)(__generated__|generated|gen)/|_pb2(_grpc)?\.pyi?$|"
+                           r"\.pb(\.gw)?\.go$|_grpc\.pb\.go$")
+# Code generated from an OpenAPI spec (hey-api/openapi-ts, openapi-typescript-codegen, orval, openapi-generator):
+# a client app that ships one calls the backend over HTTP.
+_OPENAPI_CLIENT_FILE = re.compile(r"(^|/)(sdk|services|schemas|types|client)\.gen\.ts$|(^|/)core/(OpenAPI|request|ApiError)\.ts$|"
+                                  r"(^|/)openapi-ts\.config\.[cm]?[jt]s$|(^|/)orval\.config\.[cm]?[jt]s$")
+OPENAPI_CLIENT_DEPS = {"@hey-api/openapi-ts", "@hey-api/client-axios", "@hey-api/client-fetch", "openapi-typescript-codegen",
+                       "@openapitools/openapi-generator-cli", "orval", "openapi-typescript", "openapi-fetch"}
+
+
+def is_codegen_path(path: str) -> bool:
+    """Generated code (``*.gen.ts``, ``generated/``, protobuf stubs): never evidence of a dependency direction."""
+    return bool(_CODEGEN_PATH.search(path))
+
+
+def is_openapi_client_file(path: str) -> bool:
+    return bool(_OPENAPI_CLIENT_FILE.search(path))
 
 
 def language_of(path: str) -> str | None:
@@ -248,11 +351,8 @@ def _req_name(spec: str) -> str:
 
 
 def image_infra(image: str) -> str | None:
-    img = (image or "").lower().split("@")[0].split(":")[0]
-    for pattern, key in _IMAGE_INFRA:
-        if re.search(pattern, img):
-            return key
-    return None
+    """Infra key (postgresql, redis, ...) of a datastore image, else None."""
+    return (image_type(image) or {}).get("infra")
 
 
 # --------------------------------------------------------------------------- manifests
@@ -316,7 +416,44 @@ def is_manifest(name: str) -> bool:
 
 
 # --------------------------------------------------------------------------- compose / docker / k8s / terraform
+def _join(base: str, rel_path: str) -> str:
+    """Normalise ``base/rel_path`` to a POSIX path relative to the repository root ('' for the root)."""
+    parts: list[str] = []
+    for part in (PurePosixPath(base) / str(rel_path).replace("\\", "/")).parts:
+        if part == "..":
+            if parts:
+                parts.pop()
+        elif part not in (".", "", "/"):
+            parts.append(part)
+    return "/".join(parts)
+
+
+_URL_HOST = re.compile(r"://(?:[^@/]{0,200}@)?([A-Za-z][A-Za-z0-9_.\-]*)")
+_HOST_KEY = re.compile(r"(HOST|HOSTNAME|SERVER|ADDR|ADDRESS|ENDPOINT)$", re.I)
+
+
+def _env_hosts(env: Any) -> list[str]:
+    """Hostnames referenced by environment values (``postgresql://u:p@db:5432/x`` → db, ``SMTP_HOST=mailpit`` →
+    mailpit). Only host names are kept — never values, which may be secrets."""
+    pairs: list[tuple[str, str]] = []
+    if isinstance(env, dict):
+        pairs = [(str(k), str(v)) for k, v in env.items() if v is not None]
+    elif isinstance(env, list):
+        pairs = [tuple(str(x).split("=", 1)) for x in env if isinstance(x, str) and "=" in x]  # type: ignore[misc]
+    hosts: list[str] = []
+    for key, value in pairs:
+        found = _URL_HOST.findall(value)
+        if not found and _HOST_KEY.search(key) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.\-]*", value.strip()):
+            found = [value.strip()]
+        for h in found:
+            h = h.split(".")[0] if not re.search(r"\.(com|net|org|io|dev|ai|cloud)$", h) else h
+            if h and h not in hosts and h.lower() not in ("localhost", "0", "127"):
+                hosts.append(h)
+    return hosts[:20]
+
+
 def parse_compose(path: str, text: str) -> list[dict[str, Any]]:
+    """Services of one compose file (one entry per service; see ``merge_compose`` for the whole project)."""
     out = []
     for doc in _load_yaml_docs(text):
         services = doc.get("services") if isinstance(doc, dict) else None
@@ -328,24 +465,111 @@ def parse_compose(path: str, text: str) -> list[dict[str, Any]]:
                 continue
             build = svc.get("build")
             context = build.get("context") if isinstance(build, dict) else build if isinstance(build, str) else None
-            build_dir = None
-            if context:
-                p = PurePosixPath(base_dir) / str(context).replace("\\", "/")
-                parts: list[str] = []
-                for part in p.parts:
-                    if part == "..":
-                        if parts:
-                            parts.pop()
-                    elif part not in (".", ""):
-                        parts.append(part)
-                build_dir = "/".join(parts)
+            build_dir = dockerfile = None
+            if build is not None:
+                build_dir = _join(base_dir, str(context or "."))
+                df = build.get("dockerfile") if isinstance(build, dict) else None
+                if isinstance(df, str) and df and not df.startswith("/"):
+                    dockerfile = _join(build_dir, df)
             deps = svc.get("depends_on") or []
             deps = list(deps.keys()) if isinstance(deps, dict) else [str(x) for x in deps if isinstance(x, (str, int))]
             ports = [str(p) for p in (svc.get("ports") or []) if isinstance(p, (str, int))]
+            labels = svc.get("labels") or {}
+            label_keys = ([str(k) + ("=" + str(v) if str(v).lower() in ("true", "false") else "")
+                           for k, v in labels.items()] if isinstance(labels, dict) else
+                          [str(x).split("=", 1)[0] + ("=" + str(x).split("=", 1)[1]
+                                                      if str(x).split("=", 1)[-1].lower() in ("true", "false") else "")
+                           for x in labels if isinstance(x, str)] if isinstance(labels, list) else [])
+            profiles = [str(p) for p in (svc.get("profiles") or []) if isinstance(p, str)]
             image = str(svc.get("image") or "")
-            out.append({"name": str(name), "file": path, "image": image, "build": build_dir, "depends_on": deps,
-                        "ports": ports[:10], "infra": None if build_dir is not None else image_infra(image)})
+            out.append({"name": str(name), "file": path, "files": [path], "image": image, "build": build_dir,
+                        "dockerfile": dockerfile, "depends_on": deps, "ports": ports[:10],
+                        "labels": label_keys[:40], "env_hosts": _env_hosts(svc.get("environment")),
+                        "profiles": profiles[:10], "infra": None if build_dir is not None else image_infra(image)})
     return out
+
+
+def _compose_rank(path: str) -> tuple[int, int, str]:
+    """docker compose order: the base file, then ``*.override.*``, then the other (deploy/prod/...) files."""
+    name = PurePosixPath(path).name.lower()
+    rank = 0 if re.fullmatch(r"(docker-)?compose\.ya?ml", name) else 1 if "override" in name else 2
+    return (path.count("/"), rank, path)
+
+
+def merge_compose(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge services with the same name across compose files, like ``docker compose -f a -f b`` does: later
+    files override scalars (image, build, dockerfile) and extend lists (ports, depends_on, labels, ...).
+    ``files`` lists every file that defines the service. Idempotent (merged entries merge to themselves)."""
+    merged: dict[str, dict[str, Any]] = {}
+    for e in sorted(entries, key=lambda e: _compose_rank(str(e.get("file") or ""))):
+        name = str(e.get("name") or "")
+        if not name:
+            continue
+        cur = merged.get(name)
+        if cur is None:
+            cur = merged[name] = {"name": name, "file": e.get("file"), "files": [], "image": "", "build": None,
+                                  "dockerfile": None, "depends_on": [], "ports": [], "labels": [], "env_hosts": [],
+                                  "profiles": [], "infra": None}
+        for f in e.get("files") or ([e["file"]] if e.get("file") else []):
+            if f not in cur["files"]:
+                cur["files"].append(f)
+        if e.get("image"):
+            cur["image"] = e["image"]
+        if e.get("build") is not None:
+            cur["build"] = e["build"]
+        if e.get("dockerfile"):
+            cur["dockerfile"] = e["dockerfile"]
+        for key in ("depends_on", "ports", "labels", "env_hosts", "profiles"):
+            for v in e.get(key) or []:
+                if v not in cur[key]:
+                    cur[key].append(v)
+    for svc in merged.values():
+        svc["infra"] = None if svc["build"] is not None else image_infra(svc["image"])
+        svc["dev_tool"] = is_dev_tool(svc)
+    return list(merged.values())
+
+
+def traefik_routed(svc: dict[str, Any]) -> bool:
+    """A service that Traefik routes to (Docker provider labels)."""
+    labels = svc.get("labels") or []
+    return any(str(l).startswith("traefik.http.routers.") for l in labels) or "traefik.enable=true" in labels
+
+
+# --------------------------------------------------------------------------- reverse-proxy configs
+_NGINX_TARGET = re.compile(r"\b(?:proxy_pass|grpc_pass|uwsgi_pass|fastcgi_pass)\s+(?:https?://|grpc://)?([A-Za-z][\w.\-]*)")
+_UPSTREAM = re.compile(r"upstream\s+([\w.\-]+)\s*\{([^}]*)\}", re.S)
+_CADDY_TARGET = re.compile(r"\breverse_proxy\s+(?:[/\w*\-.]+\s+)?(?:https?://)?([A-Za-z][\w.\-]*)")
+_TRAEFIK_URL = re.compile(r"""\burl\s*[:=]\s*["']?https?://([A-Za-z][\w.\-]*)""")
+
+
+def parse_proxy_config(path: str, text: str) -> dict[str, Any] | None:
+    """Upstream hosts a reverse-proxy config routes to (nginx ``proxy_pass``/``upstream``, Caddy
+    ``reverse_proxy``, Traefik file-provider ``url``)."""
+    name = PurePosixPath(path).name.lower()
+    if name.startswith("caddyfile"):
+        kind, targets = "caddy", _CADDY_TARGET.findall(text)
+    elif "traefik" in path.lower() and name.endswith((".yml", ".yaml", ".toml")):
+        kind, targets = "traefik", _TRAEFIK_URL.findall(text)
+    elif name.endswith(".conf") or name.endswith(".conf.template"):
+        if "proxy_pass" not in text and "upstream" not in text:
+            return None
+        kind = "nginx"
+        targets = _NGINX_TARGET.findall(text)
+        upstreams = dict(_UPSTREAM.findall(text))
+        expanded: list[str] = []
+        for t in targets:
+            if t in upstreams:
+                expanded += re.findall(r"server\s+([A-Za-z][\w.\-]*)", upstreams[t])
+            else:
+                expanded.append(t)
+        targets = expanded
+    else:
+        return None
+    hosts = []
+    for t in targets:
+        if t.lower() not in ("localhost", "127") and "$" not in t and t not in hosts:
+            hosts.append(t)
+    return {"path": path, "kind": kind, "targets": hosts[:30]} if hosts else None
 
 
 def parse_dockerfile(path: str, text: str) -> dict[str, Any]:
@@ -443,6 +667,7 @@ def detect(root: Path) -> dict[str, Any]:
     k8s: list[dict[str, Any]] = []
     terraform: list[dict[str, Any]] = []
     entry_points: list[dict[str, Any]] = []
+    proxies: list[dict[str, Any]] = []
     tags_by_file: dict[str, set[str]] = {}
     for p in walk(root):
         path = rel(p, root)
@@ -465,9 +690,16 @@ def detect(root: Path) -> dict[str, Any]:
         elif lname == "dockerfile" or lname.startswith("dockerfile.") or lname.endswith(".dockerfile"):
             dockerfiles.append(parse_dockerfile(path, read_text(p)))
         elif lname.endswith((".yaml", ".yml")):
-            k8s.extend(parse_k8s(path, read_text(p)))
+            text = read_text(p)
+            k8s.extend(parse_k8s(path, text))
+            if "traefik" in path.lower() and (cfg := parse_proxy_config(path, text)):
+                proxies.append(cfg)
         elif lname.endswith(".tf"):
             terraform.extend(parse_terraform(path, read_text(p)))
+        elif lname.endswith((".conf", ".conf.template")) or lname.startswith("caddyfile") or \
+                (lname.endswith(".toml") and "traefik" in path.lower()):
+            if cfg := parse_proxy_config(path, read_text(p)):
+                proxies.append(cfg)
         if lang in CODE_LANGS and not is_test_path(path):
             text = read_text(p)
             tags = libs_for(path, imported_modules(path, text))
@@ -482,6 +714,7 @@ def detect(root: Path) -> dict[str, Any]:
             elif script in ("start", "dev", "serve"):
                 entry_points.append({"path": m["path"], "kind": f"npm-{script}", "name": target[:120]})
 
+    compose = merge_compose(compose)
     return {
         "languages": dict(sorted(languages.items(), key=lambda kv: -kv[1])),
         "manifests": manifests,
@@ -489,6 +722,7 @@ def detect(root: Path) -> dict[str, Any]:
         "dockerfiles": dockerfiles,
         "k8s": k8s,
         "terraform": terraform[:500],
+        "proxy_routes": proxies[:50],
         "infrastructure": infrastructure(tags_by_file, compose, k8s, terraform),
         "frameworks": frameworks(tags_by_file),
         "entry_points": entry_points[:200],
@@ -522,8 +756,10 @@ def infrastructure(tags_by_file: dict[str, set[str]], compose: list[dict[str, An
             if len(it["files"]) < MAX_FILES_PER_ITEM:
                 it["files"].append(path)
     for svc in compose:
-        if svc.get("infra"):
-            item(svc["infra"])["evidence"].append(f"compose service '{svc['name']}' ({svc['image']})")
+        if svc.get("infra") and not svc.get("dev_tool"):
+            ev = f"compose service '{svc['name']}' ({svc['image']})"
+            if ev not in item(svc["infra"])["evidence"]:
+                item(svc["infra"])["evidence"].append(ev)
     for w in k8s:
         for img in w.get("images", []):
             if key := image_infra(img):
@@ -537,8 +773,10 @@ def infrastructure(tags_by_file: dict[str, set[str]], compose: list[dict[str, An
         provs = it["providers"]
         it["technology"] = ", ".join(provs)
         it["catalog_id"] = LLM_CATALOG.get("LiteLLM" if "LiteLLM" in provs else provs[0], "") if provs else ""
-        if len(provs) == 1:
-            it["label"] = f"{provs[0]} API" if provs[0] != "LiteLLM" else "LLM gateway (LiteLLM)"
+        if "LiteLLM" in provs:  # the gateway fronts the other providers
+            it["label"] = "LiteLLM"
+        elif len(provs) == 1:
+            it["label"] = f"{provs[0]} API"
     order = {c: i for i, c in enumerate(INFRA_CATEGORY_ORDER)}
     out = sorted(items.values(), key=lambda x: (order.get(x["category"], 9), x["label"]))
     for it in out:

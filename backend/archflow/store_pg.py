@@ -26,8 +26,9 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from .models import ProjectState
-from .store import (CODE_GRAPH_COLS, DECISION_COLS, DECISION_JSON_FIELDS, DEFAULT_ORG_ID, DEFAULT_ORG_NAME,
-                    check_decision_fields, code_graph_id, decision_id)
+from .store import (AI_USAGE_FIELDS, OPENSPEC_CHANGE_COLS, OPENSPEC_CHANGE_FIELDS, OPENSPEC_STATUSES, CODE_GRAPH_COLS, CONVERSATION_COLS, CONVERSATION_FIELDS, DECISION_COLS, DECISION_JSON_FIELDS,
+                    DEFAULT_ORG_ID, DEFAULT_ORG_NAME, MEMORY_COLS, MESSAGE_COLS, check_decision_fields,
+                    check_memory_fields, code_graph_id, conversation_id, decision_id, memory_id)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 MIGRATION_LOCK_KEY = 0x41524346  # "ARCF": pg_advisory_lock key for the migration runner
@@ -582,3 +583,209 @@ class PostgresStore:
         cols = CODE_GRAPH_COLS + (", graph" if with_graph else "")
         return self._code_graph(self._one(f"SELECT {cols} FROM code_graphs WHERE project_id=%s AND status='ready' "
                                           "ORDER BY created_at DESC, id DESC LIMIT 1", (pid,)), with_graph)
+
+    # ---- conversations (AI chat threads) -----------------------------------
+    _CONV_SELECT = (f"SELECT {CONVERSATION_COLS}, (SELECT COUNT(*) FROM conversation_messages m "
+                    "WHERE m.conversation_id = c.id) AS message_count FROM conversations c")
+
+    def create_conversation(self, pid: str, branch: str, kind: str, title: str, created_by: str,
+                            created_by_id: str | None = None) -> dict[str, Any]:
+        cid = conversation_id()
+        with self._conn() as conn:
+            conn.execute("INSERT INTO conversations (id, project_id, branch, kind, title, created_by, created_by_id) "
+                         "VALUES (%s, %s, %s, %s, %s, %s, %s)", (cid, pid, branch, kind, title, created_by, created_by_id))
+        return self.get_conversation(cid)
+
+    def get_conversation(self, cid: str) -> dict[str, Any] | None:
+        return _row(self._one(f"{self._CONV_SELECT} WHERE id=%s", (cid,)))
+
+    def list_conversations(self, pid: str, kind: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        where, params = "project_id=%s", [pid]
+        if kind:
+            where += " AND kind=%s"
+            params.append(kind)
+        rows = self._all(f"{self._CONV_SELECT} WHERE {where} ORDER BY updated_at DESC, id DESC LIMIT %s",
+                         (*params, limit))
+        return [_row(r) for r in rows]
+
+    def update_conversation(self, cid: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        data = {k: v for k, v in fields.items() if k in CONVERSATION_FIELDS}
+        if data:
+            sets = ", ".join(f"{k}=%s" for k in data)
+            with self._conn() as conn:
+                conn.execute(f"UPDATE conversations SET {sets}, updated_at = now() WHERE id=%s", (*data.values(), cid))
+        return self.get_conversation(cid)
+
+    def delete_conversation(self, cid: str) -> bool:
+        with self._conn() as conn:
+            return conn.execute("DELETE FROM conversations WHERE id=%s", (cid,)).rowcount > 0
+
+    def add_message(self, cid: str, role: str, mode: str, content: str, data: dict[str, Any] | None,
+                    author: str) -> dict[str, Any]:
+        with self._conn() as conn, conn.transaction():
+            # Serialize message numbering per conversation across processes.
+            conn.execute("SELECT 1 FROM conversations WHERE id=%s FOR UPDATE", (cid,))
+            seq = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM conversation_messages "
+                               "WHERE conversation_id=%s", (cid,)).fetchone()["n"]
+            row = conn.execute(
+                f"INSERT INTO conversation_messages (conversation_id, seq, role, mode, content, data, author) "
+                f"VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING {MESSAGE_COLS}",
+                (cid, seq, role, mode, content, Jsonb(data or {}), author)).fetchone()
+            conn.execute("UPDATE conversations SET updated_at = now() WHERE id=%s", (cid,))
+        return _row(row)
+
+    def list_messages(self, cid: str, after_seq: int = 0) -> list[dict[str, Any]]:
+        rows = self._all(f"SELECT {MESSAGE_COLS} FROM conversation_messages WHERE conversation_id=%s AND seq > %s "
+                         "ORDER BY seq", (cid, after_seq))
+        return [_row(r) for r in rows]
+
+    def delete_messages_from(self, cid: str, seq: int) -> int:
+        """Delete messages with seq >= ``seq`` (regenerate, clear); the summary is reset if it covered them."""
+        with self._conn() as conn, conn.transaction():
+            n = conn.execute("DELETE FROM conversation_messages WHERE conversation_id=%s AND seq >= %s",
+                             (cid, seq)).rowcount
+            conn.execute("UPDATE conversations SET summary = CASE WHEN summarized_seq >= %s THEN '' ELSE summary END, "
+                         "summarized_seq = CASE WHEN summarized_seq >= %s THEN 0 ELSE summarized_seq END, "
+                         "updated_at = now() WHERE id=%s", (seq, seq, cid))
+        return n
+
+    # ---- project memory (facts every AI call sees) -----------------------------
+    def list_memory(self, pid: str) -> list[dict[str, Any]]:
+        rows = self._all(f"SELECT {MEMORY_COLS} FROM project_memory WHERE project_id=%s "
+                         "ORDER BY pinned DESC, created_at DESC, id DESC", (pid,))
+        return [_row(r) for r in rows]
+
+    def get_memory(self, pid: str, mid: str) -> dict[str, Any] | None:
+        return _row(self._one(f"SELECT {MEMORY_COLS} FROM project_memory WHERE project_id=%s AND id=%s", (pid, mid)))
+
+    def add_memory(self, pid: str, text: str, *, category: str = "fact", pinned: bool = False, source: str = "user",
+                   conversation_id: str | None = None, created_by: str = "anonymous") -> dict[str, Any]:
+        data = check_memory_fields({"text": text, "category": category, "pinned": pinned})
+        mid = memory_id()
+        with self._conn() as conn:
+            conn.execute("INSERT INTO project_memory (id, project_id, text, category, pinned, source, conversation_id, "
+                         "created_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                         (mid, pid, data["text"], data["category"], data["pinned"], source, conversation_id, created_by))
+        return self.get_memory(pid, mid)
+
+    def update_memory(self, pid: str, mid: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        data = check_memory_fields(fields)
+        if data:
+            sets = ", ".join(f"{k}=%s" for k in data)
+            with self._conn() as conn:
+                conn.execute(f"UPDATE project_memory SET {sets}, updated_at = now() WHERE project_id=%s AND id=%s",
+                             (*data.values(), pid, mid))
+        return self.get_memory(pid, mid)
+
+    def delete_memory(self, pid: str, mid: str) -> bool:
+        with self._conn() as conn:
+            return conn.execute("DELETE FROM project_memory WHERE project_id=%s AND id=%s", (pid, mid)).rowcount > 0
+
+    # ---- OpenSpec files and changes ---------------------------------------
+    def list_openspec_files(self, pid: str, prefix: str = "", with_content: bool = True) -> list[dict[str, Any]]:
+        cols = "path, updated_by, updated_at" + (", content" if with_content else "")
+        rows = self._all(f"SELECT {cols} FROM openspec_files WHERE project_id=%s AND left(path, %s) = %s ORDER BY path",
+                         (pid, len(prefix), prefix))
+        return [_row(r) for r in rows]
+
+    def get_openspec_file(self, pid: str, path: str) -> dict[str, Any] | None:
+        return _row(self._one("SELECT path, content, updated_by, updated_at FROM openspec_files "
+                              "WHERE project_id=%s AND path=%s", (pid, path)))
+
+    def write_openspec_files(self, pid: str, files: dict[str, str], actor: str, delete: list[str] | None = None) -> None:
+        with self._conn() as conn, conn.transaction():
+            for path in delete or []:
+                conn.execute("DELETE FROM openspec_files WHERE project_id=%s AND path=%s", (pid, path))
+            for path, content in files.items():
+                conn.execute(
+                    "INSERT INTO openspec_files (project_id, path, content, updated_by) VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT (project_id, path) DO UPDATE SET content=excluded.content, updated_by=excluded.updated_by, "
+                    "updated_at=now() WHERE openspec_files.content <> excluded.content", (pid, path, content, actor))
+
+    def save_openspec_change(self, pid: str, change_id: str, fields: dict[str, Any], actor: str) -> dict[str, Any]:
+        data = {k: v for k, v in fields.items() if k in OPENSPEC_CHANGE_FIELDS}
+        if "status" in data and data["status"] not in OPENSPEC_STATUSES:
+            raise ValueError(f"status must be one of {', '.join(OPENSPEC_STATUSES)}")
+        for k in ("scope", "validation"):
+            if k in data:
+                data[k] = Jsonb(data[k] or {})
+        with self._conn() as conn, conn.transaction():
+            exists = conn.execute("SELECT 1 FROM openspec_changes WHERE project_id=%s AND change_id=%s FOR UPDATE",
+                                  (pid, change_id)).fetchone()
+            if exists:
+                if data:
+                    sets = ", ".join(f"{k}=%s" for k in data)
+                    conn.execute(f"UPDATE openspec_changes SET {sets}, updated_at=now() WHERE project_id=%s AND change_id=%s",
+                                 (*data.values(), pid, change_id))
+            else:
+                cols = ["project_id", "change_id", "created_by", *data]
+                conn.execute(f"INSERT INTO openspec_changes ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
+                             (pid, change_id, actor, *data.values()))
+        return self.get_openspec_change(pid, change_id)
+
+    def get_openspec_change(self, pid: str, change_id: str) -> dict[str, Any] | None:
+        return _row(self._one(f"SELECT {OPENSPEC_CHANGE_COLS} FROM openspec_changes WHERE project_id=%s AND change_id=%s",
+                              (pid, change_id)))
+
+    def list_openspec_changes(self, pid: str) -> list[dict[str, Any]]:
+        rows = self._all(f"SELECT {OPENSPEC_CHANGE_COLS} FROM openspec_changes WHERE project_id=%s "
+                         "ORDER BY updated_at DESC, change_id", (pid,))
+        return [_row(r) for r in rows]
+
+    def delete_openspec_change(self, pid: str, change_id: str) -> bool:
+        prefix = f"openspec/changes/{change_id}/"
+        with self._conn() as conn, conn.transaction():
+            conn.execute("DELETE FROM openspec_files WHERE project_id=%s AND left(path, %s) = %s", (pid, len(prefix), prefix))
+            return conn.execute("DELETE FROM openspec_changes WHERE project_id=%s AND change_id=%s",
+                                (pid, change_id)).rowcount > 0
+
+    # ---- AI usage and budgets --------------------------------------------
+    def record_ai_usage(self, event: dict[str, Any]) -> None:
+        cols = [k for k in AI_USAGE_FIELDS if k in event]
+        with self._conn() as conn:
+            conn.execute(f"INSERT INTO ai_usage ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
+                         tuple(event[k] for k in cols))
+
+    def ai_spend(self, org_id: str, since: str) -> float:
+        row = self._one("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM ai_usage WHERE org_id=%s AND created_at >= %s",
+                        (org_id, since))
+        return float(row["c"])
+
+    def ai_usage_summary(self, org_id: str, since: str) -> dict[str, Any]:
+        def rows(by: str) -> list[dict[str, Any]]:
+            return [{**r, "cost_usd": float(r["cost_usd"] or 0)} for r in self._all(
+                f"SELECT {by} AS key, COUNT(*) AS calls, SUM(prompt_tokens) AS prompt_tokens, "
+                f"SUM(completion_tokens) AS completion_tokens, SUM(cost_usd) AS cost_usd FROM ai_usage "
+                f"WHERE org_id=%s AND created_at >= %s GROUP BY 1 ORDER BY 5 DESC, 2 DESC", (org_id, since))]
+        total = self._one("SELECT COUNT(*) AS calls, COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
+                          "COALESCE(SUM(completion_tokens), 0) AS completion_tokens, COALESCE(SUM(cost_usd), 0) "
+                          "AS cost_usd FROM ai_usage WHERE org_id=%s AND created_at >= %s", (org_id, since))
+        return {"total": {**total, "cost_usd": float(total["cost_usd"])}, "by_feature": rows("feature"),
+                "by_model": rows("model"), "by_project": rows("project_id"),
+                "daily": rows("to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')")}
+
+    def get_ai_budget(self, org_id: str) -> dict[str, Any]:
+        row = _row(self._one("SELECT monthly_limit_usd, alert_percent, updated_by, updated_at FROM org_ai_budgets "
+                             "WHERE org_id=%s", (org_id,)))
+        return row or {"monthly_limit_usd": None, "alert_percent": 80, "updated_by": None, "updated_at": None}
+
+    def set_ai_budget(self, org_id: str, monthly_limit_usd: float | None, alert_percent: int, user: str) -> dict[str, Any]:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO org_ai_budgets (org_id, monthly_limit_usd, alert_percent, updated_by) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (org_id) DO UPDATE SET monthly_limit_usd=excluded.monthly_limit_usd, "
+                "alert_percent=excluded.alert_percent, updated_by=excluded.updated_by, updated_at=now()",
+                (org_id, monthly_limit_usd, alert_percent, user))
+        return self.get_ai_budget(org_id)
+
+    def get_ai_config(self, org_id: str) -> dict[str, Any]:
+        row = self._one("SELECT config FROM org_ai_config WHERE org_id=%s", (org_id,))
+        return dict(row["config"]) if row else {}
+
+    def set_ai_config(self, org_id: str, config: dict[str, Any], user: str) -> dict[str, Any]:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO org_ai_config (org_id, config, updated_by) VALUES (%s, %s, %s) ON CONFLICT (org_id) "
+                "DO UPDATE SET config=excluded.config, updated_by=excluded.updated_by, updated_at=now()",
+                (org_id, Jsonb(config), user))
+        return self.get_ai_config(org_id)

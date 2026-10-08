@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, api } from "../api";
-import { ROLES, ROLE_HELP, can, type AIProvider, type AISettings, type Invite, type Member, type Role } from "../types";
+import { ROLES, ROLE_HELP, can, type AIConfig, type AIGroup, type AISettings, type AITestResult, type AIUsageReport, type AIUsageRow, type Invite, type Member, type Role } from "../types";
 import { Copy } from "./ConnectDialog";
 
 interface Base { orgId: string; orgName: string; role: Role; selfId: string; onClose: () => void; onChanged?: () => void }
@@ -130,56 +130,284 @@ export function MembersDialog({ orgId, orgName, role, selfId, onClose, onChanged
   );
 }
 
-const PROVIDERS: { key: AIProvider; label: string; hint: string }[] = [
-  { key: "gemini", label: "Google Gemini", hint: "Primary model (aistudio.google.com/apikey)" },
-  { key: "anthropic", label: "Anthropic Claude", hint: "First fallback" },
-  { key: "openai", label: "OpenAI", hint: "Second fallback" },
-];
+const GROUP_INFO: Record<AIGroup, { title: string; hint: string }> = {
+  reasoning: { title: "Reasoning model", hint: "Design, edits, specs, reviews: use your strongest model" },
+  fast: { title: "Fast model", hint: "Summaries, memory, naming: a cheaper, quicker model" },
+};
 
-/** Bring-your-own LLM keys for the organization (admins). Keys are write-only: only the last 4 characters come back. */
+/**
+ * AI settings for an organization (admins): provider keys (write-only, encrypted), which models to use for each
+ * group in fallback order (any LiteLLM provider), endpoints for Azure / self-hosted servers, and a live test.
+ */
 export function AISettingsDialog({ orgId, orgName, onClose }: Base) {
-  const [settings, setSettings] = useState<AISettings | null>(null);
-  const [draft, setDraft] = useState<Partial<Record<AIProvider, string>>>({});
+  const [s, setS] = useState<AISettings | null>(null);
+  const [keyDraft, setKeyDraft] = useState<Record<string, string>>({});
+  const [config, setConfig] = useState<AIConfig>({ reasoning: [], fast: [], params: {} });
+  const [tab, setTab] = useState<"models" | "keys">("models");
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState("");
+  const [tests, setTests] = useState<Partial<Record<AIGroup, AITestResult | "running">>>({});
+
+  const load = (next: AISettings) => {
+    setS(next);
+    setConfig({ reasoning: next.config.reasoning ?? [], fast: next.config.fast ?? [], params: next.config.params ?? {} });
+  };
+  useEffect(() => { api.aiSettings(orgId).then(load).catch((e) => setError(e.message)); }, [orgId]);
+
+  const catalog = s?.catalog ?? [];
+  const info = (id: string) => catalog.find((p) => p.id === id);
+  const flash = (msg: string) => { setSaved(msg); window.setTimeout(() => setSaved(""), 2500); };
+
+  const saveKeys = async (changes: Record<string, string | null>) => {
+    setError("");
+    try { load(await api.saveAiSettings(orgId, changes)); setKeyDraft({}); flash("Keys saved"); setTests({}); }
+    catch (e) { setError((e as Error).message); }
+  };
+  const saveConfig = async () => {
+    setError("");
+    try { load(await api.saveAiConfig(orgId, config)); flash("Models saved"); setTests({}); }
+    catch (e) { setError((e as Error).message); }
+  };
+  const runTest = async (group: AIGroup) => {
+    setTests((t) => ({ ...t, [group]: "running" }));
+    try { const r = await api.testAi(orgId, group); setTests((t) => ({ ...t, [group]: r })); }
+    catch (e) { setTests((t) => ({ ...t, [group]: { ok: false, group, error: (e as Error).message } })); }
+  };
+
+  const setChain = (group: AIGroup, chain: AIConfig[AIGroup]) => setConfig((c) => ({ ...c, [group]: chain }));
+  const usedProviders = [...new Set([...config.reasoning, ...config.fast].map((e) => e.provider))];
+  const pendingKeys = Object.fromEntries(Object.entries(keyDraft).filter(([, v]) => v.trim()));
+  const keyless = usedProviders.filter((p) => info(p)?.key === "required" && !s?.providers[p]?.configured && !info(p)?.server_key);
+
+  return (
+    <Modal title={`AI settings · ${orgName}`} onClose={onClose}>
+      {!s && !error && <p className="muted small">Loading…</p>}
+      {s && (
+        <>
+          <div className={`ai-status ${s.available ? "on" : "off"}`}>
+            <b>{s.available ? "AI is on" : "AI is off"}</b>
+            <span className="small">
+              {s.available
+                ? <> Reasoning: <code>{s.effective.reasoning[0]}</code>{s.effective.fast[0] && <> · Fast: <code>{s.effective.fast[0]}</code></>}</>
+                : " Add a provider key and choose models below; until then ArchFlow uses its built-in non-AI features."}
+            </span>
+          </div>
+          <div className="seg ai-tabs" role="tablist">
+            <button role="tab" aria-selected={tab === "models"} className={tab === "models" ? "on" : ""} onClick={() => setTab("models")}>Models</button>
+            <button role="tab" aria-selected={tab === "keys"} className={tab === "keys" ? "on" : ""} onClick={() => setTab("keys")}>
+              Provider keys {Object.values(s.providers).filter((p) => p.configured).length ? `(${Object.values(s.providers).filter((p) => p.configured).length})` : ""}
+            </button>
+          </div>
+
+          {tab === "models" && (
+            <div className="ai-models">
+              <p className="muted small">Choose the models this organization uses, in fallback order (if the first fails or is rate
+                limited, the next is tried). Any model the provider offers works: they run through LiteLLM. Leave a group empty to use
+                the server's defaults ({s.defaults.reasoning.join(" → ") || "none"}).</p>
+              {(["reasoning", "fast"] as AIGroup[]).map((group) => (
+                <section key={group} className="ai-group">
+                  <div className="row between">
+                    <span><b>{GROUP_INFO[group].title}</b> <span className="muted tiny">{GROUP_INFO[group].hint}</span></span>
+                    <span className="row gap">
+                      {(() => { const t = tests[group]; return t === "running" ? <span className="muted small pulse">Testing…</span>
+                        : t ? <span className={`small ${t.ok ? "ok" : "error"}`} title={t.chain?.join(" → ")}>
+                          {t.ok ? `✓ ${t.model} answered in ${t.latency_ms} ms` : `✗ ${t.error}`}</span> : null; })()}
+                      <button type="button" className="small" onClick={() => runTest(group)} disabled={tests[group] === "running"}
+                        title="Save first: the test uses the saved settings">Test</button>
+                    </span>
+                  </div>
+                  {config[group].length === 0 && <p className="muted small">Server defaults: {s.defaults[group].join(" → ") || "none"}</p>}
+                  {config[group].map((entry, i) => {
+                    const p = info(entry.provider);
+                    return (
+                      <div key={i} className="ai-model-row">
+                        <span className="ai-order">{i + 1}</span>
+                        <select value={entry.provider} aria-label="Provider"
+                          onChange={(e) => setChain(group, config[group].map((x, k) => (k === i ? { provider: e.target.value, model: "" } : x)))}>
+                          {catalog.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+                        </select>
+                        <input className="grow mono" value={entry.model} aria-label="Model id" placeholder={p?.examples[group] ?? "model id"}
+                          onChange={(e) => setChain(group, config[group].map((x, k) => (k === i ? { ...x, model: e.target.value } : x)))} />
+                        <button type="button" className="ghost tiny-btn" disabled={i === 0} aria-label="Move up"
+                          onClick={() => { const c = [...config[group]]; [c[i - 1], c[i]] = [c[i], c[i - 1]]; setChain(group, c); }}>↑</button>
+                        <button type="button" className="ghost tiny-btn" aria-label="Remove"
+                          onClick={() => setChain(group, config[group].filter((_, k) => k !== i))}>✕</button>
+                      </div>
+                    );
+                  })}
+                  {config[group].length < 4 && (
+                    <button type="button" className="small" onClick={() => setChain(group, [...config[group],
+                      { provider: config[group][0]?.provider ?? "gemini", model: "" }])}>+ Add {config[group].length ? "fallback" : "model"}</button>
+                  )}
+                </section>
+              ))}
+              {usedProviders.filter((p) => Object.keys(info(p)?.params ?? {}).length).map((p) => (
+                <section key={p} className="ai-group">
+                  <b>{info(p)?.label} settings</b>
+                  {Object.entries(info(p)!.params).map(([name, hint]) => (
+                    <label key={name} className="field"><span>{name === "api_base" ? "Endpoint" : "API version"} <span className="muted tiny">{hint}</span></span>
+                      <input value={config.params[p]?.[name] ?? ""} placeholder={hint.split("e.g. ")[1] ?? ""}
+                        onChange={(e) => setConfig((c) => ({ ...c, params: { ...c.params, [p]: { ...(c.params[p] ?? {}), [name]: e.target.value } } }))} />
+                    </label>
+                  ))}
+                </section>
+              ))}
+              {keyless.length > 0 && (
+                <p className="warn small">No key yet for {keyless.map((p) => info(p)?.label).join(", ")}: add it under Provider keys.</p>
+              )}
+              <div className="row end gap">
+                {saved && <span className="small ok">{saved}</span>}
+                <button className="primary" onClick={saveConfig}>Save models</button>
+              </div>
+            </div>
+          )}
+
+          {tab === "keys" && (
+            <form className="ai-keys" onSubmit={(e) => { e.preventDefault(); saveKeys(pendingKeys); }}>
+              {!s.enabled && (
+                <p className="warn small">Keys cannot be stored: this server has no ARCHFLOW_SECRET_KEY and no writable data directory.
+                  Set ARCHFLOW_SECRET_KEY in the API's environment and restart it.</p>
+              )}
+              <p className="muted small">Keys are encrypted at rest and never shown again (only their last 4 characters). An
+                organization key replaces the server's key for that provider. Leave a field empty to keep the current key.</p>
+              {catalog.map((p) => {
+                const cur = s.providers[p.id];
+                return (
+                  <div key={p.id} className="ai-key-row">
+                    <span className="ai-key-label">
+                      <b>{p.label}</b>
+                      <span className="muted tiny">
+                        {cur?.configured ? `Organization key …${cur.last4}` : p.server_key ? "Using the server's key" : p.key === "optional" ? "Key optional" : "No key"}
+                        {p.docs && <> · <a href={p.docs} target="_blank" rel="noopener noreferrer">get a key</a></>}
+                      </span>
+                    </span>
+                    <input type="password" autoComplete="off" aria-label={`${p.label} API key`} disabled={!s.enabled}
+                      placeholder={cur?.configured ? "Enter a new key to replace it" : "Paste API key"}
+                      value={keyDraft[p.id] ?? ""} onChange={(e) => setKeyDraft({ ...keyDraft, [p.id]: e.target.value })} />
+                    {cur?.configured
+                      ? <button type="button" className="small danger" onClick={() => saveKeys({ [p.id]: null })}>Remove</button>
+                      : <span className="ai-key-spacer" />}
+                  </div>
+                );
+              })}
+              <div className="row end gap">
+                {saved && <span className="small ok">{saved}</span>}
+                <button className="primary" disabled={!Object.keys(pendingKeys).length || !s.enabled}>Save keys</button>
+              </div>
+            </form>
+          )}
+        </>
+      )}
+      {error && <p className="error small">{error}</p>}
+    </Modal>
+  );
+}
+
+const FEATURE_LABEL: Record<string, string> = {
+  assistant: "Assistant (Ask)", "canvas-edit": "Canvas edits", "design-chat": "Design chat", openspec: "Vibe code (OpenSpec)",
+  "low-level-design": "Low-level design", decisions: "Decisions", "code-analysis": "Code analysis", memory: "Memory & summaries",
+  mcp: "MCP agents", other: "Other",
+};
+const usd = (n: number) => (n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`);
+const tokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));
+
+function UsageTable({ title, rows, label }: { title: string; rows: AIUsageRow[]; label: (r: AIUsageRow) => string }) {
+  if (!rows.length) return null;
+  const max = Math.max(...rows.map((r) => r.cost_usd), 0.000001);
+  return (
+    <div className="usage-table">
+      <b className="small">{title}</b>
+      <table>
+        <thead><tr><th>Name</th><th>Calls</th><th>Tokens in / out</th><th>Cost</th></tr></thead>
+        <tbody>
+          {rows.slice(0, 8).map((r) => (
+            <tr key={r.key || "none"}>
+              <td><span className="usage-bar" style={{ width: `${Math.max(2, (r.cost_usd / max) * 100)}%` }} />{label(r)}</td>
+              <td>{r.calls}</td><td>{tokens(r.prompt_tokens)} / {tokens(r.completion_tokens)}</td><td>{usd(r.cost_usd)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** AI spend for an organization (estimated from tokens) and its monthly budget. Admins only. */
+export function AIUsageDialog({ orgId, orgName, onClose }: Base) {
+  const [report, setReport] = useState<AIUsageReport | null>(null);
+  const [limit, setLimit] = useState("");
+  const [alert, setAlert] = useState(80);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
 
-  useEffect(() => { api.aiSettings(orgId).then(setSettings).catch((e) => setError(e.message)); }, [orgId]);
-
-  const save = async (changes: Partial<Record<AIProvider, string | null>>) => {
-    setError(""); setSaved(false);
-    try { setSettings(await api.saveAiSettings(orgId, changes)); setDraft({}); setSaved(true); }
-    catch (e) { setError((e as Error).message); }
+  const show = (r: AIUsageReport) => {
+    setReport(r);
+    setLimit(r.budget.monthly_limit_usd == null ? "" : String(r.budget.monthly_limit_usd));
+    setAlert(r.budget.alert_percent);
   };
-  const pending = Object.fromEntries(Object.entries(draft).filter(([, v]) => v && v.trim()));
+  useEffect(() => { api.aiUsage(orgId).then(show).catch((e) => setError(e.message)); }, [orgId]);
 
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(""); setSaved(false);
+    const value = limit.trim() === "" ? null : Number(limit);
+    if (value !== null && (Number.isNaN(value) || value < 0)) { setError("Enter a positive amount, or leave it empty for no limit."); return; }
+    try { show(await api.setAiBudget(orgId, value, alert)); setSaved(true); }
+    catch (err) { setError((err as Error).message); }
+  };
+
+  const r = report;
+  const maxDay = r ? Math.max(...r.daily.map((d) => d.cost_usd), 0.000001) : 1;
   return (
-    <Modal title={`AI provider keys · ${orgName}`} onClose={onClose}>
-      <p className="muted small">AI features for this organization use these keys instead of the server's. They are encrypted at
-        rest and never shown again; leave a field empty to keep the current key.</p>
-      {!settings && !error && <p className="muted small">Loading…</p>}
-      {settings && (
-        <form onSubmit={(e) => { e.preventDefault(); save(pending); }}>
-          {PROVIDERS.map((p) => {
-            const cur = settings.providers[p.key];
-            return (
-              <div key={p.key} className="field">
-                <span>{p.label} <span className="muted tiny">· {p.hint}</span></span>
-                <div className="row gap">
-                  <input className="grow" type="password" autoComplete="off" aria-label={`${p.label} API key`}
-                    placeholder={cur.configured ? `Configured (…${cur.last4})` : "Not set: the server's key is used"}
-                    value={draft[p.key] ?? ""} onChange={(e) => setDraft({ ...draft, [p.key]: e.target.value })} />
-                  {cur.configured && <button type="button" className="small danger" onClick={() => save({ [p.key]: null })}>Remove</button>}
-                </div>
-              </div>
-            );
-          })}
-          <div className="row end gap">
-            {saved && <span className="small ok">Saved</span>}
-            <button className="primary" disabled={!Object.keys(pending).length}>Save keys</button>
-          </div>
-        </form>
-      )}
+    <Modal title={`AI usage & budget · ${orgName}`} onClose={onClose}>
+      {!r && !error && <p className="muted small">Loading…</p>}
       {error && <p className="error small">{error}</p>}
+      {r && (
+        <>
+          <div className={`usage-month ${r.status}`}>
+            <div className="row between">
+              <span><b>{usd(r.month_spend_usd)}</b> spent this month
+                {r.budget.monthly_limit_usd != null && <> of <b>{usd(r.budget.monthly_limit_usd)}</b></>}</span>
+              <span className={`usage-status ${r.status}`}>
+                {r.status === "blocked" ? "Budget used up: AI paused" : r.status === "warning" ? `${r.used_percent}% of budget` : r.used_percent != null ? `${r.used_percent}% used` : "No limit"}
+              </span>
+            </div>
+            {r.used_percent != null && <div className="usage-meter"><span style={{ width: `${Math.min(100, r.used_percent)}%` }} /></div>}
+            {r.status === "blocked" && <p className="small">AI features use their built-in non-AI behaviour until the budget is raised or the month ends.</p>}
+          </div>
+
+          <form className="usage-budget" onSubmit={save}>
+            <label className="field"><span>Monthly budget (USD)</span>
+              <input type="number" min="0" step="0.01" placeholder="No limit" value={limit} onChange={(e) => setLimit(e.target.value)} />
+            </label>
+            <label className="field"><span>Warn at (% of budget)</span>
+              <input type="number" min="1" max="100" value={alert} onChange={(e) => setAlert(Number(e.target.value))} />
+            </label>
+            <div className="row gap">
+              <button className="primary">Save budget</button>
+              {saved && <span className="small ok">Saved</span>}
+            </div>
+          </form>
+
+          <p className="muted small">Last {r.days} days: {r.total.calls} AI calls, {tokens(r.total.prompt_tokens)} tokens in,
+            {" "}{tokens(r.total.completion_tokens)} out, {usd(r.total.cost_usd)}. Costs are estimates from token counts and
+            published prices (streamed answers are estimated from their length).</p>
+          {r.daily.length > 0 && (
+            <div className="usage-days" aria-label="Daily AI cost">
+              {[...r.daily].sort((a, b) => a.key.localeCompare(b.key)).map((d) => (
+                <span key={d.key} title={`${d.key}: ${usd(d.cost_usd)} · ${d.calls} calls`}
+                  style={{ height: `${Math.max(4, (d.cost_usd / maxDay) * 100)}%` }} />
+              ))}
+            </div>
+          )}
+          <div className="usage-grid">
+            <UsageTable title="By feature" rows={r.by_feature} label={(x) => FEATURE_LABEL[x.key] ?? x.key} />
+            <UsageTable title="By model" rows={r.by_model} label={(x) => x.key || "unknown"} />
+            <UsageTable title="By project" rows={r.by_project} label={(x) => x.name ?? x.key} />
+          </div>
+          {r.total.calls === 0 && <p className="muted small">No AI calls recorded yet.</p>}
+        </>
+      )}
     </Modal>
   );
 }

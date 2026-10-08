@@ -75,6 +75,7 @@ class ImpactIn(BaseModel):
 
 class ReconstructIn(BaseModel):
     refine: bool = True
+    include_dev_tools: bool = False  # Adminer, Mailpit, Playwright, ... as components (default: listed only)
     branch_name: str | None = Field(None, max_length=60, pattern=r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 
 
@@ -190,8 +191,13 @@ class CodeGraphService:
         return name
 
     async def reconstruct_branch(self, pid: str, actor: str, gid: str | None = None, *, org_id: str | None = None,
-                                 refine: bool = True, branch_name: str | None = None) -> dict[str, Any]:
+                                 refine: bool = True, branch_name: str | None = None,
+                                 include_dev_tools: bool = False) -> dict[str, Any]:
         rec, graph, recon, code_state = await asyncio.to_thread(self.loaded, pid, gid)
+        if include_dev_tools:  # not cached: the default reconstruction is the one drift and impact use
+            recon = await asyncio.to_thread(recon_mod.reconstruct, graph, repo_url=rec.get("repo_url"),
+                                            commit_sha=rec.get("commit_sha"), code_graph_id=rec["id"],
+                                            include_dev_tools=True)
         recon = copy.deepcopy(recon)
         engine = await asyncio.to_thread(recon_mod.refine, recon, graph, org_id) if refine else "offline"
         main = self.store.get_state(pid, "main") or ProjectState()
@@ -217,6 +223,7 @@ class CodeGraphService:
                                             actor)
         return {"branch": branch, "version": version["number"], "code_graph_id": rec["id"], "engine": engine,
                 "components": len(pub["nodes"]), "connections": len(pub["edges"]),
+                "dev_tools": pub["dev_tools"], "excluded": pub["excluded"],
                 "requirements_linked": sum(1 for v in inherit.values() if v), "rev": new_state.rev}
 
     # ---- drift / impact --------------------------------------------------------------------------------
@@ -295,6 +302,7 @@ def register_routes(app: FastAPI, svc: CodeGraphService, *, authz: Any) -> None:
         body = body or ReconstructIn()
         try:
             return await svc.reconstruct_branch(pid, a.actor, gid, org_id=a.org_id, refine=body.refine,
-                                                branch_name=body.branch_name)
+                                                branch_name=body.branch_name,
+                                                include_dev_tools=body.include_dev_tools)
         except CodeGraphError as exc:
             raise HTTPException(exc.status, str(exc)) from exc

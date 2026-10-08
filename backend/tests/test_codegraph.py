@@ -128,8 +128,8 @@ def test_reconstruct_services_infra_and_connections():
     g = normalize.validate(synthetic_graph())
     r = reconstruct.reconstruct(g, repo_url="https://github.com/acme/shop", commit_sha="abc1234def")
     by_name = {n["name"]: n for n in r["nodes"]}
-    assert set(by_name) == {"Orders", "Web", "PostgreSQL", "Redis"}
-    orders, web = by_name["Orders"], by_name["Web"]
+    assert set(by_name) == {"Orders API", "Web App", "PostgreSQL", "Redis"}
+    orders, web = by_name["Orders API"], by_name["Web App"]
     assert orders["type"] == "service" and orders["technology"].startswith("FastAPI")
     assert orders["props"]["code_paths"] == "services/orders" and orders["props"]["symbols"] == "5"  # tests excluded
     assert orders["props"]["code_repo"] == "https://github.com/acme/shop" and orders["props"]["code_commit"] == "abc1234def"
@@ -157,10 +157,11 @@ def test_reconstruct_compose_names_and_images():
     ]
     r = reconstruct.reconstruct(normalize.validate(g))
     by_name = {n["name"]: n for n in r["nodes"]}
-    assert "Orders Api" in by_name and "RabbitMQ" in by_name and by_name["Proxy"]["type"] == "gateway"
+    assert "Orders API" in by_name and "RabbitMQ" in by_name and by_name["NGINX"]["type"] == "gateway"
+    assert by_name["Orders API"]["props"]["compose_service"] == "orders-api" and by_name["NGINX"]["catalog_id"] == "oss-nginx"
     ids = {n["name"]: n["id"] for n in r["nodes"]}
     pairs = {(e["source"], e["target"]) for e in r["edges"]}
-    assert (ids["Orders Api"], ids["RabbitMQ"]) in pairs and (ids["Proxy"], ids["Orders Api"]) in pairs
+    assert (ids["Orders API"], ids["RabbitMQ"]) in pairs and (ids["NGINX"], ids["Orders API"]) in pairs
 
 
 def test_refine_is_silent_offline():
@@ -179,7 +180,7 @@ def test_drift_detects_all_kinds():
     for i in d["issues"]:
         by_code.setdefault(i["code"], []).append(i)
     matched = {m["node_id"]: m["code_name"] for m in d["matches"]}
-    assert matched == {"web": "Web", "order-svc": "Orders", "orders-db": "PostgreSQL"}
+    assert matched == {"web": "Web App", "order-svc": "Orders API", "orders-db": "PostgreSQL"}
     redis = by_code["drift_code_only"]
     assert len(redis) == 1 and "Order Service talks to Redis" in redis[0]["message"] and redis[0]["node_ids"] == ["order-svc"]
     assert [i["node_ids"] for i in by_code["drift_design_only"]] == [["pay-svc"]]
@@ -202,7 +203,7 @@ def test_code_paths_give_explicit_traceability():
     code = reconstruct.to_state(reconstruct.reconstruct(normalize.validate(synthetic_graph())))
     designed, _ = apply_ops(ProjectState(), [{"op": "add_node", "node": {
         "id": "x", "name": "Fulfilment", "props": {"code_paths": "services/orders"}}}])
-    assert drift.match(designed, code)["x"][0] == "orders"
+    assert drift.match(designed, code)["x"][0] == "orders-api"
 
 
 # --------------------------------------------------------------------------- impact
@@ -214,7 +215,7 @@ def test_impact_files_to_requirements():
     assert out["changed_files"] == ["services/orders/db.py"] and out["unmatched_files"] == ["nope/missing.py"]
     names = {s["name"] for s in out["affected_symbols"]}
     assert {"create_order", "test_create"} <= names  # callers, two hops
-    assert {c["name"] for c in out["code_components"]} == {"Orders", "PostgreSQL"}
+    assert {c["name"] for c in out["code_components"]} == {"Orders API", "PostgreSQL"}
     assert {c["id"] for c in out["components"]} == {"order-svc", "orders-db"}
     assert [r["id"] for r in out["requirements"]] == ["REQ-001", "REQ-002"]
     shallow = impact.affected_symbols(g, ["services/orders/db.py"], depth=1)
@@ -343,7 +344,7 @@ def test_adapter_on_fixture_repo(tmp_path):
     assert {i["key"] for i in g["detections"]["infrastructure"]} == {"postgresql", "redis"}
     assert not (repo / "graphify-out").exists()  # the cache never lands in the analysed tree
     r = reconstruct.reconstruct(g)
-    assert {"Api", "Redis", "PostgreSQL"} <= {n["name"] for n in r["nodes"]}
+    assert {"Backend API", "Redis", "PostgreSQL"} <= {n["name"] for n in r["nodes"]}
 
 
 @needs_graphify
@@ -414,9 +415,9 @@ def test_api_reconstruct_drift_analysis_impact(env):
     assert out["branch"] == "draft/from-code-abc1234" and out["components"] == 4 and out["engine"] == "offline"
     state = client.get(f"/api/projects/{pid}", params={"branch": out["branch"]}).json()["state"]
     names = {n["name"]: n for n in state["nodes"].values()}
-    assert set(names) == {"Orders", "Web", "PostgreSQL", "Redis"}  # designed main nodes replaced
-    assert names["Orders"]["props"]["code_paths"] == "services/orders"
-    assert names["Orders"]["requirement_ids"] == ["REQ-001"]  # inherited from the matched designed component
+    assert set(names) == {"Orders API", "Web App", "PostgreSQL", "Redis"}  # designed main nodes replaced
+    assert names["Orders API"]["props"]["code_paths"] == "services/orders"
+    assert names["Orders API"]["requirement_ids"] == ["REQ-001"]  # inherited from the matched designed component
     assert "REQ-001" in state["requirements"]
     versions = client.get(f"/api/projects/{pid}/versions").json()
     assert versions[0]["number"] == out["version"] and versions[0]["branch"] == out["branch"]
@@ -442,7 +443,7 @@ def test_api_reconstruct_drift_analysis_impact(env):
     assert [r["id"] for r in imp["requirements"]] == ["REQ-001"]
     imp2 = client.post(f"/api/projects/{pid}/codegraph/impact",
                        json={"files": ["services/orders/db.py"], "branch": out["branch"]}).json()
-    assert {c["name"] for c in imp2["components"]} == {"Orders", "PostgreSQL"}
+    assert {c["name"] for c in imp2["components"]} == {"Orders API", "PostgreSQL"}
     assert client.post(f"/api/projects/{pid}/codegraph/impact", json={"files": []}).status_code == 422
 
 

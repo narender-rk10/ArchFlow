@@ -344,7 +344,9 @@ def test_secrets_box_round_trip(monkeypatch):
 def test_ai_settings_endpoints(app, owner, monkeypatch):
     dev = member_client(app, owner, "developer", "dev@example.com")
     monkeypatch.delenv("ARCHFLOW_SECRET_KEY", raising=False)  # independent of a developer's local .env
-    r = owner.get("/api/orgs/org-default/ai-settings")
+    r = owner.get("/api/orgs/org-default/ai-settings")  # readable without encryption; keys cannot be stored
+    assert r.status_code == 200 and r.json()["enabled"] is False and len(r.json()["catalog"]) >= 10
+    r = owner.put("/api/orgs/org-default/ai-settings", json={"gemini": "gm-test-key-abcd"})
     assert r.status_code == 503 and "ARCHFLOW_SECRET_KEY" in r.json()["detail"]
     monkeypatch.setenv("ARCHFLOW_SECRET_KEY", TEST_SECRET)
     assert dev.get("/api/orgs/org-default/ai-settings").status_code == 403

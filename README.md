@@ -16,15 +16,18 @@ is validated, versioned, conflict-checked and shown live to everyone.
 | Project workspace | Projects, templates (blank, AI customer-support), per-branch working state |
 | Guided design chat | Describe an idea; ArchFlow asks multiple-choice questions (single/multi-select, recommended option, “Other”), then offers 2–4 ranked architectures with pros/cons, cost and complexity. Pick one to apply it to the canvas or open it as a draft branch. Works offline with a built-in question bank; adaptive with an LLM |
 | Accounts & organizations | Email + password accounts, HttpOnly session cookies, orgs with six roles (owner → viewer), invite links, org-scoped projects, per-org AI provider keys (encrypted) |
+| AI spend & budgets | Every LLM call is recorded with tokens and an estimated cost per organization, project, feature and model. Org admins see **AI usage** (this month vs budget, daily chart, by feature/model/project) and set a **monthly budget**; when it is used up, AI features pause and fall back to their built-in behaviour. Prices from LiteLLM, overridable with `ARCHFLOW_LLM_PRICES` |
 | Requirement model | Structured FR/NFR objects: actors, acceptance criteria, priority, status, category |
 | Requirement completeness | Lint for vague terms ("fast", "scalable"…), missing acceptance criteria/actors, missing NFR categories |
-| Architecture canvas | React Flow canvas: drag from palette, connect, move, multi-select, delete, copy/paste/duplicate, search, zoom/pan, minimap |
-| Component catalog | 150 components: generic building blocks plus AWS, Azure, Google Cloud, self-hosted open source and SaaS services, each mapped to a cloud-neutral kind. Searchable palette with vendor filters, vendor badges on nodes, "swap for an equivalent" in the inspector, and **Convert to AWS / Azure / Google Cloud / open source** for the whole canvas (also `convert_cloud` and `search_catalog` over MCP). Official vendor icon sets are next |
+| Architecture canvas | React Flow canvas: drag from palette, connect, move, multi-select, delete, copy/paste/duplicate, search, zoom/pan, minimap. **Tidy up** (`L`, or the button under the zoom controls) arranges a diagram in tiers (clients → gateways → services → caches/queues → databases → external/LLMs; internals follow the call flow), ordered to reduce crossings, each store under its service; one undo step. **Auto-arrange after AI edits** (on by default) tidies when the AI adds components, and new components never land on existing ones |
+| Component catalog | 150 components: generic building blocks plus AWS, Azure, Google Cloud, self-hosted open source and SaaS services, each mapped to a cloud-neutral kind. Searchable palette with vendor filters, vendor badges on nodes, "swap for an equivalent" in the inspector, and **Convert to AWS / Azure / Google Cloud / open source** for the whole canvas (also `convert_cloud` and `search_catalog` over MCP). Technology logos (Simple Icons: PostgreSQL, Redis, Kafka, Kubernetes, Google Cloud, Claude, Stripe, …) show on nodes; official AWS and Azure icon sets are next |
 | Canvas as structured data | Nodes/edges are typed objects (`service`, `database`, `agent`, `llm`, `mcp`, …) with technology, description, linked requirements |
-| HLD → LLD drill-down (C4) | Double-click a component (or **Open internals ↘**) to open its own low-level diagram; a breadcrumb leads back. **Generate low-level design** creates controller/service/repository components, API endpoints (inferred from the component and its requirements), tables for connected databases and events for connected queues — with the LLM when configured, a template otherwise. Inspector **Views**: API list (OpenAPI text), data model (Mermaid `erDiagram`) and main request flow (Mermaid `sequenceDiagram`). Connections stay within one diagram level; deleting a component deletes its internals. Also `generate_lld` / `get_component_views` over MCP |
+| HLD → LLD drill-down (C4) | Double-click a component (or **Open internals ↘**) to open its own low-level diagram; a breadcrumb leads back. **Generate low-level design** creates controller/service/repository components, API endpoints (inferred from the component and its requirements), tables for connected databases and events for connected queues — with the LLM when configured, a template otherwise. Inspector **Views**: API list (OpenAPI text), data model and main request flow, drawn in place with Mermaid (source still copyable); the request flow also exports as an interactive diagram. Connections stay within one diagram level; deleting a component deletes its internals. Also `generate_lld` / `get_component_views` over MCP |
 | AI edits the canvas | Natural-language commands ("Add Redis between Order Service and Orders DB") become operations on the model. Uses Claude when credentials exist; a built-in rule parser covers common commands offline |
 | AI requirements interviewer | Describe a product idea; Claude drafts requirements + architecture and asks clarifying questions |
-| AI project assistant | "Why was Redis added?", "What happens if the DB fails?", one-click architecture review. Answers come from the model, version history and activity log |
+| AI project assistant | "Why was Redis added?", "What happens if the DB fails?", one-click architecture review. Answers come from the model, version history and activity log, stream in as they are written (Markdown, with component names and requirement IDs linked to the canvas), and can be regenerated |
+| Conversations & memory | Ask, canvas edits and the design chat are **shared conversation threads** stored on the server: they survive reloads, teammates see them live, and a history menu reopens old ones. Follow-ups work ("now put a cache in front of *it*"): each AI call gets the latest turns verbatim plus a running summary of older ones, folded automatically as threads grow. **Project memory** holds settled facts ("Cloud: AWS", "data stays in the EU") that every answer, edit and design question respects; people add, edit, pin and delete them, design-chat answers are recorded, and the AI proposes facts it hears in conversations. REST under `/api/projects/{id}/conversations` and `/memory`; MCP `get_project_memory`, `remember`, `list_conversations`, `get_conversation`. See `backend/archflow/conversations.py` |
+| Export | **⤓ Export** in the top bar saves the diagram you are looking at (system or a component's internals) as a **PNG** or **SVG** image, or as an **interactive diagram**: a standalone, ArchFlow-branded HTML viewer (explore nodes, trace paths, themes, PNG/SVG/WebM export) made by ArchFlow's own renderer in `backend/renderer` (runs on the API server with Node.js 18+; forked from [Archify](https://github.com/tt-a1i/archify), MIT). The canvas layout is kept; suggested label positions are applied, and crowded layouts are spread out or put on a grid. `GET /api/projects/{id}/export/diagram`, `GET /api/projects/{id}/nodes/{node}/export/sequence` |
 | Real-time collaboration | Google Docs-style editing on a shared Yjs document (Hocuspocus server): edits merge automatically, offline edits sync on reconnect, undo/redo (Ctrl+Z / Ctrl+Y), presence avatars, live cursors and selection outlines. AI, MCP and API edits are merged into the live document field by field, so they never overwrite what people are typing |
 | Concurrent edits | Different fields of the same component merge; if someone changes the field you are editing, the field shows their value with a "Use theirs" option. API/MCP callers can still send `base_rev` for strict conflict detection (HTTP 409) |
 | Dark / light mode | Toggle in the top bar (system → light → dark), remembered per browser |
@@ -33,11 +36,11 @@ is validated, versioned, conflict-checked and shown live to everyone.
 | Traceability | Requirement ↔ component links; click a requirement to highlight everything implementing it; untraced requirements flagged |
 | Architecture validation | Orphans, client→DB access, shared databases, unguarded LLMs, missing auth or PII controls, missing gateway |
 | Health dashboard | Requirements completeness/approval, traceability %, architecture score, issue counts |
-| Vibe coding | Implementation brief for Claude Code / Codex / Gemini CLI / Aider from the whole system, selected components, or a requirement (pulls in traced context, interfaces, stubs, acceptance criteria → tests) |
-| Remote MCP server | Streamable HTTP at `/mcp` with OAuth 2.1 (works with Claude Code, Claude.ai, Claude Desktop and other MCP clients) or personal access tokens; 33 tools, org-scoped, read-only or read & edit. Agent edits show up live on everyone's canvas |
+| Vibe coding (OpenSpec) | **⚙ Vibe code** hands the design to a coding agent through spec-driven changes made with [OpenSpec](https://github.com/Fission-AI/openspec) itself (npm dependency in `backend/openspec`, run on the API server). For each artifact of OpenSpec's workflow (proposal → specs + design → tasks, in the order `openspec status` reports) ArchFlow fetches OpenSpec's own instructions and template (`openspec instructions --json`) and the LLM writes it from the selection, its traced requirements, connections, internal designs, decisions, project memory (passed as OpenSpec project context) and the living specs; `openspec validate --strict` checks the change and reported issues go back to the LLM to fix. All OpenSpec files (config, living specs, changes, archive) are stored in the database: view and edit files (re-validated on save), **archive** a change to merge its deltas into the living specs, download the whole `openspec/` folder, or copy an agent prompt. Without an LLM the change is derived from the design and still validated. **Quick brief** is the instant one-file prompt. REST under `/api/projects/{id}/openspec`; MCP `generate_change_spec`, `get_openspec`, `get_openspec_file` |
+| Remote MCP server | Streamable HTTP at `/mcp` with OAuth 2.1 (works with Claude Code, Claude.ai, Claude Desktop and other MCP clients) or personal access tokens; 40 tools, org-scoped, read-only or read & edit. Agent edits show up live on everyone's canvas |
 | Activity history | Who changed what, and when, per branch |
 | Code ↔ architecture | **Code** button: analyse a public Git repository (or upload a graph made locally by `archflow-codegraph`) with [Graphify](https://pypi.org/project/graphifyy/) — tree-sitter code graph of files, symbols, calls and imports, Leiden communities, god nodes, import cycles — plus deterministic detections (languages, manifests, docker-compose, Dockerfiles, Kubernetes, Terraform, databases/caches/queues/LLM providers from imported libraries, entry points). **Reconstruct architecture** opens a `draft/from-code-<sha>` branch with services, clients and infrastructure, connections and catalog matches; components keep their code paths (linked to the repo at that commit in the inspector). **Drift** compares any branch with the code (in code but not designed, designed but not in code, undeclared connections, technology mismatches) and feeds the Issues tab; **change impact** maps changed files → dependent symbols → components → requirements. REST under `/api/projects/{id}/codegraph`, MCP `analyze_repository`, `get_code_summary`, `get_drift`, `get_change_impact` |
-| Architecture decisions | **Decisions** tab: ADRs (ADR-001, …) with status, context, decision, consequences, alternatives and linked requirements. **Compare drafts** scores 2–4 branches against the requirements/NFRs on cost, scalability, performance, security, reliability, operability and delivery speed (1–5 matrix + recommendation) using the [Jev](https://thejevai.com/docs) decision API (`JEV_API_KEY`), else the LLM, else an offline heuristic; the engine is always shown. Record the result as an ADR and **adopt** the chosen draft into `main` (safety version first, then a new version). REST under `/api/projects/{id}/decisions` and `/evaluate`; MCP `evaluate_alternatives` & co. |
+| Architecture decisions | **Decisions** tab: ADRs (ADR-001, …) with status, context, decision, consequences, alternatives and linked requirements. **Compare drafts** scores 2–4 branches against the requirements/NFRs on cost, scalability, performance, security, reliability, operability and delivery speed (1–5 matrix + recommendation) using the LLM (any provider), else an offline heuristic; the engine is always shown. Record the result as an ADR and **adopt** the chosen draft into `main` (safety version first, then a new version). REST under `/api/projects/{id}/decisions` and `/evaluate`; MCP `evaluate_alternatives` & co. |
 
 ## Quick start
 
@@ -54,6 +57,8 @@ cp .env.example .env
 cd backend
 uv sync
 uv run uvicorn archflow.main:app --reload --port 8000
+#    optional: OpenSpec for Vibe code (needs Node.js 20.19+)
+#    cd backend/openspec && npm ci --omit=dev
 
 # 2. Collaboration server (ws://localhost:1234), in a second terminal
 cd collab
@@ -68,6 +73,17 @@ npm run dev
 
 Open http://localhost:5173, create an account (the first account becomes owner of every existing org), and create a project from the **AI customer-support** template.
 To see multiplayer, invite a second account (Members & invites → Create invite link) and open the link in a private window.
+
+### Production (Docker)
+
+```bash
+cp .env.example .env   # set POSTGRES_PASSWORD, ARCHFLOW_INTERNAL_TOKEN, ARCHFLOW_SECRET_KEY, ARCHFLOW_PUBLIC_URL, an LLM key
+docker compose -f docker-compose.prod.yml up -d --build   # web on :8080 (put TLS in front)
+```
+
+See [docs/deploy.md](docs/deploy.md) for the services, operations and current single-instance limits. CI
+(`.github/workflows/ci.yml`) runs the backend tests on SQLite and Postgres, the web build, a collaboration
+end-to-end test and the Docker image builds.
 
 ### Enabling the LLM
 
@@ -86,7 +102,6 @@ offline logic, and the Ask assistant is disabled.
 | `ARCHFLOW_MODEL_FAST` | `gemini/gemini-3.8-flash` | Fast model |
 | `ARCHFLOW_ORG_RPM` | `60` | LLM requests per minute per org |
 | `LANGFUSE_PUBLIC_KEY` … | – | Enables LLM tracing |
-| `JEV_API_KEY` | – | Jev decision API for comparing drafts (falls back to the LLM, then an offline heuristic) |
 | `DATABASE_URL` | – | `postgresql://…` switches storage to Postgres |
 | `ARCHFLOW_DB` | `backend/data/archflow.db` | SQLite path when `DATABASE_URL` is unset |
 
@@ -119,6 +134,31 @@ uv run archflow-codegraph ../path/to/repo -o archflow-codegraph.json
 | `ARCHFLOW_CODEGRAPH_MAX_REPO_MB` / `_CLONE_TIMEOUT` | `500` / `180` | Clone size cap and time limit |
 | `ARCHFLOW_CODEGRAPH_MAX_UPLOAD_MB` | `25` | Upload size limit |
 | `ARCHFLOW_CODEGRAPH_JOBS` / `_PROCS` | `1` / `2` | Concurrent analyses / parser processes per analysis |
+
+How the architecture is reconstructed (deterministic; `codegraph/reconstruct.py` documents every rule):
+
+- **Code units** are directories with a package manifest. Each gets a role: *runtime service* (server framework,
+  server entry point, Dockerfile or compose service), *client app* (UI framework with an app entry point),
+  *library* (folded into the units that import it — its paths are appended to theirs) or *tooling* (email
+  templates such as react-email, docs/Storybook sites, copier/cookiecutter `hooks/`, `scripts/`). Only runtime
+  units and infrastructure become components.
+- **docker compose**: all compose files are merged by service name (base, then `*.override.*`, then others, as
+  `docker compose` does). A service whose build context, Dockerfile or name matches a code unit *is* that unit
+  (`props.compose_service`). Known images are typed: PostgreSQL/MySQL/MongoDB/Elasticsearch → database (merged
+  with the same database found through client libraries), Redis/Valkey/Memcached → cache, RabbitMQ/Kafka/NATS →
+  queue, MinIO → storage, Traefik/NGINX/Caddy/HAProxy/Envoy/Kong → gateway, Keycloak → security,
+  Prometheus/Grafana → monitoring services. Dev/test tools (Adminer, pgAdmin, Mailpit, MailHog, MailDev,
+  Playwright, Selenium, Cypress, LocalStack, ...) are left out and listed as `dev_tools` in the summary and the
+  reconstruct result; `POST .../reconstruct {"include_dev_tools": true}` adds them as components.
+- **Connections** run from the importer/caller to its dependency: unit → datastore it imports a client for,
+  compose `depends_on` and service hostnames in compose environment values, gateway → the services it routes to
+  (Traefik `traefik.http.routers.*` labels, nginx/Caddy/Traefik config files), client → backend over HTTP/WebSocket
+  — through the gateway when one routes to that backend (client → gateway → backend). Code references between
+  units count only within one language and never from tests or generated code; a backend never "imports" a
+  front-end.
+- **Names** are deterministic (`Backend API`, `Web App`, `PostgreSQL`, `Traefik`). The optional LLM pass may only
+  rename runtime services, to at most three Title Case words without parentheses or technology names; any other
+  proposal keeps the deterministic name.
 
 Security: only `https://` URLs without credentials on port 443 are accepted; the host is resolved and **every**
 address must be public (loopback, private, link-local — including the cloud metadata address — CGNAT, multicast
@@ -277,7 +317,7 @@ In rough order of leverage:
 
 1. **ADRs** as first-class objects linked to components and requirements.
 2. **Branch merge** with three-way diff and AI-assisted conflict resolution.
-3. **Architecture alternatives + JEV evaluation**: generate options A/B/C as branches and score them.
+3. **Architecture alternatives**: generate options A/B/C as branches and score them (done: Compare drafts).
 4. **Comments, @mentions and approval workflows** on any object; per-project role overrides, SSO.
 5. **Repository analysis**: done for public repos and uploaded graphs; next: GitHub App, drift on every push/PR, PR review comments.
 6. **Jira sync**: epics/stories generated from requirements, with status reflected on the canvas.
@@ -290,3 +330,12 @@ In rough order of leverage:
 
 Apache-2.0. The optional repository-analysis extra uses [Graphify](https://pypi.org/project/graphifyy/)
 (`graphifyy`, Apache-2.0; ships an additional MIT license file and NOTICE) and its tree-sitter grammars; it is not installed by default.
+
+## AI providers and models
+
+Organization admins open **AI settings** (on the projects page, or the *AI off · set up* pill in a project) to add provider keys
+(Gemini, Anthropic, OpenAI, OpenRouter, Mistral, Groq, DeepSeek, xAI, Azure OpenAI, or any OpenAI-compatible server such as Ollama or vLLM)
+and choose a *reasoning* and a *fast* model, each with up to 4 fallbacks. Calls go through LiteLLM. Keys are encrypted with
+`ARCHFLOW_SECRET_KEY`; if it is unset the API generates `secret.key` next to the database (back it up with the database).
+Server-wide keys in `backend/.env` remain the defaults for organizations that configure nothing.
+Self-hosted endpoints on private addresses need `ARCHFLOW_ALLOW_PRIVATE_AI_URLS=true`.

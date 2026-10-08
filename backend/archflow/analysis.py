@@ -29,6 +29,27 @@ AMBIGUOUS_TERMS = {
 }
 
 NFR_CATEGORIES = ["performance", "scalability", "availability", "security", "privacy", "observability", "cost"]
+# What a non-functional requirement covers is judged from its category AND its wording, so e.g. a "Compliance"
+# requirement about GDPR and PII encryption counts for privacy and security.
+NFR_SIGNALS = {
+    "performance": r"performance|latency|response time|\bp9[059]\b|throughput|\d\s*ms\b",
+    "scalability": r"scalab|\bpeak|concurrent|\bload\b|orders/day|requests per|\brps\b|elastic|autoscal",
+    "availability": r"availab|uptime|\bsla\b|99\.\d|failover|disaster|\brecovery\b|\brto\b|\brpo\b",
+    "security": r"secur|authenticat|authori[sz]|encrypt|\btls\b|owasp|\brbac\b|least privilege|\bsecrets?\b",
+    "privacy": r"privacy|gdpr|\bpii\b|personal data|data subject|consent|right to be forgotten|retention|\bccpa\b",
+    "observability": r"observab|monitor|\blogging\b|tracing|metrics|alerting",
+    "cost": r"\bcosts?\b|budget|\bspend|\$|€",
+}
+
+
+def nfr_coverage(state: ProjectState) -> set[str]:
+    covered: set[str] = set()
+    for r in state.requirements.values():
+        if r.kind != "non_functional":
+            continue
+        text = f"{r.category} {r.title} {r.description} {' '.join(r.acceptance_criteria)}".lower()
+        covered |= {cat for cat, pat in NFR_SIGNALS.items() if cat in r.category.lower() or re.search(pat, text)}
+    return covered
 
 AUTH_WORDS = re.compile(r"\b(auth|login|log in|sign[ -]?in|authenticat|account|password|oauth|sso)", re.I)
 PII_WORDS = re.compile(r"\b(pii|personal data|email|phone|address|gdpr|customer data)", re.I)
@@ -50,7 +71,7 @@ def lint_requirements(state: ProjectState) -> list[dict[str, Any]]:
             issues.append(_issue("info", "actors", f"{req.id} does not name an actor.",
                                  "Say who performs or benefits from this requirement.", requirement_ids=[req.id]))
 
-    present = {r.category.lower() for r in state.requirements.values() if r.kind == "non_functional"}
+    present = nfr_coverage(state)
     if state.requirements:
         for cat in NFR_CATEGORIES:
             if cat not in present:
@@ -102,14 +123,19 @@ def validate_architecture(state: ProjectState) -> list[dict[str, Any]]:
                     issues.append(_issue("error", "direct_db_access",
                                          f"Client '{nodes[src].name}' talks directly to '{n.name}'.",
                                          "Route data access through a service or API gateway.", node_ids=[src, n.id]))
-            readers = [r for r in incoming.get(n.id, []) if r in nodes]
-            if len(readers) > 1 and all(nodes[r].type == "service" for r in readers):
-                issues.append(_issue("info", "shared_db", f"'{n.name}' is shared by {len(readers)} services.",
-                                     "Shared databases couple services; consider ownership per service.",
+            # Backends sharing one store couple their schemas and deployments. Count every backend kind (an agent
+            # or MCP server reading the store counts too), and warn once three or more share it.
+            readers = [r for r in dict.fromkeys(incoming.get(n.id, [])) if r in nodes
+                       and nodes[r].type in ("service", "agent", "mcp", "component")]
+            if len(readers) > 1:
+                issues.append(_issue("warning" if len(readers) >= 3 else "info", "shared_db",
+                                     f"'{n.name}' is shared by {len(readers)} services.",
+                                     "Shared databases couple services; give each service ownership of its data "
+                                     "(its own schema or database) and share through APIs or events.",
                                      node_ids=[n.id, *readers]))
-        if n.type == "llm" and not any(nodes[s].type in ("agent", "service", "gateway")
+        if n.type == "llm" and not any(nodes[s].type in ("agent", "service", "gateway", "security", "mcp")
                                        for s in incoming.get(n.id, []) if s in nodes):
-            issues.append(_issue("warning", "llm_exposed", f"LLM '{n.name}' has no agent/service in front of it.",
+            issues.append(_issue("warning", "llm_exposed", f"LLM '{n.name}' has no agent, service or guardrail in front of it.",
                                  "Put an agent or service between users and the model for guardrails.", node_ids=[n.id]))
 
     all_text = " ".join(f"{r.title} {r.description}" for r in state.requirements.values())
@@ -118,8 +144,7 @@ def validate_architecture(state: ProjectState) -> list[dict[str, Any]]:
     if AUTH_WORDS.search(all_text) and "security" not in has_type and not re.search(r"auth|identity|cognito|keycloak|oauth", names):
         issues.append(_issue("error", "missing_auth", "Requirements mention authentication but no auth component exists.",
                              "Add an authentication/identity service."))
-    if PII_WORDS.search(all_text) and not any("pii" in r.category.lower() or r.category.lower() in ("privacy", "security")
-                                              for r in state.requirements.values()):
+    if PII_WORDS.search(all_text) and not ({"privacy", "security"} & nfr_coverage(state)):
         issues.append(_issue("warning", "pii", "Requirements involve personal data but no privacy/security NFR exists.",
                              "Add PII handling, encryption and retention requirements."))
     if any(n.type == "client" for n in nodes.values()) and "gateway" not in has_type and len(nodes) > 4:

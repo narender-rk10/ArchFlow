@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { UNAUTHORIZED_EVENT, api } from "./api";
 import { AuthScreen } from "./components/AuthScreen";
+import { Landing } from "./components/Landing";
 import { ProjectPicker } from "./components/ProjectPicker";
 import { Workspace } from "./components/Workspace";
 import { ThemeToggle, useTheme } from "./theme";
+import { lastBranch } from "./recent";
 import type { Me, User } from "./types";
 
 const COLORS = ["#e5484d", "#f76b15", "#ffb224", "#30a46c", "#12a594", "#0090ff", "#6e56cf", "#d6409f"];
@@ -49,7 +51,11 @@ export default function App() {
 
   useEffect(() => {
     refreshMe();
-    const onHash = () => setRoute(readRoute());
+    const onHash = () => {
+      const r = readRoute();
+      setRoute(r);
+      if (r.kind === "login" || r.kind === "signup") setAuthMode(r.kind);
+    };
     const onUnauthorized = () => setMe(null);
     window.addEventListener("hashchange", onHash);
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
@@ -83,16 +89,19 @@ export default function App() {
 
   if (me === undefined) return <div className="picker"><p className="muted center">Loading…</p></div>;
   if (me === null) {
+    if (route.kind === "home") {
+      return <Landing themeToggle={themeToggle} onSignIn={() => { location.hash = "#/login"; }} onSignUp={() => { location.hash = "#/signup"; }} />;
+    }
     return (
       <AuthScreen mode={authMode} invite={route.kind === "invite" ? route.token : null} themeToggle={themeToggle}
-        onMode={setAuthMode}
+        onMode={(m) => { setAuthMode(m); if (route.kind !== "invite") location.hash = `#/${m}`; }}
         onSignedIn={(m) => { setMe(m); if (route.kind !== "project") location.hash = ""; }} />
     );
   }
 
   const user: User = { name: me.user.name, color };
   if (route.kind !== "project") {
-    return <ProjectPicker me={me} user={user} colors={COLORS} onColor={saveColor} onOpen={(pid) => open(pid)}
+    return <ProjectPicker me={me} user={user} colors={COLORS} onColor={saveColor} onOpen={(pid) => open(pid, lastBranch(pid))}
       onLogout={logout} onMeChanged={refreshMe} notice={inviteMsg} themeToggle={themeToggle} />;
   }
   return (
@@ -106,6 +115,7 @@ export default function App() {
       themeToggle={themeToggle}
       onBranch={(b) => open(route.pid, b)}
       onExit={() => open(null)}
+      onOpenProject={(pid, branch) => open(pid, branch)}
       onLogout={logout}
     />
   );
