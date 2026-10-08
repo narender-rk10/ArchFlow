@@ -24,7 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from . import (accounts, ai, openspec_service, diagram_export, auth, catalog, chat, collab_sync, conversations, decisions, lld, llm,
-               secrets_box, users)
+               secrets_box, usage, users)
 from .analysis import full_analysis, trace_requirement
 from .codegraph.service import CodeGraphService
 from .codegraph.service import register_routes as register_codegraph_routes
@@ -172,6 +172,8 @@ def create_app(store: Store | None = None) -> FastAPI:
     authz = Authz(store)
     # LLM calls made for an org use that org's own provider keys when it has configured some (BYOK).
     llm.set_org_key_resolver(lambda org_id: secrets_box.org_ai_keys(store, org_id))
+    # Every LLM call is recorded (tokens, estimated cost) and checked against the org's monthly budget.
+    budgets = usage.install(store)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -182,6 +184,7 @@ def create_app(store: Store | None = None) -> FastAPI:
     app = FastAPI(title="ArchFlow", version="0.1.0", lifespan=lifespan)
     origins = users.allowed_origins()
     app.add_middleware(CSRFMiddleware, allowed=origins)
+    app.add_middleware(usage.UsageScopeMiddleware)
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True,
                        allow_methods=["*"], allow_headers=["*"])
     app.state.store = store
@@ -251,6 +254,7 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     # ---- accounts, orgs, members, invites, org AI settings ----
     accounts.register_routes(app, store, authz)
+    usage.register_routes(app, store, authz, budgets)
 
     # ---- projects ----
     @app.get("/api/projects")

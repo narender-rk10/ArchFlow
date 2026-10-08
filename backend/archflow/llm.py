@@ -54,13 +54,16 @@ import re
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Protocol
 
 log = logging.getLogger("archflow.llm")
 
 __all__ = ["LLMUnavailable", "LLMRefused", "LLMInvalidOutput", "available", "status",
-           "complete_json", "complete_tools", "stream_text", "set_org_key_resolver", "invalidate_org"]
+           "complete_json", "complete_tools", "stream_text", "set_org_key_resolver", "invalidate_org",
+           "LLMBudgetExceeded", "usage_scope", "set_usage_scope", "set_usage_hooks", "budget_block", "estimate_cost"]
 
 
 # Thinking models (Gemini 3.x, Claude, GPT-5) spend output tokens on reasoning before answering; a small
@@ -218,10 +221,116 @@ def _org_keys(org_id: str | None) -> dict[str, str]:
 
 
 def available(org_id: str | None = None) -> bool:
+    """True when a provider is configured (environment or the org's own keys) and the org's monthly AI budget is
+    not used up, so callers fall back to their offline paths when it is."""
     if _mode() == "offline":
         return False
     org_keys = _org_keys(org_id)
-    return any(_tiers(g, org_keys) for g in GROUPS)
+    if not any(_tiers(g, org_keys) for g in GROUPS):
+        return False
+    return budget_block(org_id) is None
+
+
+# --------------------------------------------------------------------------- usage, cost and budgets
+class LLMBudgetExceeded(LLMUnavailable):
+    """The organization's monthly AI budget is used up."""
+
+
+# The request's attribution, set by the API per request (main.py middleware): which project and feature an LLM
+# call is made for. asyncio.to_thread copies context, so worker threads see it too.
+_usage_scope: ContextVar[dict[str, str]] = ContextVar("archflow_llm_usage_scope", default={})
+
+
+@contextmanager
+def usage_scope(**fields: str) -> Iterator[None]:
+    token = _usage_scope.set({**_usage_scope.get(), **{k: v for k, v in fields.items() if v}})
+    try:
+        yield
+    finally:
+        _usage_scope.reset(token)
+
+
+def set_usage_scope(**fields: str) -> None:
+    """Set the attribution for the rest of the current context (one request)."""
+    _usage_scope.set({**_usage_scope.get(), **{k: v for k, v in fields.items() if v}})
+
+
+UsageRecorder = Callable[[dict[str, Any]], None]
+BudgetCheck = Callable[[str], "str | None"]  # org_id -> reason it is blocked, or None
+_usage_recorder: UsageRecorder | None = None
+_budget_check: BudgetCheck | None = None
+
+# USD per million (input, output) tokens, used when LiteLLM does not know a model's price. Keys are matched as
+# substrings of the model name, longest first. Override or extend with ARCHFLOW_LLM_PRICES='{"model": [in, out]}'.
+DEFAULT_PRICES: dict[str, tuple[float, float]] = {
+    "gemini-3.8-flash": (0.30, 2.50), "gemini-3.1-pro": (2.00, 12.00), "flash": (0.30, 2.50), "gemini": (1.25, 10.00),
+    "claude-opus": (15.00, 75.00), "claude-sonnet": (3.00, 15.00), "claude-haiku": (1.00, 5.00), "claude": (3.00, 15.00),
+    "gpt-5-mini": (0.25, 2.00), "gpt-5": (1.25, 10.00), "gpt-4o-mini": (0.15, 0.60), "gpt-4o": (2.50, 10.00),
+}
+
+
+def set_usage_hooks(recorder: UsageRecorder | None, budget_check: BudgetCheck | None) -> None:
+    """``recorder(event)`` stores one call's usage; ``budget_check(org_id)`` returns why the org may not call
+    models right now (monthly budget used up), or None. Wired to the store in main.create_app."""
+    global _usage_recorder, _budget_check
+    _usage_recorder, _budget_check = recorder, budget_check
+
+
+def budget_block(org_id: str | None) -> str | None:
+    if not org_id or _budget_check is None:
+        return None
+    try:
+        return _budget_check(org_id)
+    except Exception:  # noqa: BLE001 - a broken budget store must not take AI down
+        log.exception("budget check failed for org %s", org_id)
+        return None
+
+
+def _prices() -> dict[str, tuple[float, float]]:
+    prices = dict(DEFAULT_PRICES)
+    raw = os.environ.get("ARCHFLOW_LLM_PRICES", "")
+    if raw:
+        try:
+            prices.update({k: (float(v[0]), float(v[1])) for k, v in json.loads(raw).items()})
+        except (ValueError, TypeError, IndexError):
+            log.warning("ARCHFLOW_LLM_PRICES is not valid JSON {model: [input, output]}; using defaults")
+    return prices
+
+
+def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int, resp: Any = None) -> tuple[float, str]:
+    """(USD, source): LiteLLM's price list when it knows the model, else ARCHFLOW_LLM_PRICES / the defaults."""
+    if resp is not None:
+        try:
+            import litellm
+
+            cost = float(litellm.completion_cost(completion_response=resp) or 0)
+            if cost > 0:
+                return cost, "litellm"
+        except Exception:  # noqa: BLE001 - unknown model or response shape
+            pass
+    name = (model or "").lower()
+    prices = _prices()
+    key = next((k for k in sorted(prices, key=len, reverse=True) if k.lower() in name), None)
+    if key is None:
+        return 0.0, "unknown"
+    pin, pout = prices[key]
+    return (prompt_tokens * pin + completion_tokens * pout) / 1_000_000, "table"
+
+
+def _record(org_id: str | None, group: str, model: str, prompt_tokens: int, completion_tokens: int,
+            latency_ms: float, resp: Any = None, estimated: bool = False) -> None:
+    if _usage_recorder is None:
+        return
+    cost, source = estimate_cost(model, prompt_tokens, completion_tokens, resp)
+    scope = _usage_scope.get()
+    try:
+        _usage_recorder({"org_id": org_id or "", "project_id": scope.get("project_id", ""),
+                         "feature": scope.get("feature", "other"), "group": group, "model": model,
+                         "prompt_tokens": int(prompt_tokens or 0), "completion_tokens": int(completion_tokens or 0),
+                         "cost_usd": round(cost, 6), "cost_source": "estimate" if estimated else source,
+                         "latency_ms": int(latency_ms)})
+    except Exception:  # noqa: BLE001 - never fail a model call because usage could not be stored
+        log.exception("recording LLM usage failed")
 
 
 def status() -> dict:
@@ -507,6 +616,9 @@ def _dispatch(group: str, org_id: str | None, **kwargs) -> Any:
     if not tiers:
         raise LLMUnavailable("No LLM provider configured (set GEMINI_API_KEY, ANTHROPIC_API_KEY or OPENAI_API_KEY, "
                              "or add your organization's own key in AI settings)")
+    blocked = budget_block(org_id)
+    if blocked:
+        raise LLMBudgetExceeded(blocked)
     _acquire_org(org_id)
 
     router = _get_router(org_keys, org_id) if org_keys else _get_router()
@@ -566,6 +678,14 @@ def _dispatch(group: str, org_id: str | None, **kwargs) -> Any:
                      group, tier.model, getattr(resp, "model", None), org_id, (time.monotonic() - t0) * 1000,
                      (time.monotonic() - started) * 1000, total_calls, tier_idx,
                      getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None))
+            if kwargs.get("stream"):
+                try:  # stream_text records usage once the stream is read
+                    setattr(resp, "_archflow_model", tier.model)
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                _record(org_id, group, tier.model, getattr(usage, "prompt_tokens", 0) or 0,
+                        getattr(usage, "completion_tokens", 0) or 0, (time.monotonic() - t0) * 1000, resp)
             return resp
         if time.monotonic() > deadline:
             break
@@ -701,6 +821,8 @@ def stream_text(system: str, messages: list[dict], *, group: str = "reasoning", 
             yield text
         return
     sent = False
+    parts: list[str] = []
+    t0 = time.monotonic()
     try:
         for chunk in resp:
             choices = _get(chunk, "choices") or []
@@ -711,7 +833,12 @@ def stream_text(system: str, messages: list[dict], *, group: str = "reasoning", 
             text = _get(_get(choice, "delta"), "content") if _get(choice, "delta") is not None else None
             if text:
                 sent = True
+                parts.append(text)
                 yield text
+        # Streams carry no usage here: estimate ~4 characters per token from the prompt and the answer.
+        prompt_chars = len(system) + sum(len(str(m.get("content", ""))) for m in messages)
+        _record(org_id, group, getattr(resp, "_archflow_model", primary_model(group)), prompt_chars // 4,
+                len("".join(parts)) // 4, (time.monotonic() - t0) * 1000, estimated=True)
     except LLMRefused:
         raise
     except Exception as exc:  # noqa: BLE001 - classified below

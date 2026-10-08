@@ -16,6 +16,7 @@ is validated, versioned, conflict-checked and shown live to everyone.
 | Project workspace | Projects, templates (blank, AI customer-support), per-branch working state |
 | Guided design chat | Describe an idea; ArchFlow asks multiple-choice questions (single/multi-select, recommended option, “Other”), then offers 2–4 ranked architectures with pros/cons, cost and complexity. Pick one to apply it to the canvas or open it as a draft branch. Works offline with a built-in question bank; adaptive with an LLM |
 | Accounts & organizations | Email + password accounts, HttpOnly session cookies, orgs with six roles (owner → viewer), invite links, org-scoped projects, per-org AI provider keys (encrypted) |
+| AI spend & budgets | Every LLM call is recorded with tokens and an estimated cost per organization, project, feature and model. Org admins see **AI usage** (this month vs budget, daily chart, by feature/model/project) and set a **monthly budget**; when it is used up, AI features pause and fall back to their built-in behaviour. Prices from LiteLLM, overridable with `ARCHFLOW_LLM_PRICES` |
 | Requirement model | Structured FR/NFR objects: actors, acceptance criteria, priority, status, category |
 | Requirement completeness | Lint for vague terms ("fast", "scalable"…), missing acceptance criteria/actors, missing NFR categories |
 | Architecture canvas | React Flow canvas: drag from palette, connect, move, multi-select, delete, copy/paste/duplicate, search, zoom/pan, minimap. **Tidy up** (`L`, or the button under the zoom controls) arranges a diagram in tiers (clients → gateways → services → caches/queues → databases → external/LLMs; internals follow the call flow), ordered to reduce crossings, each store under its service; one undo step. **Auto-arrange after AI edits** (on by default) tidies when the AI adds components, and new components never land on existing ones |
@@ -72,6 +73,17 @@ npm run dev
 
 Open http://localhost:5173, create an account (the first account becomes owner of every existing org), and create a project from the **AI customer-support** template.
 To see multiplayer, invite a second account (Members & invites → Create invite link) and open the link in a private window.
+
+### Production (Docker)
+
+```bash
+cp .env.example .env   # set POSTGRES_PASSWORD, ARCHFLOW_INTERNAL_TOKEN, ARCHFLOW_SECRET_KEY, ARCHFLOW_PUBLIC_URL, an LLM key
+docker compose -f docker-compose.prod.yml up -d --build   # web on :8080 (put TLS in front)
+```
+
+See [docs/deploy.md](docs/deploy.md) for the services, operations and current single-instance limits. CI
+(`.github/workflows/ci.yml`) runs the backend tests on SQLite and Postgres, the web build, a collaboration
+end-to-end test and the Docker image builds.
 
 ### Enabling the LLM
 

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { getRecent, pruneRecent, timeAgo } from "../recent";
 import { can, type Me, type Project, type User } from "../types";
-import { AISettingsDialog, MembersDialog } from "./OrgDialogs";
+import { AISettingsDialog, AIUsageDialog, MembersDialog } from "./OrgDialogs";
 import { UserMenu } from "./UserMenu";
 
 interface Props {
@@ -34,7 +34,7 @@ export function ProjectPicker({ me, user, colors, onColor, onOpen, onLogout, onM
     return orgs.some((o) => o.id === saved) ? saved : orgs[0]?.id ?? "";
   });
   const [newOrg, setNewOrg] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"members" | "ai" | null>(null);
+  const [dialog, setDialog] = useState<"members" | "ai" | "usage" | null>(null);
   const org = orgs.find((o) => o.id === orgId);
   const role = org?.role;
 
@@ -107,6 +107,7 @@ export function ProjectPicker({ me, user, colors, onColor, onOpen, onLogout, onM
           </select>
           {org && <button onClick={() => setDialog("members")}>{can(role, "admin") ? "Members & invites" : "Members"}</button>}
           {org && can(role, "admin") && me.features.ai_settings && <button onClick={() => setDialog("ai")}>AI keys</button>}
+          {org && can(role, "admin") && <button onClick={() => setDialog("usage")}>AI usage</button>}
           {newOrg === null ? (
             <button onClick={() => setNewOrg("")}>New organization</button>
           ) : (
@@ -186,6 +187,9 @@ export function ProjectPicker({ me, user, colors, onColor, onOpen, onLogout, onM
       {dialog === "members" && org && role && (
         <MembersDialog orgId={org.id} orgName={org.name} role={role} selfId={me.user.id}
           onClose={() => setDialog(null)} onChanged={onMeChanged} />
+      )}
+      {dialog === "usage" && org && role && (
+        <AIUsageDialog orgId={org.id} orgName={org.name} role={role} selfId={me.user.id} onClose={() => setDialog(null)} />
       )}
       {dialog === "ai" && org && role && (
         <AISettingsDialog orgId={org.id} orgName={org.name} role={role} selfId={me.user.id} onClose={() => setDialog(null)} />

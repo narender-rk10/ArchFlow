@@ -234,6 +234,26 @@ CREATE TABLE IF NOT EXISTS openspec_changes (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (project_id, change_id)
 );
+CREATE TABLE IF NOT EXISTS ai_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id TEXT NOT NULL,
+    project_id TEXT NOT NULL DEFAULT '',
+    feature TEXT NOT NULL DEFAULT 'other',
+    model TEXT NOT NULL DEFAULT '',
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    cost_source TEXT NOT NULL DEFAULT '',
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS org_ai_budgets (
+    org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    monthly_limit_usd REAL,
+    alert_percent INTEGER NOT NULL DEFAULT 80,
+    updated_by TEXT,
+    updated_at TEXT NOT NULL
+);
 """
 
 MEMBERSHIPS_DDL = """
@@ -258,6 +278,7 @@ CREATE INDEX IF NOT EXISTS idx_invites_org ON invites(org_id);
 CREATE INDEX IF NOT EXISTS idx_code_graphs_project ON code_graphs(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_project_memory_project ON project_memory(project_id);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_org_time ON ai_usage(org_id, created_at);
 """
 
 USER_COLS = "id, email, name, created_at, last_login_at"
@@ -298,6 +319,11 @@ MEMORY_FIELDS = ("text", "category", "pinned")
 OPENSPEC_STATUSES = ("draft", "valid", "invalid", "archived")
 OPENSPEC_CHANGE_COLS = "change_id, title, status, engine, branch, scope, validation, archived_as, created_by, created_at, updated_at"
 OPENSPEC_CHANGE_FIELDS = ("title", "status", "engine", "branch", "scope", "validation", "archived_as")
+
+
+# ---- AI usage and budgets (see llm.set_usage_hooks, usage.py) ----
+AI_USAGE_FIELDS = ("org_id", "project_id", "feature", "model", "prompt_tokens", "completion_tokens", "cost_usd",
+                   "cost_source", "latency_ms")
 
 
 def conversation_id() -> str:
@@ -1064,6 +1090,44 @@ class Store:
                                (pid, len(prefix), prefix))
             return self._conn.execute("DELETE FROM openspec_changes WHERE project_id=? AND change_id=?",
                                       (pid, change_id)).rowcount > 0
+
+    # ---- AI usage and budgets --------------------------------------------
+    def record_ai_usage(self, event: dict[str, Any]) -> None:
+        cols = [k for k in AI_USAGE_FIELDS if k in event]
+        with self.lock, self._conn:
+            self._conn.execute(f"INSERT INTO ai_usage ({', '.join(cols)}, created_at) VALUES ({', '.join('?' * len(cols))}, ?)",
+                               (*[event[k] for k in cols], now()))
+
+    def ai_spend(self, org_id: str, since: str) -> float:
+        row = self._one("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM ai_usage WHERE org_id=? AND created_at >= ?",
+                        (org_id, since))
+        return float(row["c"])
+
+    def ai_usage_summary(self, org_id: str, since: str) -> dict[str, Any]:
+        def rows(by: str) -> list[dict[str, Any]]:
+            return [dict(r) for r in self._all(
+                f"SELECT {by} AS key, COUNT(*) AS calls, SUM(prompt_tokens) AS prompt_tokens, "
+                f"SUM(completion_tokens) AS completion_tokens, SUM(cost_usd) AS cost_usd FROM ai_usage "
+                f"WHERE org_id=? AND created_at >= ? GROUP BY {by} ORDER BY cost_usd DESC, calls DESC", (org_id, since))]
+        total = dict(self._one("SELECT COUNT(*) AS calls, COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
+                               "COALESCE(SUM(completion_tokens), 0) AS completion_tokens, COALESCE(SUM(cost_usd), 0) "
+                               "AS cost_usd FROM ai_usage WHERE org_id=? AND created_at >= ?", (org_id, since)))
+        return {"total": total, "by_feature": rows("feature"), "by_model": rows("model"),
+                "by_project": rows("project_id"), "daily": rows("substr(created_at, 1, 10)")}
+
+    def get_ai_budget(self, org_id: str) -> dict[str, Any]:
+        row = self._one("SELECT monthly_limit_usd, alert_percent, updated_by, updated_at FROM org_ai_budgets "
+                        "WHERE org_id=?", (org_id,))
+        return dict(row) if row else {"monthly_limit_usd": None, "alert_percent": 80, "updated_by": None, "updated_at": None}
+
+    def set_ai_budget(self, org_id: str, monthly_limit_usd: float | None, alert_percent: int, user: str) -> dict[str, Any]:
+        with self.lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO org_ai_budgets (org_id, monthly_limit_usd, alert_percent, updated_by, updated_at) "
+                "VALUES (?,?,?,?,?) ON CONFLICT (org_id) DO UPDATE SET monthly_limit_usd=excluded.monthly_limit_usd, "
+                "alert_percent=excluded.alert_percent, updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                (org_id, monthly_limit_usd, alert_percent, user, now()))
+        return self.get_ai_budget(org_id)
 
 def default_store():
     """Postgres when DATABASE_URL is a postgres URL, otherwise SQLite (ARCHFLOW_DB or backend/data/archflow.db)."""

@@ -287,3 +287,12 @@ export interface OpenSpecJob {
   id: string; status: "running" | "done" | "failed"; step: string; steps: { step: string; at: number }[];
   change_id: string | null; error: string | null; elapsed?: number;
 }
+
+// ---- AI usage and budgets ----
+export interface AIUsageRow { key: string; calls: number; prompt_tokens: number; completion_tokens: number; cost_usd: number; name?: string }
+export interface AIUsageReport {
+  days: number; month_start: string; month_spend_usd: number; used_percent: number | null; status: "ok" | "warning" | "blocked";
+  budget: { monthly_limit_usd: number | null; alert_percent: number; updated_by: string | null; updated_at: string | null };
+  total: { calls: number; prompt_tokens: number; completion_tokens: number; cost_usd: number };
+  by_feature: AIUsageRow[]; by_model: AIUsageRow[]; by_project: AIUsageRow[]; daily: AIUsageRow[];
+}

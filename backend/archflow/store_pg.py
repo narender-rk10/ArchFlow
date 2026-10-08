@@ -26,7 +26,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from .models import ProjectState
-from .store import (OPENSPEC_CHANGE_COLS, OPENSPEC_CHANGE_FIELDS, OPENSPEC_STATUSES, CODE_GRAPH_COLS, CONVERSATION_COLS, CONVERSATION_FIELDS, DECISION_COLS, DECISION_JSON_FIELDS,
+from .store import (AI_USAGE_FIELDS, OPENSPEC_CHANGE_COLS, OPENSPEC_CHANGE_FIELDS, OPENSPEC_STATUSES, CODE_GRAPH_COLS, CONVERSATION_COLS, CONVERSATION_FIELDS, DECISION_COLS, DECISION_JSON_FIELDS,
                     DEFAULT_ORG_ID, DEFAULT_ORG_NAME, MEMORY_COLS, MESSAGE_COLS, check_decision_fields,
                     check_memory_fields, code_graph_id, conversation_id, decision_id, memory_id)
 
@@ -738,4 +738,43 @@ class PostgresStore:
             conn.execute("DELETE FROM openspec_files WHERE project_id=%s AND left(path, %s) = %s", (pid, len(prefix), prefix))
             return conn.execute("DELETE FROM openspec_changes WHERE project_id=%s AND change_id=%s",
                                 (pid, change_id)).rowcount > 0
+
+    # ---- AI usage and budgets --------------------------------------------
+    def record_ai_usage(self, event: dict[str, Any]) -> None:
+        cols = [k for k in AI_USAGE_FIELDS if k in event]
+        with self._conn() as conn:
+            conn.execute(f"INSERT INTO ai_usage ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
+                         tuple(event[k] for k in cols))
+
+    def ai_spend(self, org_id: str, since: str) -> float:
+        row = self._one("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM ai_usage WHERE org_id=%s AND created_at >= %s",
+                        (org_id, since))
+        return float(row["c"])
+
+    def ai_usage_summary(self, org_id: str, since: str) -> dict[str, Any]:
+        def rows(by: str) -> list[dict[str, Any]]:
+            return [{**r, "cost_usd": float(r["cost_usd"] or 0)} for r in self._all(
+                f"SELECT {by} AS key, COUNT(*) AS calls, SUM(prompt_tokens) AS prompt_tokens, "
+                f"SUM(completion_tokens) AS completion_tokens, SUM(cost_usd) AS cost_usd FROM ai_usage "
+                f"WHERE org_id=%s AND created_at >= %s GROUP BY 1 ORDER BY 5 DESC, 2 DESC", (org_id, since))]
+        total = self._one("SELECT COUNT(*) AS calls, COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
+                          "COALESCE(SUM(completion_tokens), 0) AS completion_tokens, COALESCE(SUM(cost_usd), 0) "
+                          "AS cost_usd FROM ai_usage WHERE org_id=%s AND created_at >= %s", (org_id, since))
+        return {"total": {**total, "cost_usd": float(total["cost_usd"])}, "by_feature": rows("feature"),
+                "by_model": rows("model"), "by_project": rows("project_id"),
+                "daily": rows("to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')")}
+
+    def get_ai_budget(self, org_id: str) -> dict[str, Any]:
+        row = _row(self._one("SELECT monthly_limit_usd, alert_percent, updated_by, updated_at FROM org_ai_budgets "
+                             "WHERE org_id=%s", (org_id,)))
+        return row or {"monthly_limit_usd": None, "alert_percent": 80, "updated_by": None, "updated_at": None}
+
+    def set_ai_budget(self, org_id: str, monthly_limit_usd: float | None, alert_percent: int, user: str) -> dict[str, Any]:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO org_ai_budgets (org_id, monthly_limit_usd, alert_percent, updated_by) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (org_id) DO UPDATE SET monthly_limit_usd=excluded.monthly_limit_usd, "
+                "alert_percent=excluded.alert_percent, updated_by=excluded.updated_by, updated_at=now()",
+                (org_id, monthly_limit_usd, alert_percent, user))
+        return self.get_ai_budget(org_id)
 

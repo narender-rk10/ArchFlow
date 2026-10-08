@@ -1,0 +1,12 @@
+# Build context for frontend/Dockerfile (repository root).
+.git
+.claude
+.env
+**/node_modules
+**/.venv
+**/__pycache__
+backend
+frontend/dist
+graphify-out
+docs
+scripts

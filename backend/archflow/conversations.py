@@ -282,6 +282,11 @@ def maybe_summarize(store: Any, cid: str, org_id: str | None) -> bool:
 
 def after_turn(store: Any, pid: str, cid: str, org_id: str | None, learn: bool = True) -> list[dict[str, Any]]:
     """Housekeeping after a reply (runs after the response): summarize, then learn facts from the last exchange."""
+    with llm.usage_scope(feature="memory"):
+        return _after_turn(store, pid, cid, org_id, learn)
+
+
+def _after_turn(store: Any, pid: str, cid: str, org_id: str | None, learn: bool) -> list[dict[str, Any]]:
     try:
         maybe_summarize(store, cid, org_id)
     except Exception:  # noqa: BLE001 - never fail a finished turn

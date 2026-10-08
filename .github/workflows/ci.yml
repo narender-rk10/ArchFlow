@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+
+jobs:
+  backend:
+    name: Backend tests (SQLite + Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: archflow_test
+          POSTGRES_USER: archflow
+          POSTGRES_PASSWORD: ci-only-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U archflow -d archflow_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/openspec/package-lock.json
+      - name: Install OpenSpec CLI (Vibe code)
+        run: npm ci --omit=dev --no-audit --no-fund
+        working-directory: backend/openspec
+      - name: Install Python dependencies (with repository analysis)
+        run: uv sync --frozen --extra codegraph
+      - name: Tests
+        env:
+          TEST_DATABASE_URL: postgresql://archflow:ci-only-password@localhost:5432/archflow_test
+          OPENSPEC_TELEMETRY: "0"
+          OPENSPEC_NO_UPDATE_CHECK: "1"
+        run: uv run pytest -q -ra
+
+  frontend:
+    name: Web app (typecheck + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            collab/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: collab
+      - run: npm ci --no-audit --no-fund
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - name: Production dependency audit (high and critical)
+        run: npm audit --omit=dev --audit-level=high
+        working-directory: frontend
+
+  collab-e2e:
+    name: Collaboration end-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ARCHFLOW_INTERNAL_TOKEN: ci-internal-token
+      ARCHFLOW_AI: offline
+      ARCHFLOW_DB: /tmp/archflow-e2e.db
+      ARCHFLOW_COLLAB_URL: http://localhost:1234
+      COLLAB_PORT: "1234"
+      ARCHFLOW_API: http://localhost:8000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: collab/package-lock.json
+      - run: uv sync --frozen
+        working-directory: backend
+      - run: npm ci --no-audit --no-fund && npm run typecheck
+        working-directory: collab
+      - name: Start API and collab server
+        run: |
+          (cd backend && nohup uv run uvicorn archflow.main:app --port 8000 > /tmp/api.log 2>&1 &)
+          (cd collab && nohup npm start > /tmp/collab.log 2>&1 &)
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8000/api/health > /dev/null && curl -s http://localhost:1234 > /dev/null && exit 0
+            sleep 1
+          done
+          echo "servers did not start"; cat /tmp/api.log /tmp/collab.log; exit 1
+      - name: Two editors, one canvas
+        run: npm test
+        working-directory: collab
+      - name: Server logs
+        if: failure()
+        run: cat /tmp/api.log /tmp/collab.log
+
+  images:
+    name: Docker images
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: API image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: false
+          load: true
+          tags: archflow/api:ci
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+      - name: Collab image
+        uses: docker/build-push-action@v6
+        with:
+          context: collab
+          push: false
+          tags: archflow/collab:ci
+          cache-from: type=gha,scope=collab
+          cache-to: type=gha,mode=max,scope=collab
+      - name: Web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          push: false
+          tags: archflow/web:ci
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+      - name: API image starts and answers /api/health
+        run: |
+          docker run -d --name api -e ARCHFLOW_AI=offline -e ARCHFLOW_COLLAB_URL= -p 8000:8000 archflow/api:ci
+          for i in $(seq 1 40); do curl -sf http://localhost:8000/api/health && exit 0; sleep 1; done
+          docker logs api; exit 1
+      - name: Diagram export and OpenSpec work inside the image
+        run: |
+          docker exec api python -c "
+          from archflow import diagram_export as d, openspec_service as o
+          from archflow.store import Store
+          from archflow.templates import build_template
+          assert d.available() and o.available(), 'node, renderer or OpenSpec missing'
+          html, _ = d.export_architecture(build_template('ai-customer-support'), 'CI')
+          assert 'ArchFlow' in html
+          s = Store(':memory:'); pid = s.create_project('CI', state=build_template('ai-customer-support'))['id']
+          c = o.generate(s, pid, s.get_state(pid, 'main'), 'CI', ['order-service'], [], actor='ci', use_llm=False)
+          assert c['status'] == 'valid', c['validation']
+          print('export + openspec OK')"

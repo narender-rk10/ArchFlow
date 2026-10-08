@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, api } from "../api";
-import { ROLES, ROLE_HELP, can, type AIProvider, type AISettings, type Invite, type Member, type Role } from "../types";
+import { ROLES, ROLE_HELP, can, type AIProvider, type AISettings, type AIUsageReport, type AIUsageRow, type Invite, type Member, type Role } from "../types";
 import { Copy } from "./ConnectDialog";
 
 interface Base { orgId: string; orgName: string; role: Role; selfId: string; onClose: () => void; onChanged?: () => void }
@@ -180,6 +180,115 @@ export function AISettingsDialog({ orgId, orgName, onClose }: Base) {
         </form>
       )}
       {error && <p className="error small">{error}</p>}
+    </Modal>
+  );
+}
+
+const FEATURE_LABEL: Record<string, string> = {
+  assistant: "Assistant (Ask)", "canvas-edit": "Canvas edits", "design-chat": "Design chat", openspec: "Vibe code (OpenSpec)",
+  "low-level-design": "Low-level design", decisions: "Decisions", "code-analysis": "Code analysis", memory: "Memory & summaries",
+  mcp: "MCP agents", other: "Other",
+};
+const usd = (n: number) => (n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`);
+const tokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));
+
+function UsageTable({ title, rows, label }: { title: string; rows: AIUsageRow[]; label: (r: AIUsageRow) => string }) {
+  if (!rows.length) return null;
+  const max = Math.max(...rows.map((r) => r.cost_usd), 0.000001);
+  return (
+    <div className="usage-table">
+      <b className="small">{title}</b>
+      <table>
+        <thead><tr><th>Name</th><th>Calls</th><th>Tokens in / out</th><th>Cost</th></tr></thead>
+        <tbody>
+          {rows.slice(0, 8).map((r) => (
+            <tr key={r.key || "none"}>
+              <td><span className="usage-bar" style={{ width: `${Math.max(2, (r.cost_usd / max) * 100)}%` }} />{label(r)}</td>
+              <td>{r.calls}</td><td>{tokens(r.prompt_tokens)} / {tokens(r.completion_tokens)}</td><td>{usd(r.cost_usd)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** AI spend for an organization (estimated from tokens) and its monthly budget. Admins only. */
+export function AIUsageDialog({ orgId, orgName, onClose }: Base) {
+  const [report, setReport] = useState<AIUsageReport | null>(null);
+  const [limit, setLimit] = useState("");
+  const [alert, setAlert] = useState(80);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  const show = (r: AIUsageReport) => {
+    setReport(r);
+    setLimit(r.budget.monthly_limit_usd == null ? "" : String(r.budget.monthly_limit_usd));
+    setAlert(r.budget.alert_percent);
+  };
+  useEffect(() => { api.aiUsage(orgId).then(show).catch((e) => setError(e.message)); }, [orgId]);
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(""); setSaved(false);
+    const value = limit.trim() === "" ? null : Number(limit);
+    if (value !== null && (Number.isNaN(value) || value < 0)) { setError("Enter a positive amount, or leave it empty for no limit."); return; }
+    try { show(await api.setAiBudget(orgId, value, alert)); setSaved(true); }
+    catch (err) { setError((err as Error).message); }
+  };
+
+  const r = report;
+  const maxDay = r ? Math.max(...r.daily.map((d) => d.cost_usd), 0.000001) : 1;
+  return (
+    <Modal title={`AI usage & budget · ${orgName}`} onClose={onClose}>
+      {!r && !error && <p className="muted small">Loading…</p>}
+      {error && <p className="error small">{error}</p>}
+      {r && (
+        <>
+          <div className={`usage-month ${r.status}`}>
+            <div className="row between">
+              <span><b>{usd(r.month_spend_usd)}</b> spent this month
+                {r.budget.monthly_limit_usd != null && <> of <b>{usd(r.budget.monthly_limit_usd)}</b></>}</span>
+              <span className={`usage-status ${r.status}`}>
+                {r.status === "blocked" ? "Budget used up: AI paused" : r.status === "warning" ? `${r.used_percent}% of budget` : r.used_percent != null ? `${r.used_percent}% used` : "No limit"}
+              </span>
+            </div>
+            {r.used_percent != null && <div className="usage-meter"><span style={{ width: `${Math.min(100, r.used_percent)}%` }} /></div>}
+            {r.status === "blocked" && <p className="small">AI features use their built-in non-AI behaviour until the budget is raised or the month ends.</p>}
+          </div>
+
+          <form className="usage-budget" onSubmit={save}>
+            <label className="field"><span>Monthly budget (USD)</span>
+              <input type="number" min="0" step="0.01" placeholder="No limit" value={limit} onChange={(e) => setLimit(e.target.value)} />
+            </label>
+            <label className="field"><span>Warn at (% of budget)</span>
+              <input type="number" min="1" max="100" value={alert} onChange={(e) => setAlert(Number(e.target.value))} />
+            </label>
+            <div className="row gap">
+              <button className="primary">Save budget</button>
+              {saved && <span className="small ok">Saved</span>}
+            </div>
+          </form>
+
+          <p className="muted small">Last {r.days} days: {r.total.calls} AI calls, {tokens(r.total.prompt_tokens)} tokens in,
+            {" "}{tokens(r.total.completion_tokens)} out, {usd(r.total.cost_usd)}. Costs are estimates from token counts and
+            published prices (streamed answers are estimated from their length).</p>
+          {r.daily.length > 0 && (
+            <div className="usage-days" aria-label="Daily AI cost">
+              {[...r.daily].sort((a, b) => a.key.localeCompare(b.key)).map((d) => (
+                <span key={d.key} title={`${d.key}: ${usd(d.cost_usd)} · ${d.calls} calls`}
+                  style={{ height: `${Math.max(4, (d.cost_usd / maxDay) * 100)}%` }} />
+              ))}
+            </div>
+          )}
+          <div className="usage-grid">
+            <UsageTable title="By feature" rows={r.by_feature} label={(x) => FEATURE_LABEL[x.key] ?? x.key} />
+            <UsageTable title="By model" rows={r.by_model} label={(x) => x.key || "unknown"} />
+            <UsageTable title="By project" rows={r.by_project} label={(x) => x.name ?? x.key} />
+          </div>
+          {r.total.calls === 0 && <p className="muted small">No AI calls recorded yet.</p>}
+        </>
+      )}
     </Modal>
   );
 }

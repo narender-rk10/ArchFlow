@@ -5,6 +5,7 @@ import type { ComponentViews, LldResult } from "./types";
 import type { CodeGraphRecord, CodeJob, CodeOverview, DriftResult, ImpactResult, ReconstructResult } from "./types";
 import type { Conversation, ConversationKind, ConversationMessage, MemoryCategory, MemoryItem } from "./types";
 import type { OpenSpecChange, OpenSpecJob, OpenSpecOverview } from "./types";
+import type { AIUsageReport } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, public data: any) {
@@ -121,6 +122,9 @@ export const api = {
   aiSettings: (org: string) => call<AISettings>("GET", `/orgs/${org}/ai-settings`),
   saveAiSettings: (org: string, keys: Partial<Record<AIProvider, string | null>>) =>
     call<AISettings>("PUT", `/orgs/${org}/ai-settings`, keys),
+  aiUsage: (org: string, days = 30) => call<AIUsageReport>("GET", `/orgs/${org}/ai-usage`, undefined, { days: String(days) }),
+  setAiBudget: (org: string, monthly_limit_usd: number | null, alert_percent: number) =>
+    call<AIUsageReport>("PUT", `/orgs/${org}/ai-budget`, { monthly_limit_usd, alert_percent }),
   collabTicket: (pid: string, branch: string, color: string) =>
     call<{ ticket: string; doc: string; read_only: boolean; expires_in: number }>(
       "GET", `/projects/${pid}/collab-ticket`, undefined, { branch, color }),
