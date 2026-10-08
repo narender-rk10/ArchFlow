@@ -346,22 +346,35 @@ Element types:
 - table: one database table owned by this component; set columns as "name type [pk|fk]" comma-separated
 - event: one domain event it publishes or consumes (PascalCase, past tense, e.g. OrderPlaced)
 
-Rules: 3-6 endpoints for an API-facing component; tables only for databases it actually uses; events only if \
-it talks to a queue/stream; 6-20 elements in total. Connections go from caller to callee (endpoint → \
-controller → service → repository → table; publisher → event). Use requirement_ids from the given \
-requirements where an element implements one. Keys are short unique identifiers referenced by connections."""
+Rules:
+- Cover the full lifecycle of each entity this component owns: create, read one, list (e.g. "my bookings" for \
+the caller), and every state change the requirements imply (cancel, reschedule, refund, approve, …). Read \
+"primary_requirements" (traced to this component) fully, and also implement any part of "other_requirements" \
+that falls to this component (e.g. cancellation rules stated under payments).
+- API-facing components: usually 4-10 endpoints. Tables only for databases it actually uses; enforce invariants \
+with keys (e.g. a "uk" column so a slot cannot be booked twice) and add status/expiry columns for holds and states.
+- Events only if it talks to a queue/stream: one per state change other components care about (e.g. \
+BookingConfirmed and BookingCancelled).
+- 8-30 elements in total. Connections go from caller to callee (endpoint → controller → service → repository → \
+table; publisher → event). Use requirement_ids from the given requirements where an element implements one. \
+Keys are short unique identifiers referenced by connections."""
 
 
 def _llm_prompt(state: ProjectState, node: Node) -> str:
     out, inc = neighbours(state, node)
-    reqs = [state.requirements[r].model_dump(include={"id", "title", "description", "acceptance_criteria"})
-            for r in node.requirement_ids if r in state.requirements]
+    fields = {"id", "title", "description", "acceptance_criteria"}
+    primary = [state.requirements[r].model_dump(include=fields) for r in node.requirement_ids if r in state.requirements]
+    # The rest give context: rules for this component are often written under another requirement (cancellation
+    # under payments, audit under security). Functional ones in full, the others as titles.
+    other = [r.model_dump(include=fields) if r.kind == "functional" else {"id": r.id, "title": r.title}
+             for r in state.requirements.values() if r.id not in node.requirement_ids][:40]
     payload = {
         "component": {"id": node.id, "name": node.name, "type": node.type, "technology": node.technology,
                       "description": node.description},
         "calls": [{"name": n.name, "type": n.type, "technology": n.technology, "protocol": p} for n, p in out],
         "called_by": [{"name": n.name, "type": n.type, "protocol": p} for n, p in inc],
-        "requirements": reqs,
+        "primary_requirements": primary,
+        "other_requirements": other,
     }
     return f"Design the internals of this component:\n{json.dumps(payload, indent=1)}"
 

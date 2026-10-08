@@ -26,7 +26,11 @@ const tempMessage = (content: string, mode: "ask" | "command", author: string): 
  * The project assistant: shared conversation threads stored on the server. Questions stream in; edit commands
  * run against the canvas with the conversation as context. Threads survive reloads and teammates see them.
  */
-export function useAssistant(pid: string, branch: string, userName: string) {
+export function useAssistant(pid: string, branch: string, userName: string,
+  /** Called after an edit command was answered (e.g. to tidy the canvas when components were added). */
+  onCommandDone?: (message: ConversationMessage) => void) {
+  const onDoneRef = useRef(onCommandDone);
+  onDoneRef.current = onCommandDone;
   const [threads, setThreads] = useState<Conversation[]>([]);
   const [current, setCurrent] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
@@ -138,6 +142,7 @@ export function useAssistant(pid: string, branch: string, userName: string) {
         setMessages((m) => [...m, r.user_message, r.message]);
         setCurrent((c) => c && { ...c, title: c.title || text.slice(0, 60) });
       }
+      onDoneRef.current?.(r.message);
       return true;
     } catch (e) {
       setError((e as Error).message);

@@ -90,9 +90,10 @@ def test_render_architecture_and_sequence():
 
 @needs_node
 def test_crowded_layout_falls_back(monkeypatch):
-    ops = [{"op": "add_node", "node": {"name": f"Service {i}", "type": "service", "position": {"x": 0, "y": i * 20}}}
-           for i in range(4)]  # stacked on top of each other
+    ops = [{"op": "add_node", "node": {"name": f"Service {i}", "type": "service"}} for i in range(4)]
     state, _ = apply_ops(ProjectState(), ops)
+    for i, n in enumerate(state.nodes.values()):  # stacked on top of each other (as a hand-dragged canvas can be)
+        n.position.x, n.position.y = 0, i * 20
     _, layout = dx.export_architecture(state, "Crowded")
     assert layout in ("authored-spread", "grid")
 

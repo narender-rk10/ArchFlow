@@ -110,6 +110,29 @@ def _auto_position(state: ProjectState, parent_id: str = "") -> dict[str, float]
     return {"x": (min(xs) + max(xs)) / 2, "y": max(ys) + 160}
 
 
+BOX_W, BOX_H = 210, 110  # a component on the canvas (190 x ~90) plus a margin
+
+
+def _free_position(state: ProjectState, parent_id: str, pos: dict[str, float]) -> dict[str, float]:
+    """``pos`` if no component on the same diagram level is there, else the nearest free spot to the right, then
+    on the rows below (AI agents guess coordinates and often land on existing components)."""
+    level = [n.position for n in state.nodes.values() if n.parent_id == parent_id]
+
+    def free(x: float, y: float) -> bool:
+        return all(abs(p.x - x) >= BOX_W or abs(p.y - y) >= BOX_H for p in level)
+
+    x0, y0 = float(pos.get("x", 0)), float(pos.get("y", 0))
+    if free(x0, y0):
+        return {"x": x0, "y": y0}
+    for row in range(0, 8):
+        for col in range(0, 8):
+            for x in ((x0 + col * (BOX_W + 30), x0 - col * (BOX_W + 30)) if col else (x0,)):
+                y = y0 + row * (BOX_H + 40)
+                if free(x, y):
+                    return {"x": x, "y": y}
+    return {"x": x0, "y": max(p.y for p in level) + BOX_H + 40}
+
+
 def descendants(state: ProjectState, node_id: str) -> list[str]:
     """Ids of every node inside ``node_id``'s LLD diagram, recursively (not including ``node_id``)."""
     children: dict[str, list[str]] = {}
@@ -208,6 +231,8 @@ def apply_ops(state: ProjectState, ops: list[dict[str, Any]]) -> tuple[ProjectSt
             raw["parent_id"] = parent.id if parent else ""
             if not raw.get("position"):
                 raw["position"] = _auto_position(st, raw["parent_id"])
+            if isinstance(raw["position"], dict) and raw.get("type") != "note":
+                raw["position"] = _free_position(st, raw["parent_id"], raw["position"])
             raw["rev"] = new_rev
             try:
                 node = Node.model_validate(raw)

@@ -176,3 +176,48 @@ def test_nfr_coverage_reads_wording_not_just_category():
     assert {"privacy", "security"} <= nfr_coverage(state)
     codes = {i["code"] for i in full_analysis(state)["architecture_issues"]}
     assert "pii" not in codes
+
+
+def test_shared_database_counts_every_backend_kind():
+    from archflow.analysis import full_analysis
+
+    ops = [{"op": "add_node", "node": {"name": "Core DB", "type": "database"}},
+           {"op": "add_node", "node": {"name": "Orders", "type": "service"}},
+           {"op": "add_node", "node": {"name": "Billing", "type": "service"}},
+           {"op": "add_node", "node": {"name": "Triage", "type": "agent"}}]
+    ops += [{"op": "add_edge", "edge": {"source": s, "target": "core-db"}} for s in ("orders", "billing", "triage")]
+    state, _ = apply_ops(ProjectState(), ops)
+    issues = [i for i in full_analysis(state)["architecture_issues"] if i["code"] == "shared_db"]
+    assert len(issues) == 1 and issues[0]["severity"] == "warning" and "3 services" in issues[0]["message"]
+
+
+def test_clarifying_questions_are_deduplicated():
+    qs = ["For data residency compliance (EU vs India), should we deploy completely separate infrastructure stacks in "
+          "AWS eu-central-1 and ap-south-1, or use a single global control plane with localized databases?",
+          "How should we verify partner pharmacies?",
+          "To satisfy strict data residency requirements (EU vs India), should we deploy completely isolated "
+          "infrastructure silos in each region, or use a globally shared control plane with localized data persistence?",
+          "How should we verify partner pharmacies?"]
+    assert ai.dedupe_questions(qs) == qs[:2]
+
+
+def test_guardrail_in_front_of_llm_counts_as_protection():
+    ops = [{"op": "add_node", "node": {"name": "Agent", "type": "agent"}},
+           {"op": "add_node", "node": {"name": "Guardrails", "type": "security"}},
+           {"op": "add_node", "node": {"name": "Claude", "type": "llm"}},
+           {"op": "add_edge", "edge": {"source": "agent", "target": "guardrails"}},
+           {"op": "add_edge", "edge": {"source": "guardrails", "target": "claude"}}]
+    state, _ = apply_ops(ProjectState(), ops)
+    assert not [i for i in full_analysis(state)["architecture_issues"] if i["code"] == "llm_exposed"]
+
+
+def test_new_components_do_not_land_on_existing_ones():
+    state, _ = apply_ops(ProjectState(), [{"op": "add_node", "node": {"name": "API", "type": "gateway", "position": {"x": 0, "y": 0}}}])
+    state, _ = apply_ops(state, [
+        {"op": "add_node", "node": {"name": "Router", "type": "gateway", "position": {"x": 20, "y": 10}}},  # on top of API
+        {"op": "add_node", "node": {"name": "Far", "type": "service", "position": {"x": 900, "y": 0}}},     # free: kept
+        {"op": "add_node", "node": {"name": "Inner", "type": "component", "parent_id": "api", "position": {"x": 0, "y": 0}}}])
+    api, router, far, inner = (state.nodes[k].position for k in ("api", "router", "far", "inner"))
+    assert abs(router.x - api.x) >= 210 or abs(router.y - api.y) >= 110
+    assert (far.x, far.y) == (900, 0)
+    assert (inner.x, inner.y) == (0, 0)  # another diagram level: no clash

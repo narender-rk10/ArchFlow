@@ -232,6 +232,8 @@ def llm_command(state: ProjectState, text: str, selection: list[str], org_id: st
             prompt += ("\n\nChanges already applied for this request (the project state above includes them):\n"
                        + "\n".join(f"- {d}" for d in done)
                        + (f"\n\nThe last batch was rejected: {feedback}. Fix it." if feedback else "")
+                       + ("\n\nQuestions already asked (do not ask them again):\n"
+                          + "\n".join(f"- {q}" for q in result.questions) if result.questions else "")
                        + "\n\nIf anything in the request is still missing, call the tools for the remaining changes only. "
                          "Otherwise call no tools and reply with one or two sentences describing everything you changed.")
         try:
@@ -264,7 +266,26 @@ def llm_command(state: ProjectState, text: str, selection: list[str], org_id: st
         done += summary
     if not result.explanation and done:
         result.explanation = "Changed: " + "; ".join(done) + "."
+    result.questions = dedupe_questions(result.questions)
     return result
+
+
+def dedupe_questions(questions: list[str]) -> list[str]:
+    """Drop repeated questions, including rewordings from a later round: at least 35% of their longer words, and
+    at least four of them, in common (unrelated questions share well under 10%)."""
+    def words(q: str) -> set[str]:
+        return {w for w in re.findall(r"[a-z0-9]+", q.lower()) if len(w) > 3}
+
+    def same(a: set[str], b: set[str]) -> bool:
+        common = a & b
+        return bool(a and b) and len(common) >= 4 and len(common) / len(a | b) >= 0.35 or (bool(a) and a == b)
+
+    kept: list[tuple[str, set[str]]] = []
+    for q in questions:
+        w = words(q)
+        if q.strip() and not any(same(w, k) for _, k in kept):
+            kept.append((q.strip(), w))
+    return [q for q, _ in kept]
 
 
 claude_command = llm_command  # backwards-compatible name

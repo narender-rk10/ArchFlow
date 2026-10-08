@@ -1,5 +1,5 @@
 import {
-  Background, BackgroundVariant, Controls, MarkerType, MiniMap, ReactFlow, ReactFlowProvider, ViewportPortal,
+  Background, BackgroundVariant, ControlButton, Controls, MarkerType, MiniMap, ReactFlow, ReactFlowProvider, ViewportPortal,
   applyEdgeChanges, applyNodeChanges, useReactFlow,
   type Connection, type Edge, type EdgeChange, type NodeChange, type OnDelete,
 } from "@xyflow/react";
@@ -8,6 +8,7 @@ import { api } from "../api";
 import { useCollab } from "../collab";
 import { useAssistant } from "../assistant";
 import { exportCanvasImage, exportName } from "../exportImage";
+import { autoLayout } from "../layout";
 import { touchRecent } from "../recent";
 import { useRealtime } from "../realtime";
 import type {
@@ -86,10 +87,25 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const [edges, setEdges] = useState<Edge[]>([]);
   // Diagram level shown on the canvas: "" = system (HLD), else the id of the component whose internals are open.
   const [level, setLevel] = useState("");
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
+  const levelRef = useRef(level);
+  levelRef.current = level;
   const [generating, setGenerating] = useState(false);
   // Canvas full screen: only the canvas is shown, and the browser goes full screen when it allows it.
   const [canvasFull, setCanvasFull] = useState(false);
   const [exporting, setExporting] = useState(false);
+  // ---- auto-arrange ----
+  const [autoTidy, setAutoTidy] = useState(() => { try { return localStorage.getItem("archflow.autoTidy") !== "0"; } catch { return true; } });
+  const autoTidyRef = useRef(autoTidy);
+  autoTidyRef.current = autoTidy;
+  const tidyRef = useRef<(announce: boolean) => void>(() => {});
+  const toggleAutoTidy = () => {
+    const next = !autoTidy;
+    setAutoTidy(next);
+    try { localStorage.setItem("archflow.autoTidy", next ? "1" : "0"); } catch { /* storage unavailable */ }
+    toast(next ? "Auto-arrange after AI edits: on" : "Auto-arrange after AI edits: off");
+  };
   const [switcherOpen, setSwitcherOpen] = useState(false);
   // Ctrl/⌘+K opens the project switcher from anywhere in the workspace.
   useEffect(() => {
@@ -123,6 +139,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
       if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
       if (document.querySelector(".modal-backdrop, .command-bar.full")) return;
       if ((e.key === "f" || e.key === "F") && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); toggleCanvasFull(); }
+      else if ((e.key === "l" || e.key === "L") && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); tidyRef.current(true); }
       else if (e.key === "Escape" && canvasFull && !document.fullscreenElement) setCanvasFull(false);
     };
     window.addEventListener("keydown", onKey);
@@ -202,7 +219,12 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   useEffect(() => { if (project) touchRecent(project.id, project.name, project.org_id ?? "", branch); }, [project, branch]);
 
   // ---- AI conversations and project memory ----
-  const assistant = useAssistant(pid, branch, user.name);
+  const assistant = useAssistant(pid, branch, user.name, (msg) => {
+    // Auto-arrange after the AI added components (it guesses positions, which can overlap).
+    if (autoTidyRef.current && (msg.data.summary ?? []).some((s) => /^added /.test(s))) {
+      window.setTimeout(() => tidyRef.current(false), 1500); // after the live document and sizes update
+    }
+  });
   const loadMemory = useCallback(() => { api.memory(pid).then(setMemory).catch(() => {}); }, [pid]);
   useEffect(() => { loadMemory(); }, [loadMemory]);
 
@@ -246,6 +268,28 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
       toast(`⚠ ${(e as Error).message}`);
     }
   }, [apply, toast, readOnly, role]);
+
+  /** Arrange the diagram level on screen (system: tiers; internals: call flow). One undo step. */
+  const tidy = useCallback((announce: boolean) => {
+    const st = stateRef.current;
+    if (!st || readOnly) return;
+    const rendered = nodesRef.current.filter((n) => !n.id.startsWith("ghost:") && n.data.model.type !== "note");
+    const ids = new Set(rendered.map((n) => n.id));
+    const positions = autoLayout(
+      rendered.map((n) => ({ id: n.id, type: n.data.model.type, x: n.position.x, y: n.position.y,
+        width: n.measured?.width ?? 190, height: n.measured?.height ?? 80 })),
+      Object.values(st.edges).filter((e) => ids.has(e.source) && ids.has(e.target)).map((e) => ({ source: e.source, target: e.target })),
+      levelRef.current ? "flow" : "tiers");
+    const ops: Op[] = [...positions].filter(([id, p]) => {
+      const m = st.nodes[id];
+      return m && (Math.abs(m.position.x - p.x) > 1 || Math.abs(m.position.y - p.y) > 1);
+    }).map(([id, p]) => ({ op: "update_node", id, changes: { position: p } }) as Op);
+    if (!ops.length) { if (announce) toast("Already tidy"); return; }
+    send(ops);
+    window.setTimeout(() => flow.fitView({ padding: 0.15, duration: 400 }), 150);
+    toast(announce ? `Arranged ${ops.length} component(s) · Ctrl+Z to undo` : `Auto-arranged after the AI edit · Ctrl+Z to undo`);
+  }, [readOnly, send, flow, toast]);
+  tidyRef.current = tidy;
 
   // ---- derived view state ----
   const issuesByNode = useMemo(() => {
@@ -315,8 +359,10 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         const dim = !!highlight && !(highlight.has(e.source) && highlight.has(e.target));
         return {
           id: e.id, source: e.source, target: e.target, label: e.protocol || e.label || undefined,
+          type: "smoothstep", pathOptions: { borderRadius: 14, offset: 18 },
+          labelBgPadding: [5, 2] as [number, number], labelBgBorderRadius: 4,
           selected: prevSel.get(e.id) ?? false, markerEnd: { type: MarkerType.ArrowClosed },
-          className: [dm && `diff-${dm}`, dim && "dimmed"].filter(Boolean).join(" "),
+          className: ["arch-edge", dm && `diff-${dm}`, dim && "dimmed"].filter(Boolean).join(" "),
         };
       });
       if (d) {
@@ -666,7 +712,20 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           selectionKeyCode="Shift" colorMode={colorMode} fitView fitViewOptions={{ padding: 0.15 }} minZoom={0.1} maxZoom={2.5} proOptions={{ hideAttribution: true }}
         >
           <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
-          <Controls position="center-right" />
+          <Controls position="center-right">
+            {!readOnly && (
+              <>
+                <ControlButton onClick={() => tidy(true)} title="Tidy up: arrange this diagram in tiers (L) · Ctrl+Z undoes"
+                  aria-label="Tidy up the layout" className="tidy-btn">
+                  <svg viewBox="0 0 16 16" aria-hidden><path d="M2 2h5v4H2zM9 2h5v4H9zM5.5 10h5v4h-5zM4.5 6v2h7V6M8 8v2" fill="none" stroke="currentColor" strokeWidth="1.4" /></svg>
+                </ControlButton>
+                <ControlButton onClick={toggleAutoTidy} aria-pressed={autoTidy} className={`auto-tidy-btn ${autoTidy ? "on" : ""}`}
+                  title={autoTidy ? "Auto-arrange after AI edits: on" : "Auto-arrange after AI edits: off"} aria-label="Auto-arrange after AI edits">
+                  A
+                </ControlButton>
+              </>
+            )}
+          </Controls>
           <MiniMap position="top-right" pannable zoomable nodeColor={(n) => TYPE_META[(n.data as { model: ArchNode }).model.type]?.color ?? "#999"} />
           <ViewportPortal>
             {others.filter((c) => c.cursor && (c.cursor.level ?? "") === level).map((c) => (
@@ -677,7 +736,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
             ))}
           </ViewportPortal>
         </ReactFlow>
-        {!readOnly && <Palette catalog={catalog} />}
+        {!readOnly && state && <Palette catalog={catalog} startOpen={Object.keys(state.nodes).length === 0} />}
         {canvasFull && (
           <button className="canvas-exit-full" onClick={toggleCanvasFull} title="Exit full screen (Esc or F)">✕ Exit full screen</button>
         )}

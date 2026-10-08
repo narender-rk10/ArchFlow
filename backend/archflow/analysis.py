@@ -123,14 +123,19 @@ def validate_architecture(state: ProjectState) -> list[dict[str, Any]]:
                     issues.append(_issue("error", "direct_db_access",
                                          f"Client '{nodes[src].name}' talks directly to '{n.name}'.",
                                          "Route data access through a service or API gateway.", node_ids=[src, n.id]))
-            readers = [r for r in incoming.get(n.id, []) if r in nodes]
-            if len(readers) > 1 and all(nodes[r].type == "service" for r in readers):
-                issues.append(_issue("info", "shared_db", f"'{n.name}' is shared by {len(readers)} services.",
-                                     "Shared databases couple services; consider ownership per service.",
+            # Backends sharing one store couple their schemas and deployments. Count every backend kind (an agent
+            # or MCP server reading the store counts too), and warn once three or more share it.
+            readers = [r for r in dict.fromkeys(incoming.get(n.id, [])) if r in nodes
+                       and nodes[r].type in ("service", "agent", "mcp", "component")]
+            if len(readers) > 1:
+                issues.append(_issue("warning" if len(readers) >= 3 else "info", "shared_db",
+                                     f"'{n.name}' is shared by {len(readers)} services.",
+                                     "Shared databases couple services; give each service ownership of its data "
+                                     "(its own schema or database) and share through APIs or events.",
                                      node_ids=[n.id, *readers]))
-        if n.type == "llm" and not any(nodes[s].type in ("agent", "service", "gateway")
+        if n.type == "llm" and not any(nodes[s].type in ("agent", "service", "gateway", "security", "mcp")
                                        for s in incoming.get(n.id, []) if s in nodes):
-            issues.append(_issue("warning", "llm_exposed", f"LLM '{n.name}' has no agent/service in front of it.",
+            issues.append(_issue("warning", "llm_exposed", f"LLM '{n.name}' has no agent, service or guardrail in front of it.",
                                  "Put an agent or service between users and the model for guardrails.", node_ids=[n.id]))
 
     all_text = " ".join(f"{r.title} {r.description}" for r in state.requirements.values())

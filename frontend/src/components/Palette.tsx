@@ -15,10 +15,18 @@ export const VENDOR_STYLE: Record<string, { short: string; color: string }> = {
 const VENDOR_ORDER = ["all", "generic", "aws", "azure", "gcp", "oss", "saas"];
 
 /** Searchable component catalog: generic building blocks plus concrete AWS/Azure/GCP/OSS/SaaS services. */
-export function Palette({ catalog }: { catalog: Catalog | null }) {
+export function Palette({ catalog, startOpen = true }: { catalog: Catalog | null; startOpen?: boolean }) {
   const [query, setQuery] = useState("");
   const [vendor, setVendor] = useState("all");
-  const [collapsed, setCollapsed] = useState(false);
+  // Open on an empty canvas, out of the way otherwise; your last choice wins.
+  const [collapsed, setCollapsedState] = useState(() => {
+    try { const v = localStorage.getItem("archflow.palette"); if (v) return v === "closed"; } catch { /* ignore */ }
+    return !startOpen;
+  });
+  const setCollapsed = (c: boolean) => {
+    setCollapsedState(c);
+    try { localStorage.setItem("archflow.palette", c ? "closed" : "open"); } catch { /* ignore */ }
+  };
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();

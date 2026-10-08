@@ -635,3 +635,11 @@ button.ghost.on { color: var(--primary); }
 .os-target { font-size: 12px; max-width: 170px; }
 .os-editor { resize: none; font-size: 12px; line-height: 1.5; }
 @media (max-width: 760px) { .os-panel { grid-template-columns: 1fr; } .os-side { border-right: none; border-bottom: 1px solid var(--border); padding: 0 0 8px; max-height: 200px; } }
+
+/* ---------- tidy layout & connectors ---------- */
+.react-flow__controls .tidy-btn svg { width: 14px; height: 14px; max-width: none; max-height: none; fill: none; }
+.react-flow__controls .auto-tidy-btn { font: 600 11px Inter, system-ui, sans-serif; color: var(--muted); }
+.react-flow__controls .auto-tidy-btn.on { color: var(--primary); }
+.arch-edge .react-flow__edge-text { font-size: 10px; fill: var(--muted); }
+.arch-edge .react-flow__edge-textbg { fill: var(--canvas); }
+.arch-edge.selected .react-flow__edge-text { fill: var(--primary); }
