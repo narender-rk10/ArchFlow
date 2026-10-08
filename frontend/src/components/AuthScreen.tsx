@@ -54,7 +54,7 @@ export function AuthScreen({ mode, invite, onMode, onSignedIn, themeToggle }: Pr
   return (
     <div className="picker auth">
       <header className="picker-head">
-        <div className="row between"><div className="brand"><span className="logo">▲</span> ArchFlow</div>{themeToggle}</div>
+        <div className="row between"><a className="brand brand-link" href="#/" title="Back to the home page"><span className="logo">▲</span> ArchFlow</a>{themeToggle}</div>
         <p className="muted">Requirements → Architecture → Canvas → Code. One structured, versioned, collaborative model.</p>
       </header>
       <form className="card auth-card" onSubmit={submit}>
