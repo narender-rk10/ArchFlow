@@ -40,7 +40,7 @@ is validated, versioned, conflict-checked and shown live to everyone.
 | Remote MCP server | Streamable HTTP at `/mcp` with OAuth 2.1 (works with Claude Code, Claude.ai, Claude Desktop and other MCP clients) or personal access tokens; 40 tools, org-scoped, read-only or read & edit. Agent edits show up live on everyone's canvas |
 | Activity history | Who changed what, and when, per branch |
 | Code ↔ architecture | **Code** button: analyse a public Git repository (or upload a graph made locally by `archflow-codegraph`) with [Graphify](https://pypi.org/project/graphifyy/) — tree-sitter code graph of files, symbols, calls and imports, Leiden communities, god nodes, import cycles — plus deterministic detections (languages, manifests, docker-compose, Dockerfiles, Kubernetes, Terraform, databases/caches/queues/LLM providers from imported libraries, entry points). **Reconstruct architecture** opens a `draft/from-code-<sha>` branch with services, clients and infrastructure, connections and catalog matches; components keep their code paths (linked to the repo at that commit in the inspector). **Drift** compares any branch with the code (in code but not designed, designed but not in code, undeclared connections, technology mismatches) and feeds the Issues tab; **change impact** maps changed files → dependent symbols → components → requirements. REST under `/api/projects/{id}/codegraph`, MCP `analyze_repository`, `get_code_summary`, `get_drift`, `get_change_impact` |
-| Architecture decisions | **Decisions** tab: ADRs (ADR-001, …) with status, context, decision, consequences, alternatives and linked requirements. **Compare drafts** scores 2–4 branches against the requirements/NFRs on cost, scalability, performance, security, reliability, operability and delivery speed (1–5 matrix + recommendation) using the [Jev](https://thejevai.com/docs) decision API (`JEV_API_KEY`), else the LLM, else an offline heuristic; the engine is always shown. Record the result as an ADR and **adopt** the chosen draft into `main` (safety version first, then a new version). REST under `/api/projects/{id}/decisions` and `/evaluate`; MCP `evaluate_alternatives` & co. |
+| Architecture decisions | **Decisions** tab: ADRs (ADR-001, …) with status, context, decision, consequences, alternatives and linked requirements. **Compare drafts** scores 2–4 branches against the requirements/NFRs on cost, scalability, performance, security, reliability, operability and delivery speed (1–5 matrix + recommendation) using the LLM (any provider), else an offline heuristic; the engine is always shown. Record the result as an ADR and **adopt** the chosen draft into `main` (safety version first, then a new version). REST under `/api/projects/{id}/decisions` and `/evaluate`; MCP `evaluate_alternatives` & co. |
 
 ## Quick start
 
@@ -102,7 +102,6 @@ offline logic, and the Ask assistant is disabled.
 | `ARCHFLOW_MODEL_FAST` | `gemini/gemini-3.8-flash` | Fast model |
 | `ARCHFLOW_ORG_RPM` | `60` | LLM requests per minute per org |
 | `LANGFUSE_PUBLIC_KEY` … | – | Enables LLM tracing |
-| `JEV_API_KEY` | – | Jev decision API for comparing drafts (falls back to the LLM, then an offline heuristic) |
 | `DATABASE_URL` | – | `postgresql://…` switches storage to Postgres |
 | `ARCHFLOW_DB` | `backend/data/archflow.db` | SQLite path when `DATABASE_URL` is unset |
 
@@ -318,7 +317,7 @@ In rough order of leverage:
 
 1. **ADRs** as first-class objects linked to components and requirements.
 2. **Branch merge** with three-way diff and AI-assisted conflict resolution.
-3. **Architecture alternatives + JEV evaluation**: generate options A/B/C as branches and score them.
+3. **Architecture alternatives**: generate options A/B/C as branches and score them (done: Compare drafts).
 4. **Comments, @mentions and approval workflows** on any object; per-project role overrides, SSO.
 5. **Repository analysis**: done for public repos and uploaded graphs; next: GitHub App, drift on every push/PR, PR review comments.
 6. **Jira sync**: epics/stories generated from requirements, with status reflected on the canvas.
@@ -331,3 +330,12 @@ In rough order of leverage:
 
 Apache-2.0. The optional repository-analysis extra uses [Graphify](https://pypi.org/project/graphifyy/)
 (`graphifyy`, Apache-2.0; ships an additional MIT license file and NOTICE) and its tree-sitter grammars; it is not installed by default.
+
+## AI providers and models
+
+Organization admins open **AI settings** (on the projects page, or the *AI off · set up* pill in a project) to add provider keys
+(Gemini, Anthropic, OpenAI, OpenRouter, Mistral, Groq, DeepSeek, xAI, Azure OpenAI, or any OpenAI-compatible server such as Ollama or vLLM)
+and choose a *reasoning* and a *fast* model, each with up to 4 fallbacks. Calls go through LiteLLM. Keys are encrypted with
+`ARCHFLOW_SECRET_KEY`; if it is unset the API generates `secret.key` next to the database (back it up with the database).
+Server-wide keys in `backend/.env` remain the defaults for organizations that configure nothing.
+Self-hosted endpoints on private addresses need `ARCHFLOW_ALLOW_PRIVATE_AI_URLS=true`.

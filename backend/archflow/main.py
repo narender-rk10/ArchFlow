@@ -172,6 +172,7 @@ def create_app(store: Store | None = None) -> FastAPI:
     authz = Authz(store)
     # LLM calls made for an org use that org's own provider keys when it has configured some (BYOK).
     llm.set_org_key_resolver(lambda org_id: secrets_box.org_ai_keys(store, org_id))
+    llm.set_org_config_resolver(store.get_ai_config)  # models chosen in AI settings
     # Every LLM call is recorded (tokens, estimated cost) and checked against the org's monthly budget.
     budgets = usage.install(store)
 
@@ -585,7 +586,7 @@ def create_app(store: Store | None = None) -> FastAPI:
         return {"branch": target, "version": version["number"], "summary": summary, "state": new_state.model_dump(),
                 **({"conversation": store.get_conversation(conv["id"])} if conv else {})}
 
-    # ---- architecture decisions (ADRs), alternative evaluation (Jev), adopting a draft ----
+    # ---- architecture decisions (ADRs), alternative evaluation, adopting a draft ----
     async def broadcast_room(pid: str, branch: str, msg: dict[str, Any]) -> None:
         await hub.broadcast(Hub.key(pid, branch), msg)
 

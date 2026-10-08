@@ -778,3 +778,14 @@ class PostgresStore:
                 (org_id, monthly_limit_usd, alert_percent, user))
         return self.get_ai_budget(org_id)
 
+    def get_ai_config(self, org_id: str) -> dict[str, Any]:
+        row = self._one("SELECT config FROM org_ai_config WHERE org_id=%s", (org_id,))
+        return dict(row["config"]) if row else {}
+
+    def set_ai_config(self, org_id: str, config: dict[str, Any], user: str) -> dict[str, Any]:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO org_ai_config (org_id, config, updated_by) VALUES (%s, %s, %s) ON CONFLICT (org_id) "
+                "DO UPDATE SET config=excluded.config, updated_by=excluded.updated_by, updated_at=now()",
+                (org_id, Jsonb(config), user))
+        return self.get_ai_config(org_id)

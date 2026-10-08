@@ -13,7 +13,7 @@ interface Props {
 
 const STATUSES: DecisionStatus[] = ["proposed", "accepted", "rejected", "superseded"];
 const ENGINE_LABEL: Record<Evaluation["engine"], string> = {
-  jev: "Jev decision API", llm: "LLM evaluation", heuristic: "Offline heuristic",
+  llm: "LLM evaluation", heuristic: "Offline heuristic",
 };
 const TARGET = "main";
 

@@ -1,6 +1,6 @@
 import type { Activity, Analysis, ArchOption, Branch, ChatCard, ChatTurn, ApiToken, Catalog, Diff, Op, Org, Project, ProjectState, Version } from "./types";
 import type { Decision, Evaluation } from "./types";
-import type { AIProvider, AISettings, Invite, InviteInfo, Me, Member, Role } from "./types";
+import type { AIConfig, AIGroup, AIProvider, AISettings, AITestResult, Invite, InviteInfo, Me, Member, Role } from "./types";
 import type { ComponentViews, LldResult } from "./types";
 import type { CodeGraphRecord, CodeJob, CodeOverview, DriftResult, ImpactResult, ReconstructResult } from "./types";
 import type { Conversation, ConversationKind, ConversationMessage, MemoryCategory, MemoryItem } from "./types";
@@ -120,8 +120,10 @@ export const api = {
     call<Invite & { token: string; link: string }>("POST", `/orgs/${org}/invites`, { role, email: email || null }),
   revokeInvite: (org: string, id: string) => call<null>("DELETE", `/orgs/${org}/invites/${id}`),
   aiSettings: (org: string) => call<AISettings>("GET", `/orgs/${org}/ai-settings`),
-  saveAiSettings: (org: string, keys: Partial<Record<AIProvider, string | null>>) =>
+  saveAiSettings: (org: string, keys: Record<AIProvider, string | null>) =>
     call<AISettings>("PUT", `/orgs/${org}/ai-settings`, keys),
+  saveAiConfig: (org: string, config: AIConfig) => call<AISettings>("PUT", `/orgs/${org}/ai-config`, config),
+  testAi: (org: string, group: AIGroup) => call<AITestResult>("POST", `/orgs/${org}/ai-test`, { group }),
   aiUsage: (org: string, days = 30) => call<AIUsageReport>("GET", `/orgs/${org}/ai-usage`, undefined, { days: String(days) }),
   setAiBudget: (org: string, monthly_limit_usd: number | null, alert_percent: number) =>
     call<AIUsageReport>("PUT", `/orgs/${org}/ai-budget`, { monthly_limit_usd, alert_percent }),

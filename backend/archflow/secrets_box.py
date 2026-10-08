@@ -14,10 +14,14 @@ Uses the ``cryptography`` package, which is already installed as a dependency of
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import secrets
+from pathlib import Path
 
-PROVIDERS = ("gemini", "anthropic", "openai")
+from .ai_providers import PROVIDERS as _CATALOG
+
+PROVIDERS = tuple(_CATALOG)
 _VERSION = "v1"
 
 
@@ -29,8 +33,52 @@ class SecretDecryptError(ValueError):
     """The ciphertext is corrupt, bound to another row, or was encrypted under a different key."""
 
 
+def _key_file() -> Path | None:
+    """Where a generated key is kept when ARCHFLOW_SECRET_KEY is not set: next to the SQLite database (the API's
+    data volume in Docker), or ARCHFLOW_SECRET_KEY_FILE. None for in-memory databases (tests)."""
+    explicit = os.environ.get("ARCHFLOW_SECRET_KEY_FILE", "").strip()
+    if explicit:
+        return Path(explicit)
+    db = os.environ.get("ARCHFLOW_DB", "")
+    if db == ":memory:":
+        return None
+    base = Path(db).parent if db else Path(__file__).resolve().parent.parent / "data"
+    return base / "secret.key"
+
+
+_generated: str | None = None
+
+
 def _master() -> str:
-    return os.environ.get("ARCHFLOW_SECRET_KEY", "").strip()
+    """ARCHFLOW_SECRET_KEY, else a key generated once and kept in the data directory (so admins can enter AI keys
+    in the UI without editing the environment). Back the key file up with the database: losing it makes stored
+    keys unreadable (admins then re-enter them)."""
+    global _generated
+    env = os.environ.get("ARCHFLOW_SECRET_KEY", "").strip()
+    if env:
+        return env
+    if _generated:
+        return _generated
+    path = _key_file()
+    if path is None:
+        return ""
+    try:
+        if path.is_file():
+            _generated = path.read_text(encoding="utf-8").strip()
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            value = secrets.token_urlsafe(48)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(value)
+            _generated = value
+            logging.getLogger("archflow.secrets").warning(
+                "ARCHFLOW_SECRET_KEY is not set: generated %s to encrypt organizations' AI keys. Back it up with "
+                "the database, or set ARCHFLOW_SECRET_KEY.", path)
+    except OSError:
+        logging.getLogger("archflow.secrets").exception("cannot create the secret key file %s", path)
+        return ""
+    return _generated or ""
 
 
 def enabled() -> bool:

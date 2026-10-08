@@ -13,7 +13,7 @@ from typing import Any, Awaitable, Callable
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from . import jev
+from . import evaluation as evaluation_mod
 from .models import ProjectState
 from .store import DECISION_STATUSES
 
@@ -100,7 +100,7 @@ def update_decision(store: Any, pid: str, did: str, fields: dict[str, Any], acto
 
 def evaluate_branches(store: Any, pid: str, branches: list[str], base_branch: str = "main",
                       org_id: str | None = None) -> dict[str, Any]:
-    """Load the branches and run the jev → llm → heuristic chain. Raises KeyError for a missing branch."""
+    """Load the branches and run the llm → heuristic chain. Raises KeyError for a missing branch."""
     uniq = list(dict.fromkeys(b.strip() for b in branches if b.strip()))
     if not 2 <= len(uniq) <= 4:
         raise ValueError("choose 2 to 4 different branches")
@@ -111,8 +111,8 @@ def evaluate_branches(store: Any, pid: str, branches: list[str], base_branch: st
             raise KeyError(b)
         alts[b] = st
     base = store.get_state(pid, base_branch)
-    reqs = jev.merged_requirements(base, alts)
-    out = jev.evaluate(reqs, alts, org_id=org_id)
+    reqs = evaluation_mod.merged_requirements(base, alts)
+    out = evaluation_mod.evaluate(reqs, alts, org_id=org_id)
     out["requirement_ids"] = list(reqs.requirements)
     return out
 
@@ -121,11 +121,11 @@ def decision_from_evaluation(store: Any, pid: str, evaluation: dict[str, Any], a
                              title: str | None = None) -> dict[str, Any]:
     """A proposed ADR whose alternatives are the evaluated branches and whose choice is the recommendation."""
     branches: list[str] = evaluation["alternatives"]
-    labels = evaluation.get("criteria_labels") or jev.CRITERIA_LABELS
+    labels = evaluation.get("criteria_labels") or evaluation_mod.CRITERIA_LABELS
     alternatives = []
     for b in branches:
         st = store.get_state(pid, b) or ProjectState()
-        summ = jev.architecture_summary(st)
+        summ = evaluation_mod.architecture_summary(st)
         techs = sorted({c.get("technology") for c in summ["components"] if c.get("technology")})[:6]
         s = evaluation["scores"].get(b, {})
         alternatives.append({

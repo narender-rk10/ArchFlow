@@ -473,8 +473,8 @@ def build_remote_mcp(services: Services) -> MCPServer:
     @mcp.tool()
     async def evaluate_alternatives(project_id: str, branches: list[str], create_decision: bool = True,
                                     title: str = "") -> dict[str, Any]:
-        """Compare 2–4 draft branches against the project's requirements (Jev decision API, else an LLM, else
-        an offline heuristic; 'engine' says which). Scores cost, scalability, performance, security, reliability,
+        """Compare 2–4 draft branches against the project's requirements (an LLM, else an offline
+        heuristic; 'engine' says which). Scores cost, scalability, performance, security, reliability,
         operability and delivery speed 1–5 and recommends one. With create_decision, records a proposed ADR."""
         p = Principal(store)
         if create_decision:

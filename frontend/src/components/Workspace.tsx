@@ -18,6 +18,7 @@ import { can } from "../types";
 import { UserMenu } from "./UserMenu";
 import { ArchNodeComponent, TYPE_META, type ArchFlowNode, type DiffMark } from "./ArchNode";
 import { CodeDialog } from "./CodeDialog";
+import { AISettingsDialog } from "./OrgDialogs";
 import { CommandBar } from "./CommandBar";
 import { ConnectDialog } from "./ConnectDialog";
 import { DecisionsPanel } from "./DecisionsPanel";
@@ -95,6 +96,18 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   // Canvas full screen: only the canvas is shown, and the browser goes full screen when it allows it.
   const [canvasFull, setCanvasFull] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
+  const toolsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!toolsOpen) return;
+    const close = (e: MouseEvent | KeyboardEvent) => {
+      if (e instanceof KeyboardEvent ? e.key === "Escape" : !toolsRef.current?.contains(e.target as Node)) setToolsOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", close); };
+  }, [toolsOpen]);
   // ---- auto-arrange ----
   const [autoTidy, setAutoTidy] = useState(() => { try { return localStorage.getItem("archflow.autoTidy") !== "0"; } catch { return true; } });
   const autoTidyRef = useRef(autoTidy);
@@ -571,6 +584,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   return (
     <div className={`workspace ${canvasFull ? "canvas-full" : ""}`}>
       <header className="topbar">
+        <div className="tb-group tb-left">
         <button className="ghost brand-btn" onClick={onExit} title="All projects"><span className="logo">▲</span></button>
         <ProjectSwitcher me={me} current={project} open={switcherOpen} onOpenChange={setSwitcherOpen}
           onOpen={onOpenProject} onHome={onExit} />
@@ -580,7 +594,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
             {branches.map((b) => <option key={b.name} value={b.name}>⎇ {b.name}</option>)}
           </select>
           {readOnly ? null : newBranch === null ? (
-            <button className="small" onClick={() => setNewBranch("experiment/")}>New branch</button>
+            <button className="small ghost icon-btn" onClick={() => setNewBranch("experiment/")} title="New branch" aria-label="New branch">+</button>
           ) : (
             <form className="row gap" onSubmit={(e) => { e.preventDefault(); createBranch(newBranch.trim(), null); setNewBranch(null); }}>
               <input autoFocus value={newBranch} onChange={(e) => setNewBranch(e.target.value)} aria-label="New branch name" />
@@ -589,10 +603,12 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
             </form>
           )}
         </div>
-        <input className="search" placeholder="Search canvas…" value={search}
+        </div>
+        <input className="search" type="search" placeholder="Search canvas…" value={search} aria-label="Search the canvas"
           onChange={(e) => { setSearch(e.target.value); setTraced(null); }}
           onKeyDown={(e) => e.key === "Enter" && onSearchEnter()} />
         <div className="spacer" />
+        <div className="tb-group tb-right">
         {analysis && (
           <button className="health-pill" onClick={() => setTab("issues")} title="Architecture health">
             {analysis.health.issues.errors > 0 && <span className="dot error" />}
@@ -600,12 +616,27 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
             {analysis.health.issues.errors + analysis.health.issues.warnings} issues · trace {analysis.health.traceability}%
           </button>
         )}
-        {ai && (
-          <span className={`ai-pill ${ai.available ? "on" : "off"}`}
-            title={ai.available ? `AI model: ${ai.model}` : "No LLM key configured: the design chat and commands use built-in templates. Add GEMINI_API_KEY to backend/.env and restart the API."}>
-            {ai.available ? "AI on" : "AI off · templates"}
-          </span>
-        )}
+        {ai && (() => {
+          const admin = can(role ?? undefined, "admin") && !!project?.org_id;
+          const tip = ai.available ? `AI model: ${ai.model}` : admin
+            ? "No AI model configured for this organization: click to add a provider key and choose models."
+            : "No AI model configured: the design chat and commands use built-in templates. Ask an organization admin to set up AI.";
+          return admin
+            ? <button className={`ai-pill ${ai.available ? "on" : "off"}`} title={tip} onClick={() => setAiSettingsOpen(true)}>{ai.available ? "AI on" : "AI off · set up"}</button>
+            : <span className={`ai-pill ${ai.available ? "on" : "off"}`} title={tip}>{ai.available ? "AI on" : "AI off · templates"}</span>;
+        })()}
+        <div className="tools-menu" ref={toolsRef}>
+          <button className="small" aria-haspopup="menu" aria-expanded={toolsOpen} onClick={() => setToolsOpen((v) => !v)}>Tools ▾</button>
+          {toolsOpen && (
+            <div className="tools-pop" role="menu">
+              <button role="menuitem" onClick={() => { setToolsOpen(false); setCodeOpen(true); }}>
+                <b>⟨/⟩ Code analysis</b><span className="muted tiny">Reconstruct a repository, check drift and change impact</span></button>
+              <button role="menuitem" onClick={() => { setToolsOpen(false); setConnectOpen(true); }}>
+                <b>⌘ Connect AI agents</b><span className="muted tiny">Claude, Codex and others over MCP</span></button>
+              <button role="menuitem" onClick={() => { setToolsOpen(false); toggleCanvasFull(); }}>
+                <b>⛶ Full-screen canvas</b><span className="muted tiny">Shortcut: F</span></button>
+              <div className="tools-sep" />
+              <label className="tools-field" hidden={readOnly}><span className="tiny muted">Convert to another platform</span>
         <select className="convert" value="" disabled={converting || readOnly} hidden={readOnly} aria-label="Convert architecture to another platform"
           title="Swap every recognised component for its equivalent on another platform"
           onChange={async (e) => {
@@ -623,6 +654,8 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           <option value="aws">AWS</option><option value="azure">Azure</option>
           <option value="gcp">Google Cloud</option><option value="oss">Open source (self-hosted)</option>
         </select>
+              </label>
+              <label className="tools-field"><span className="tiny muted">Export diagram</span>
         <select className="convert" value="" disabled={exporting} aria-label="Export this diagram"
           title="Export the diagram you are looking at (the system, or a component's internals)"
           onChange={async (e) => {
@@ -644,10 +677,10 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           <option value="svg">SVG image</option>
           <option value="html">Interactive diagram (HTML)</option>
         </select>
-        <button className="small" onClick={toggleCanvasFull} title="Full-screen canvas (F)" aria-label="Full-screen canvas">⛶</button>
-        <button className="small" onClick={() => setCodeOpen(true)}
-          title="Analyse a repository: reconstruct its architecture, check drift against this design and change impact">⟨/⟩ Code</button>
-        <button className="small" onClick={() => setConnectOpen(true)} title="Connect Claude, Codex or other agents over MCP">⌘ Connect AI</button>
+              </label>
+            </div>
+          )}
+        </div>
         {themeToggle}
         <div className="presence">
           <span className={`conn ${live.status === "connected" && live.synced ? "on" : ""}`}
@@ -659,15 +692,21 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           ⚙ Vibe code{selectedNodeIds.length ? ` (${selectedNodeIds.length})` : ""}
         </button>
         <UserMenu me={me} user={user} role={role} onLogout={onLogout} />
+        </div>
       </header>
+      {aiSettingsOpen && project?.org_id && role && (
+        <AISettingsDialog orgId={project.org_id} orgName={me.orgs.find((o) => o.id === project.org_id)?.name ?? "Organization"} role={role}
+          selfId={me.user.id} onClose={() => { setAiSettingsOpen(false); window.location.reload(); }} />
+      )}
 
       <aside className="sidebar">
         <nav className="tabs">
           {(["design", "requirements", "issues", "versions", "decisions"] as Tab[]).map((t) => (
-            <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
-              {t === "design" ? "Design" : t === "requirements" ? `Reqs${state ? ` (${Object.keys(state.requirements).length})` : ""}`
-                : t === "issues" ? `Health${analysis ? ` (${analysis.health.issues.errors + analysis.health.issues.warnings})` : ""}`
-                : t === "decisions" ? "Decisions" : "Versions"}
+            <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)} role="tab" aria-selected={tab === t}>
+              {t === "design" ? "Design" : t === "requirements" ? "Reqs" : t === "issues" ? "Health" : t === "decisions" ? "Decisions" : "Versions"}
+              {t === "requirements" && state && <span className="tab-count">{Object.keys(state.requirements).length}</span>}
+              {t === "issues" && analysis && analysis.health.issues.errors + analysis.health.issues.warnings > 0 &&
+                <span className={`tab-count ${analysis.health.issues.errors ? "bad" : "warn"}`}>{analysis.health.issues.errors + analysis.health.issues.warnings}</span>}
             </button>
           ))}
         </nav>

@@ -84,11 +84,22 @@ export interface Invite {
   id: string; org_id: string; email: string | null; role: Role; created_by: string | null; created_at: string; expires_at: number;
 }
 export interface InviteInfo { org_name: string; role: Role; email: string | null; expires_at: number }
-export type AIProvider = "gemini" | "anthropic" | "openai";
+export type AIProvider = string; // gemini, anthropic, openai, openrouter, mistral, groq, deepseek, xai, azure, openai_compatible
+export type AIGroup = "reasoning" | "fast";
+export interface AIProviderInfo {
+  id: AIProvider; label: string; key: "required" | "optional"; params: Record<string, string>; required_params: string[];
+  docs: string | null; examples: Record<AIGroup, string>; server_key: boolean;
+}
+export interface AIModelChoice { provider: AIProvider; model: string }
+export interface AIConfig { reasoning: AIModelChoice[]; fast: AIModelChoice[]; params: Record<AIProvider, Record<string, string>> }
 export interface AISettings {
+  /** False when the server cannot encrypt keys (ARCHFLOW_SECRET_KEY and no data directory): keys cannot be saved. */
   enabled: boolean;
   providers: Record<AIProvider, { configured: boolean; last4: string | null; updated_at: string | null }>;
+  catalog: AIProviderInfo[]; config: AIConfig; defaults: Record<AIGroup, string[]>; effective: Record<AIGroup, string[]>;
+  available: boolean;
 }
+export interface AITestResult { ok: boolean; group: AIGroup; model?: string; chain?: string[]; latency_ms?: number; reply?: string; error?: string }
 
 export interface ApiToken {
   id: string; kind: "pat" | "refresh"; name: string; user_name: string; access: "read" | "write";
@@ -161,7 +172,7 @@ export interface ChatTurn {
 export type DecisionStatus = "proposed" | "accepted" | "rejected" | "superseded";
 export interface DecisionAlternative { name: string; branch?: string | null; summary: string; pros: string[]; cons: string[] }
 export interface Evaluation {
-  engine: "jev" | "llm" | "heuristic";
+  engine: "llm" | "heuristic";
   recommended: string;
   alternatives: string[];
   criteria: string[];

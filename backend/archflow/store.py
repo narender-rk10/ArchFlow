@@ -254,6 +254,12 @@ CREATE TABLE IF NOT EXISTS org_ai_budgets (
     updated_by TEXT,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS org_ai_config (
+    org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    config TEXT NOT NULL DEFAULT '{}',
+    updated_by TEXT,
+    updated_at TEXT NOT NULL
+);
 """
 
 MEMBERSHIPS_DDL = """
@@ -1128,6 +1134,18 @@ class Store:
                 "alert_percent=excluded.alert_percent, updated_by=excluded.updated_by, updated_at=excluded.updated_at",
                 (org_id, monthly_limit_usd, alert_percent, user, now()))
         return self.get_ai_budget(org_id)
+
+    def get_ai_config(self, org_id: str) -> dict[str, Any]:
+        row = self._one("SELECT config FROM org_ai_config WHERE org_id=?", (org_id,))
+        return json.loads(row["config"]) if row else {}
+
+    def set_ai_config(self, org_id: str, config: dict[str, Any], user: str) -> dict[str, Any]:
+        with self.lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO org_ai_config (org_id, config, updated_by, updated_at) VALUES (?,?,?,?) "
+                "ON CONFLICT (org_id) DO UPDATE SET config=excluded.config, updated_by=excluded.updated_by, "
+                "updated_at=excluded.updated_at", (org_id, json.dumps(config), user, now()))
+        return self.get_ai_config(org_id)
 
 def default_store():
     """Postgres when DATABASE_URL is a postgres URL, otherwise SQLite (ARCHFLOW_DB or backend/data/archflow.db)."""
