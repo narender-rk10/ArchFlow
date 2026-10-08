@@ -19,7 +19,7 @@ import { UserMenu } from "./UserMenu";
 import { ArchNodeComponent, TYPE_META, type ArchFlowNode, type DiffMark } from "./ArchNode";
 import { CodeDialog } from "./CodeDialog";
 import { AISettingsDialog } from "./OrgDialogs";
-import { CommandBar } from "./CommandBar";
+import { CommandBar, type ChatDock, type ChatMode } from "./CommandBar";
 import { ConnectDialog } from "./ConnectDialog";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { DesignChat } from "./DesignChat";
@@ -48,7 +48,8 @@ interface Props {
 }
 
 const nodeTypes = { arch: ArchNodeComponent };
-type Tab = "design" | "requirements" | "issues" | "versions" | "decisions";
+type Tab = "chat" | "requirements" | "issues" | "versions" | "decisions";
+const DOCK_KEY = "archflow.chatDock";
 const rand = () => Math.random().toString(36).slice(2, 6);
 
 export function Workspace(props: Props) {
@@ -67,7 +68,19 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const [versions, setVersions] = useState<Version[]>([]);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
-  const [tab, setTab] = useState<Tab>("design");
+  const [dock, setDockState] = useState<ChatDock>(() => {
+    try { const v = localStorage.getItem(DOCK_KEY); if (v === "left" || v === "right" || v === "float") return v; } catch { /* storage unavailable */ }
+    return "left";
+  });
+  const [tab, setTab] = useState<Tab>(dock === "left" ? "chat" : "requirements");
+  const [rightTab, setRightTab] = useState<"chat" | "props">("chat");
+  const [chatMode, setChatMode] = useState<ChatMode | null>(null); // null until the project loads: Design on an empty canvas
+  const setDock = (d: ChatDock) => {
+    setDockState(d);
+    try { localStorage.setItem(DOCK_KEY, d); } catch { /* storage unavailable */ }
+    if (d === "left") setTab("chat"); else if (tab === "chat") setTab("requirements");
+    if (d === "right") setRightTab("chat");
+  };
   const [traced, setTraced] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [diff, setDiff] = useState<{ from: number; data: Diff } | null>(null);
@@ -581,6 +594,24 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const others = live.peers.filter((p) => p.clientId !== live.selfId);
   const aiBusy = rt.aiStatus.status === "thinking" ? `AI is applying “${rt.aiStatus.text}” for ${rt.aiStatus.actor}` : null;
 
+  const canvasEmpty = !!state && Object.keys(state.nodes).length === 0;
+  const effectiveMode: ChatMode = chatMode ?? (canvasEmpty && !readOnly ? "design" : readOnly ? "ask" : "command");
+  const chatPanel = (
+    <CommandBar assistant={assistant} selection={selectedNodeIds} aiBusy={aiBusy} links={entityLinks}
+      memoryCount={memory.length} onOpenMemory={() => setMemoryOpen(true)} meId={me.user.id} isAdmin={can(role, "admin")}
+      userName={user.name} readOnly={readOnly} mode={effectiveMode} onMode={setChatMode} dock={dock} onDock={setDock}
+      designSlot={state && !readOnly ? (
+        <DesignChat pid={pid} branch={branch} user={user} aiAvailable={ai?.available ?? true} canvasEmpty={canvasEmpty}
+          remote={designRemote}
+          onApplied={(r) => {
+            if (r.branch !== branch) { onBranch(r.branch); return; }
+            refreshMeta();
+            toast(`Applied architecture · v${r.version}`);
+            window.setTimeout(() => flow.fitView({ padding: 0.15, duration: 400 }), 400); // after the live document receives the change
+          }} />
+      ) : undefined} />
+  );
+
   return (
     <div className={`workspace ${canvasFull ? "canvas-full" : ""}`}>
       <header className="topbar">
@@ -701,28 +732,16 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
 
       <aside className="sidebar">
         <nav className="tabs">
-          {(["design", "requirements", "issues", "versions", "decisions"] as Tab[]).map((t) => (
+          {((dock === "left" ? ["chat"] : []).concat(["requirements", "issues", "versions", "decisions"]) as Tab[]).map((t) => (
             <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)} role="tab" aria-selected={tab === t}>
-              {t === "design" ? "Design" : t === "requirements" ? "Reqs" : t === "issues" ? "Health" : t === "decisions" ? "Decisions" : "Versions"}
+              {t === "chat" ? "Assistant" : t === "requirements" ? "Reqs" : t === "issues" ? "Health" : t === "decisions" ? "Decisions" : "Versions"}
               {t === "requirements" && state && <span className="tab-count">{Object.keys(state.requirements).length}</span>}
               {t === "issues" && analysis && analysis.health.issues.errors + analysis.health.issues.warnings > 0 &&
                 <span className={`tab-count ${analysis.health.issues.errors ? "bad" : "warn"}`}>{analysis.health.issues.errors + analysis.health.issues.warnings}</span>}
             </button>
           ))}
         </nav>
-        {state && tab === "design" && readOnly && (
-          <p className="muted small pad">The design chat creates and changes architectures, which needs the developer role or above.</p>
-        )}
-        {state && tab === "design" && !readOnly && (
-          <DesignChat pid={pid} branch={branch} user={user} aiAvailable={ai?.available ?? true} canvasEmpty={Object.keys(state.nodes).length === 0}
-            remote={designRemote}
-            onApplied={(r) => {
-              if (r.branch !== branch) { onBranch(r.branch); return; }
-              refreshMeta();
-              toast(`Applied architecture · v${r.version}`);
-              window.setTimeout(() => flow.fitView({ padding: 0.15, duration: 400 }), 400); // after the live document receives the change
-            }} />
-        )}
+        {tab === "chat" && dock === "left" && chatPanel}
         {state && tab === "requirements" && (
           <RequirementsPanel state={state} issues={analysis?.requirement_issues ?? []} traced={traced} onTrace={setTraced} readOnly={readOnly}
             send={send} onPrompt={(rid) => setPromptFor({ nodeIds: [], requirementIds: [rid] })} />
@@ -806,18 +825,25 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         {state && !level && Object.keys(state.nodes).length === 0 && (
           <div className="empty-canvas">
             <h3>Empty canvas</h3>
-            <p className="muted">Drag components from the palette, or describe your system below — e.g.
+            <p className="muted">Drag components from the palette, or describe your system in the assistant (Design mode), e.g.
               “Build an AI customer-support platform where customers use WhatsApp and web.”</p>
           </div>
         )}
-        <CommandBar assistant={assistant} selection={selectedNodeIds} aiBusy={aiBusy} links={entityLinks}
-          memoryCount={memory.length} onOpenMemory={() => setMemoryOpen(true)} meId={me.user.id} isAdmin={can(role, "admin")}
-          userName={user.name} readOnly={readOnly} />
+        {dock === "float" && chatPanel}
         <div className="toasts">{toasts.map((t) => <div key={t.id} className="toast">{t.text}</div>)}</div>
       </main>
 
-      <aside className="rightbar">
-        {state && (
+      <aside className={`rightbar ${dock === "right" ? "with-chat" : ""}`}>
+        {dock === "right" && (
+          <nav className="tabs">
+            <button className={rightTab === "chat" ? "on" : ""} onClick={() => setRightTab("chat")} role="tab" aria-selected={rightTab === "chat"}>Assistant</button>
+            <button className={rightTab === "props" ? "on" : ""} onClick={() => setRightTab("props")} role="tab" aria-selected={rightTab === "props"}>
+              Properties{selectedNodeIds.length + selectedEdgeIds.length > 0 && <span className="tab-count">{selectedNodeIds.length + selectedEdgeIds.length}</span>}
+            </button>
+          </nav>
+        )}
+        {dock === "right" && rightTab === "chat" && chatPanel}
+        {state && (dock !== "right" || rightTab === "props") && (
           <Inspector catalog={catalog} state={state} nodeIds={selectedNodeIds} edgeIds={selectedEdgeIds} send={send}
             pid={pid} branch={branch} onOpenInternals={openLevel} readOnly={readOnly}
             onPrompt={() => setPromptFor({ nodeIds: selectedNodeIds, requirementIds: [] })} />

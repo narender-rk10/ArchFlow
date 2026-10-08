@@ -16,7 +16,22 @@ interface Props {
   userName: string;
   /** Viewer/reviewer: only "Ask" (questions about the project) is available. */
   readOnly?: boolean;
+  /** Design (guided: questions, then architecture options), Edit (change the canvas) or Ask. */
+  mode: ChatMode;
+  onMode: (mode: ChatMode) => void;
+  /** Where the panel lives: docked in the left or right sidebar, or floating over the canvas. */
+  dock: ChatDock;
+  onDock: (dock: ChatDock) => void;
+  /** The guided design conversation, shown in Design mode (absent for read-only roles). */
+  designSlot?: React.ReactNode;
 }
+
+export type ChatMode = "design" | "command" | "ask";
+export type ChatDock = "left" | "float" | "right";
+const DOCKS: { id: ChatDock; icon: string; label: string }[] = [
+  { id: "left", icon: "◧", label: "Dock left" }, { id: "float", icon: "▭", label: "Float over the canvas" },
+  { id: "right", icon: "◨", label: "Dock right" },
+];
 
 const SUGGESTIONS = [
   "Add Redis between Order Service and Orders DB",
@@ -35,10 +50,10 @@ function ago(iso: string): string {
 
 /** The project assistant: ask questions or edit the canvas in a shared, remembered conversation. */
 export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount, onOpenMemory, meId, isAdmin,
-  userName, readOnly = false }: Props) {
+  userName, readOnly = false, mode: modeProp, onMode: setMode, dock, onDock, designSlot }: Props) {
   const [text, setText] = useState("");
-  const [modeState, setMode] = useState<"command" | "ask">(readOnly ? "ask" : "command");
-  const mode = readOnly ? "ask" : modeState;
+  const mode: ChatMode = readOnly ? "ask" : modeProp === "design" && !designSlot ? "command" : modeProp;
+  const docked = dock !== "float";
   const [expanded, setExpanded] = useState(true);
   const [tall, setTall] = useState(false);
   const [full, setFull] = useState(false);
@@ -52,6 +67,7 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
   const conv = a.current;
   const owns = (createdById: string | null) => createdById === meId || isAdmin;
   const hasLog = a.messages.length > 0 || a.draft !== null || !!a.error;
+  const showLog = hasLog || full || docked;
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
@@ -121,9 +137,46 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
     </div>
   );
 
+  const top = (
+    <div className="cmd-top">
+      <div className="seg" role="tablist" aria-label="Assistant mode">
+        {designSlot && <button type="button" role="tab" aria-selected={mode === "design"} className={mode === "design" ? "on" : ""}
+          onClick={() => setMode("design")} title="Start from an idea: ArchFlow asks a few questions, then proposes architectures">Design</button>}
+        {!readOnly && <button type="button" role="tab" aria-selected={mode === "command"} className={mode === "command" ? "on" : ""}
+          onClick={() => setMode("command")} title="Tell ArchFlow what to change on the canvas">Edit</button>}
+        <button type="button" role="tab" aria-selected={mode === "ask"} className={mode === "ask" ? "on" : ""}
+          onClick={() => setMode("ask")} title="Ask questions about the project">Ask</button>
+      </div>
+      <span className="spacer" />
+      {!full && (
+        <div className="dock-switch" role="group" aria-label="Assistant position">
+          {DOCKS.map((d) => (
+            <button key={d.id} type="button" className={`ghost tiny-btn ${dock === d.id ? "on" : ""}`} title={d.label} aria-label={d.label}
+              aria-pressed={dock === d.id} onClick={() => onDock(d.id)}>{d.icon}</button>
+          ))}
+        </div>
+      )}
+      {!docked && hasLog && !full && mode !== "design" && (
+        <button type="button" className="ghost tiny-btn" onClick={() => setExpanded(!expanded)} aria-label="Toggle conversation"
+          title={expanded ? "Collapse" : "Expand"}>{expanded ? "▾" : "▴"}</button>
+      )}
+    </div>
+  );
+
+  if (mode === "design" && designSlot) {
+    return (
+      <div className={`command-bar design-mode ${docked ? `docked ${dock}` : "tall"}`}>
+        {top}
+        <div className="cmd-design">{designSlot}</div>
+        {aiBusy && <div className="ai-busy small">✦ {aiBusy}</div>}
+      </div>
+    );
+  }
+
   return (
-    <div className={`command-bar ${full ? "full" : tall && expanded ? "tall" : ""}`}
+    <div className={`command-bar ${full ? "full" : docked ? `docked ${dock}` : tall && expanded ? "tall" : ""}`}
       role={full ? "dialog" : undefined} aria-modal={full || undefined} aria-label={full ? "Conversation" : undefined}>
+      {top}
       {history && (
         <div className="cmd-history" role="dialog" aria-label="Conversation history">
           <div className="row between">
@@ -147,7 +200,7 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
           </ul>
         </div>
       )}
-      {expanded && (conv || hasLog || full) && (
+      {(expanded || docked) && (conv || showLog) && (
         <div className="cmd-head">
           {editingTitle !== null ? (
             <form className="row gap grow" onSubmit={(e) => { e.preventDefault(); a.rename(editingTitle); setEditingTitle(null); }}>
@@ -167,16 +220,23 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
               onClick={() => { if (window.confirm("Clear this conversation for everyone?")) a.clear(); }}>Clear</button>
           )}
           <button className="ghost tiny-btn" onClick={() => { a.open(null); inputRef.current?.focus(); }} disabled={a.busy}>+ New chat</button>
-          {!full && <button className="ghost tiny-btn" onClick={() => setTall(!tall)} title={tall ? "Smaller" : "Taller"}>{tall ? "⤓" : "⤒"}</button>}
+          {!full && !docked && <button className="ghost tiny-btn" onClick={() => setTall(!tall)} title={tall ? "Smaller" : "Taller"}>{tall ? "⤓" : "⤒"}</button>}
         </div>
       )}
-      {expanded && (hasLog || full) && (
+      {(expanded || docked) && showLog && (
         <div className="cmd-log" ref={logRef} aria-live="polite">
           {!hasLog && (
             <div className="cmd-empty muted">
-              <h3>Ask ArchFlow</h3>
-              <p className="small">Ask about the project or tell it what to change on the canvas. The conversation is saved
-                and shared with your team; press Esc to leave full screen.</p>
+              <h3>{mode === "command" ? "Edit with ArchFlow" : "Ask ArchFlow"}</h3>
+              <p className="small">{mode === "command"
+                ? "Tell ArchFlow what to change: it edits the canvas and lists every change. Select components first to focus the edit."
+                : "Ask anything about this project: requirements, components, decisions or trade-offs."} The conversation is saved
+                and shared with your team.</p>
+              {mode === "command" && (
+                <div className="cmd-suggest">
+                  {SUGGESTIONS.map((s) => <button key={s} type="button" className="dc-suggest" onClick={() => { setText(s); inputRef.current?.focus(); }}>{s}</button>)}
+                </div>
+              )}
             </div>
           )}
           {conv?.summary && (
@@ -207,10 +267,6 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
         </div>
       )}
       <form className="cmd-form" onSubmit={submit}>
-        <div className="seg">
-          {!readOnly && <button type="button" className={mode === "command" ? "on" : ""} onClick={() => setMode("command")}>Edit</button>}
-          <button type="button" className={mode === "ask" ? "on" : ""} onClick={() => setMode("ask")}>Ask</button>
-        </div>
         <input
           ref={inputRef}
           list="cmd-suggestions"
@@ -229,9 +285,6 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
           aria-pressed={full}>⛶</button>
         <button type="button" className="ghost mem-btn" onClick={onOpenMemory}
           title="Project memory: facts every AI answer, edit and design takes into account">◎ {memoryCount}</button>
-        {hasLog && !full && (
-          <button type="button" className="ghost" onClick={() => setExpanded(!expanded)} aria-label="toggle conversation">{expanded ? "▾" : "▴"}</button>
-        )}
       </form>
       {aiBusy && <div className="ai-busy small">✦ {aiBusy}</div>}
     </div>
