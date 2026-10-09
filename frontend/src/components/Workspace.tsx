@@ -10,6 +10,7 @@ import { useAssistant } from "../assistant";
 import { exportCanvasImage, exportName } from "../exportImage";
 import { autoLayout } from "../layout";
 import { touchRecent } from "../recent";
+import { buildSuggestions } from "../suggestions";
 import { useRealtime } from "../realtime";
 import type {
   Activity, Analysis, ArchNode, Branch, Catalog, CatalogItem, Diff, Issue, Me, MemoryItem, Op, Project, Role, User, Version,
@@ -595,11 +596,13 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const aiBusy = rt.aiStatus.status === "thinking" ? `AI is applying “${rt.aiStatus.text}” for ${rt.aiStatus.actor}` : null;
 
   const canvasEmpty = !!state && Object.keys(state.nodes).length === 0;
+  const chatSuggestions = buildSuggestions(state, analysis, selectedNodeIds); // cheap; no hook after the early return above
   const effectiveMode: ChatMode = chatMode ?? (canvasEmpty && !readOnly ? "design" : readOnly ? "ask" : "command");
   const chatPanel = (
     <CommandBar assistant={assistant} selection={selectedNodeIds} aiBusy={aiBusy} links={entityLinks}
       memoryCount={memory.length} onOpenMemory={() => setMemoryOpen(true)} meId={me.user.id} isAdmin={can(role, "admin")}
       userName={user.name} readOnly={readOnly} mode={effectiveMode} onMode={setChatMode} dock={dock} onDock={setDock}
+      suggestions={chatSuggestions}
       designSlot={state && !readOnly ? (
         <DesignChat pid={pid} branch={branch} user={user} aiAvailable={ai?.available ?? true} canvasEmpty={canvasEmpty}
           remote={designRemote}

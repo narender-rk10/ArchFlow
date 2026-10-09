@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { Suggestions } from "../suggestions";
 import type { Assistant } from "../assistant";
 import type { ConversationMessage } from "../types";
 import { Markdown, type EntityLinks } from "./Markdown";
@@ -24,6 +25,8 @@ interface Props {
   onDock: (dock: ChatDock) => void;
   /** The guided design conversation, shown in Design mode (absent for read-only roles). */
   designSlot?: React.ReactNode;
+  /** Starting prompts built from this project's canvas (see suggestions.ts). */
+  suggestions: Suggestions;
 }
 
 export type ChatMode = "design" | "command" | "ask";
@@ -33,12 +36,6 @@ const DOCKS: { id: ChatDock; icon: string; label: string }[] = [
   { id: "right", icon: "◨", label: "Dock right" },
 ];
 
-const SUGGESTIONS = [
-  "Add Redis between Order Service and Orders DB",
-  "Add a payment service connected to API Gateway",
-  "Convert this to an event-driven architecture with Kafka",
-  "Add authentication and PII protection requirements",
-];
 
 function ago(iso: string): string {
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -50,7 +47,7 @@ function ago(iso: string): string {
 
 /** The project assistant: ask questions or edit the canvas in a shared, remembered conversation. */
 export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount, onOpenMemory, meId, isAdmin,
-  userName, readOnly = false, mode: modeProp, onMode: setMode, dock, onDock, designSlot }: Props) {
+  userName, readOnly = false, mode: modeProp, onMode: setMode, dock, onDock, designSlot, suggestions }: Props) {
   const [text, setText] = useState("");
   const mode: ChatMode = readOnly ? "ask" : modeProp === "design" && !designSlot ? "command" : modeProp;
   const docked = dock !== "float";
@@ -232,9 +229,12 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
                 ? "Tell ArchFlow what to change: it edits the canvas and lists every change. Select components first to focus the edit."
                 : "Ask anything about this project: requirements, components, decisions or trade-offs."} The conversation is saved
                 and shared with your team.</p>
-              {mode === "command" && (
+              {(mode === "command" ? suggestions.edit : suggestions.ask).length > 0 && (
                 <div className="cmd-suggest">
-                  {SUGGESTIONS.map((s) => <button key={s} type="button" className="dc-suggest" onClick={() => { setText(s); inputRef.current?.focus(); }}>{s}</button>)}
+                  <span className="tiny muted dc-starters-label">{selection.length ? "For your selection and this project" : "For this project"}</span>
+                  {(mode === "command" ? suggestions.edit : suggestions.ask).map((s) => (
+                    <button key={s} type="button" className="dc-suggest" onClick={() => { setText(s); inputRef.current?.focus(); }}>{s}</button>
+                  ))}
                 </div>
               )}
             </div>
@@ -274,9 +274,9 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
           onChange={(e) => setText(e.target.value)}
           placeholder={mode === "command"
             ? (selection.length ? `Tell ArchFlow what to change (${selection.length} selected)…` : "Tell ArchFlow what to change, or describe your product idea…")
-            : a.messages.length ? "Ask a follow-up…" : "Ask about the project: “Why was Redis added?”, “Which components handle PII?”"}
+            : a.messages.length ? "Ask a follow-up…" : suggestions.ask[0] ? `Ask about the project, e.g. “${suggestions.ask[0]}”` : "Ask about the project…"}
         />
-        <datalist id="cmd-suggestions">{SUGGESTIONS.map((s) => <option key={s} value={s} />)}</datalist>
+        <datalist id="cmd-suggestions">{(mode === "command" ? suggestions.edit : suggestions.ask).map((s) => <option key={s} value={s} />)}</datalist>
         <button className="primary" disabled={!text.trim() || a.busy}>{mode === "command" ? "Apply" : "Ask"}</button>
         <button type="button" className={`ghost ${history ? "on" : ""}`} onClick={() => { setHistory(!history); a.refreshThreads(); }}
           title="Conversation history" aria-label="Conversation history">☰</button>
