@@ -17,7 +17,7 @@ Turn a product idea into requirements, an architecture and a live canvas that yo
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-or_SQLite-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org)
 [![MCP](https://img.shields.io/badge/MCP-OAuth_2.1-111827)](https://modelcontextprotocol.io)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue)](LICENSE)
+[![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC%20BY--NC--ND%204.0-lightgrey)](LICENSE)
 
 </div>
 
@@ -217,7 +217,7 @@ One assistant panel with three modes, docked **left**, **right** or **floating**
 ### 📤 Export
 
 - **PNG** or **SVG** image of the diagram you are looking at (system or a component's internals)
-- **Interactive HTML diagram** — a standalone, ArchFlow-branded viewer (explore nodes, trace paths, themes, PNG/SVG/WebM export) made by ArchFlow's renderer in `backend/renderer` (forked from [Archify](https://github.com/tt-a1i/archify), MIT)
+- **Interactive HTML diagram** — a standalone, ArchFlow-branded viewer (explore nodes, trace paths, themes, PNG/SVG/WebM export) made by ArchFlow's renderer in `backend/renderer`
 
 ---
 
@@ -627,7 +627,7 @@ ArchFlow/
 │   │   └── codegraph/           # Repo analysis: Graphify adapter, worker, CLI, detections,
 │   │                            # clone + SSRF guard, jobs, reconstruction, drift, impact
 │   ├── openspec/                # OpenSpec npm dependency
-│   ├── renderer/                # ArchFlow diagram renderer (fork of Archify, MIT)
+│   ├── renderer/                # ArchFlow diagram renderer (interactive HTML export)
 │   ├── tests/                   # pytest suite (SQLite + optional Postgres)
 │   └── Dockerfile
 ├── collab/
@@ -700,12 +700,11 @@ The full production plan is in [docs/production-plan.md](docs/production-plan.md
 
 Copyright © 2026 **Narender Keswani**
 
-Licensed under the **[Apache License 2.0](LICENSE)**.
+Licensed under **Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International**.
 
-Third-party components keep their own licenses:
+- ✅ **Share** — copy and redistribute in any medium or format
+- ✅ **Attribution** — credit Narender Keswani and link to this repository
+- ❌ **NonCommercial** — no commercial use
+- ❌ **NoDerivatives** — no modified distributions
 
-- `backend/renderer` is a fork of [Archify](https://github.com/tt-a1i/archify) (MIT) — see `backend/renderer/LICENSE` and `backend/renderer/THIRD_PARTY_NOTICES.md`
-- [OpenSpec](https://github.com/Fission-AI/openspec) is an npm dependency (MIT)
-- The optional repository-analysis extra uses [Graphify](https://pypi.org/project/graphifyy/) (`graphifyy`, Apache-2.0; ships an additional MIT license file and NOTICE) and its tree-sitter grammars; it is not installed by default
-
-Contact: **narender.rk10@gmail.com**
+For commercial licensing: **narender.rk10@gmail.com**

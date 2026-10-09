@@ -2,7 +2,7 @@
 name = "archflow"
 version = "0.1.0"
 description = "ArchFlow — open-source AI requirements & system architecture platform (MVP backend)"
-license = { text = "Apache-2.0" }
+license = { text = "CC-BY-NC-ND-4.0" }
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
