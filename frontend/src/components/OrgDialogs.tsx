@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import { ApiError, api } from "../api";
+import { useEscape } from "../useEscape";
 import { ROLES, ROLE_HELP, can, type AIConfig, type AIGroup, type AISettings, type AITestResult, type AIUsageReport, type AIUsageRow, type Invite, type Member, type Role } from "../types";
 import { Copy } from "./ConnectDialog";
 
 interface Base { orgId: string; orgName: string; role: Role; selfId: string; onClose: () => void; onChanged?: () => void }
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  const escRef = useEscape(onClose);
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={onClose} ref={escRef}>
       <div className="modal wide" role="dialog" aria-label={title} onClick={(e) => e.stopPropagation()}>
         <div className="row between">
           <h3>{title}</h3>

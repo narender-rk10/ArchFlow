@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { useEscape } from "../useEscape";
 import type { CodeJob, CodeOverview, DriftResult, ImpactResult, Issue } from "../types";
 
 /** Browsable URL of a path in a GitHub/GitLab repository at a commit (null for other hosts). */
@@ -29,6 +30,7 @@ const PHASES: Record<string, string> = {
 };
 
 export function CodeDialog({ pid, branch, readOnly, onClose, onOpenBranch, onFocus, toast }: Props) {
+  const escRef = useEscape(onClose);
   const [overview, setOverview] = useState<CodeOverview | null>(null);
   const [url, setUrl] = useState("");
   const [job, setJob] = useState<CodeJob | null>(null);
@@ -98,7 +100,7 @@ export function CodeDialog({ pid, branch, readOnly, onClose, onOpenBranch, onFoc
   const repoLink = codeUrl(latest?.repo_url, null);
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={onClose} ref={escRef}>
       <div className="modal wide code-dialog" role="dialog" aria-label="Code analysis" onClick={(e) => e.stopPropagation()}>
         <div className="row between">
           <h3>Code ↔ architecture</h3>

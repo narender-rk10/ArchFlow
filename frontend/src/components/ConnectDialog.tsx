@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { useEscape } from "../useEscape";
 import type { ApiToken } from "../types";
 
 interface Props { orgId: string; orgName?: string; canManage: boolean; onClose: () => void }
@@ -26,6 +27,7 @@ const ago = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : "nev
 
 /** How to connect Claude and other MCP clients, plus personal access tokens and connected apps. */
 export function ConnectDialog({ orgId, orgName, canManage, onClose }: Props) {
+  const escRef = useEscape(onClose);
   const [url, setUrl] = useState("");
   const [tab, setTab] = useState<"claude-code" | "claude-ai" | "other">("claude-code");
   const [tokens, setTokens] = useState<ApiToken[]>([]);
@@ -61,7 +63,7 @@ export function ConnectDialog({ orgId, orgName, canManage, onClose }: Props) {
   const apps = tokens.filter((t) => t.kind === "refresh");
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={onClose} ref={escRef}>
       <div className="modal wide" role="dialog" aria-label="Connect AI agents" onClick={(e) => e.stopPropagation()}>
         <div className="row between">
           <h3>Connect AI agents over MCP</h3>
