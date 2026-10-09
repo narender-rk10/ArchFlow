@@ -14,6 +14,35 @@ interface Props {
   onApplied: (r: { branch: string; version: number; summary: string[]; state: ProjectState }) => void;
   /** Latest "conversation changed" event from the server (a teammate answered in a shared design chat). */
   remote: { id: string; at: number } | null;
+  /** What the project already has, so the starting prompts fit it. */
+  context: DesignContext;
+}
+
+export interface DesignContext { name: string; description: string; requirements: { id: string; title: string }[]; components: number }
+
+const EXAMPLES = ["AI customer-support platform on WhatsApp and web", "Food delivery marketplace with live tracking",
+  "Internal knowledge assistant over company documents"];
+
+/** Starting prompts built from the project (its requirements, canvas, name and description). The generic examples are
+ * shown only for a project that has nothing yet. */
+export function starters(c: DesignContext): { label: string; prompt: string }[] {
+  const out: { label: string; prompt: string }[] = [];
+  const reqs = c.requirements;
+  if (reqs.length) {
+    const list = reqs.slice(0, 25).map((r) => `${r.id} ${r.title}`).join("; ");
+    out.push({ label: `Design the system for this project's ${reqs.length} requirement${reqs.length === 1 ? "" : "s"}`,
+      prompt: `Design the system for these requirements: ${list}${reqs.length > 25 ? ` (and ${reqs.length - 25} more in the project)` : ""}.` });
+  }
+  if (c.components > 0) {
+    out.push({ label: `Review the current architecture (${c.components} components) and propose improvements`,
+      prompt: `Review the current architecture of ${c.name} (${c.components} components): find gaps against the requirements and propose improved options.` });
+  }
+  const idea = c.description.trim();
+  if (idea) out.push({ label: `${c.name}: ${idea}`, prompt: `${c.name}: ${idea}` });
+  else if (!reqs.length && !c.components && c.name.trim().length > 3 && !/^(test|untitled|new project|demo)/i.test(c.name.trim())) {
+    out.push({ label: `Design ${c.name}`, prompt: `Design ${c.name}.` });
+  }
+  return out;
 }
 
 // Before design chats were stored on the server they lived in this browser only; they are imported once.
@@ -43,7 +72,7 @@ const toTurn = (m: ConversationMessage): ChatTurn => ({
  * Guided design chat: the assistant asks multiple-choice questions, then offers architectures to pick from.
  * Chats are stored on the server (shared with the team, kept across reloads); answers become project memory.
  */
-export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onApplied, remote }: Props) {
+export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onApplied, remote, context }: Props) {
   const [threads, setThreads] = useState<Conversation[]>([]);
   const [conv, setConv] = useState<Conversation | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
@@ -202,10 +231,22 @@ export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onAppl
             <h3>Design with ArchFlow</h3>
             <p className="muted small">Describe what you want to build. I'll ask a few multiple-choice questions, then show
               you architecture options to pick from. Your answers are saved to the project memory.</p>
-            {["AI customer-support platform on WhatsApp and web", "Food delivery marketplace with live tracking",
-              "Internal knowledge assistant over company documents"].map((s) => (
-              <button key={s} className="dc-suggest" onClick={() => step({ role: "user", content: s })}>{s}</button>
-            ))}
+            {(() => {
+              const fromProject = starters(context);
+              return fromProject.length ? (
+                <>
+                  <span className="tiny muted dc-starters-label">Start from this project</span>
+                  {fromProject.map((s) => (
+                    <button key={s.label} className="dc-suggest" title={s.prompt} onClick={() => step({ role: "user", content: s.prompt })}>{s.label}</button>
+                  ))}
+                </>
+              ) : (
+                <>
+                  <span className="tiny muted dc-starters-label">Or try an example</span>
+                  {EXAMPLES.map((s) => <button key={s} className="dc-suggest" onClick={() => step({ role: "user", content: s })}>{s}</button>)}
+                </>
+              );
+            })()}
           </div>
         )}
         {turns.map((t, i) => {

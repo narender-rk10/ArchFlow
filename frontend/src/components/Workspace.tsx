@@ -603,6 +603,8 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
       designSlot={state && !readOnly ? (
         <DesignChat pid={pid} branch={branch} user={user} aiAvailable={ai?.available ?? true} canvasEmpty={canvasEmpty}
           remote={designRemote}
+          context={{ name: project?.name ?? "", description: project?.description ?? "", components: Object.keys(state.nodes).length,
+            requirements: Object.values(state.requirements).map((r) => ({ id: r.id, title: r.title })).sort((x, y) => x.id.localeCompare(y.id)) }}
           onApplied={(r) => {
             if (r.branch !== branch) { onBranch(r.branch); return; }
             refreshMeta();

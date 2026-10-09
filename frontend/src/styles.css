@@ -842,3 +842,4 @@ button.ai-pill { cursor: pointer; }
 .sidebar > .command-bar.docked, .rightbar > .command-bar.docked { min-height: 0; }
 .rightbar.with-chat { display: flex; flex-direction: column; overflow: hidden; }
 .rightbar.with-chat > :not(.tabs):not(.command-bar) { overflow-y: auto; }
+.dc-starters-label { display: block; margin-top: 10px; text-transform: uppercase; letter-spacing: .04em; }
