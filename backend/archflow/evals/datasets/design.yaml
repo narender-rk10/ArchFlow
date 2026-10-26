@@ -1,0 +1,50 @@
+suite: design
+description: The design chat (design.turn) interviews before proposing, and proposes complete, distinct options on request.
+cases:
+  - id: first-turn-asks
+    idea: A booking app for yoga studios with online payments
+    expect:
+      action: ask
+
+  - id: skip-to-options
+    turns:
+      - {role: user, content: A booking app for yoga studios with online payments}
+      - {role: user, content: Skip the questions and show me architecture options now}
+    expect:
+      action: propose
+      min_options: 2
+      component_types_all: [database]
+      mentions_any: [payment, Stripe, Adyen, PayPal]
+
+  - id: agentic-options-include-llm
+    idea: >-
+      Show me architecture options now: an AI agent that triages new GitHub issues, labels them and drafts a
+      reply using an LLM and our internal docs.
+    expect:
+      action: propose
+      min_options: 2
+      component_types_all: [llm]
+      mentions_any: [GitHub]
+
+  # Official documentation as context (cloud_docs: Microsoft Learn / AWS Knowledge MCP servers)
+  - id: azure-options-use-azure-services
+    idea: >-
+      Show me architecture options now: an order-processing backend on Azure with a public API, background
+      fulfilment and a relational database.
+    expect:
+      action: propose
+      min_options: 2
+      component_types_all: [database]
+      mentions_any: [Azure SQL, Cosmos DB, Service Bus, AKS, Container Apps, Azure Functions, App Service, API Management]
+      not_mentions: [DynamoDB, Lambda, CloudFront]
+
+  - id: aws-options-use-aws-services
+    idea: >-
+      Show me architecture options now: an order-processing backend on AWS with a public API, background
+      fulfilment and a relational database.
+    expect:
+      action: propose
+      min_options: 2
+      component_types_all: [database]
+      mentions_any: [Aurora, RDS, SQS, Lambda, ECS, EKS, API Gateway, EventBridge]
+      not_mentions: [Cosmos DB, Service Bus, AKS]

@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
-from . import auth, users
+from . import auth, llm, users
 
 ROLES = ("viewer", "reviewer", "developer", "architect", "admin", "owner")
 RANK = {r: i for i, r in enumerate(ROLES)}
@@ -107,17 +108,27 @@ class Authz:
             raise HTTPException(403, f"Your role ({role}) cannot do this; it needs {ACTIONS[action]} or above.")
         return Access(user=user, role=role, org_id=project["org_id"], project=project)
 
-    def project(self, action: str) -> Callable[..., Access]:
-        """Dependency for routes with a ``{pid}`` path parameter."""
-        def dep(pid: str, request: Request) -> Access:
-            return self.check_project(self.current_user(request), pid, action)
+    def project(self, action: str) -> Callable[..., Awaitable[Access]]:
+        """Dependency for routes with a ``{pid}`` path parameter. Async so that it can attribute the request's AI
+        calls (usage rows and traces) to the person: the store lookups still run in a worker thread."""
+        async def dep(pid: str, request: Request) -> Access:
+            a = await run_in_threadpool(lambda: self.check_project(self.current_user(request), pid, action))
+            attribute(a)
+            return a
         return dep
 
-    def org(self, action: str) -> Callable[..., Access]:
-        """Dependency for routes with an ``{org_id}`` path parameter."""
-        def dep(org_id: str, request: Request) -> Access:
-            return self.check_org(self.current_user(request), org_id, action)
+    def org(self, action: str) -> Callable[..., Awaitable[Access]]:
+        """Dependency for routes with an ``{org_id}`` path parameter (attributes AI calls like ``project``)."""
+        async def dep(org_id: str, request: Request) -> Access:
+            a = await run_in_threadpool(lambda: self.check_org(self.current_user(request), org_id, action))
+            attribute(a)
+            return a
         return dep
+
+
+def attribute(a: Access) -> None:
+    """Attribute the AI calls of the current request to this person (see llm.usage_scope, agents.tracing)."""
+    llm.set_usage_scope(user_id=a.user.get("id", ""), user_name=a.user.get("name", ""))
 
 
 # --------------------------------------------------------------------------- CSRF

@@ -24,7 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from . import (accounts, ai, openspec_service, diagram_export, auth, catalog, chat, collab_sync, conversations, decisions, lld, llm,
-               secrets_box, usage, users)
+               observability, review, secrets_box, suggestions, usage, users)
 from .analysis import full_analysis, trace_requirement
 from .codegraph.service import CodeGraphService
 from .codegraph.service import register_routes as register_codegraph_routes
@@ -242,8 +242,23 @@ def create_app(store: Store | None = None) -> FastAPI:
     # ---- meta (public: static metadata only) ----
     @app.get("/api/health")
     def api_health():
+        """Liveness: the process answers (no dependency checks, so it is cheap to poll)."""
         return {"ok": True, "ai_mode": ai.MODE, "model": ai.MODEL, "llm": llm.status(),
                 "export": {"interactive": diagram_export.available()}}
+
+    @app.get("/api/ready")
+    def api_ready():
+        """Readiness for load balancers and Kubernetes: the database answers and the schema is current."""
+        from .db import migrate
+
+        try:
+            revision = migrate.current(store.engine)
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            return JSONResponse(status_code=503, content={"ready": False, "database": f"{type(exc).__name__}"})
+        head = migrate.head()
+        ok = revision == head
+        return JSONResponse(status_code=200 if ok else 503,
+                            content={"ready": ok, "database": store.dialect, "schema": revision, "expected": head})
 
     @app.get("/api/catalog")
     def get_catalog():
@@ -256,6 +271,8 @@ def create_app(store: Store | None = None) -> FastAPI:
     # ---- accounts, orgs, members, invites, org AI settings ----
     accounts.register_routes(app, store, authz)
     usage.register_routes(app, store, authz, budgets)
+    observability.install(store)
+    observability.register_routes(app, store, authz)
 
     # ---- projects ----
     @app.get("/api/projects")
@@ -342,6 +359,10 @@ def create_app(store: Store | None = None) -> FastAPI:
         v = store.get_version(pid, body.version)
         if not v:
             raise HTTPException(404, "version not found")
+        before = store.get_state(pid, branch)
+        if before is None:
+            raise HTTPException(404, f"branch '{branch}' not found")
+        safety = store.commit(pid, branch, f"Before restoring v{body.version}", a.actor, before)  # undo point
         with store.transaction(pid, branch) as current:
             if current is None:
                 raise HTTPException(404, f"branch '{branch}' not found")
@@ -356,7 +377,8 @@ def create_app(store: Store | None = None) -> FastAPI:
         await sync_to_live_doc(pid, branch, current, restored, a.actor)
         await hub.broadcast(Hub.key(pid, branch), {"type": "state", "state": restored.model_dump(),
                                                    "actor": a.actor, "summary": [f"restored v{body.version}"]})
-        return {"state": restored.model_dump()}
+        await hub.broadcast(Hub.key(pid, branch), {"type": "versions", "actor": a.actor})
+        return {"state": restored.model_dump(), "safety_version": safety["number"]}
 
     @app.post("/api/projects/{pid}/branches", status_code=201)
     def create_branch(pid: str, body: BranchIn, a: Access = Depends(edit)):
@@ -477,10 +499,10 @@ def create_app(store: Store | None = None) -> FastAPI:
         except (OpError, ConflictError) as exc:
             await hub.broadcast(room, {"type": "ai_status", "status": "idle"})
             return {"applied": False, "error": str(exc), "explanation": result.explanation,
-                    "questions": result.questions, "engine": result.engine, "ops": result.ops}
+                    "questions": result.questions, "question_options": result.question_options, "engine": result.engine, "ops": result.ops}
         await hub.broadcast(room, {"type": "ai_status", "status": "idle"})
         return {"applied": True, "summary": summary, "explanation": result.explanation,
-                "questions": result.questions, "engine": result.engine, "state": new_state.model_dump()}
+                "questions": result.questions, "question_options": result.question_options, "engine": result.engine, "state": new_state.model_dump()}
 
     @app.post("/api/projects/{pid}/ai/command")
     async def ai_command(pid: str, body: CommandIn, branch: str = "main", a: Access = Depends(edit)):
@@ -591,6 +613,8 @@ def create_app(store: Store | None = None) -> FastAPI:
         await hub.broadcast(Hub.key(pid, branch), msg)
 
     decisions.register_routes(app, store, authz=authz, sync_to_live_doc=sync_to_live_doc, broadcast=broadcast_room)
+    suggestions.register_routes(app, store, authz=authz, state_or_404=state_or_404)
+    review.register_routes(app, store, authz=authz, state_or_404=state_or_404)
 
     # ---- OpenSpec: spec-driven changes stored per project (openspec_service.py) ----
     def openspec_context(pid: str, branch: str) -> dict[str, Any]:

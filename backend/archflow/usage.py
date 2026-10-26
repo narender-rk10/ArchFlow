@@ -30,6 +30,8 @@ FEATURES: list[tuple[str, str]] = [  # (path pattern after /api/projects/{pid}, 
     (r"/conversations/[^/]+/command", "canvas-edit"),
     (r"/ai/command", "canvas-edit"),
     (r"/ai/ask", "assistant"),
+    (r"/ai/suggestions", "suggestions"),
+    (r"/ai/review", "review"),
     (r"/chat", "design-chat"),
     (r"/openspec", "openspec"),
     (r"/nodes/[^/]+/lld", "low-level-design"),
@@ -148,6 +150,9 @@ def register_routes(app: FastAPI, store: Any, authz: Any, budgets: Budgets) -> N
         summary = store.ai_usage_summary(org_id, since)
         for row in summary["by_project"]:
             row["name"] = projects.get(row["key"], "(no project)" if not row["key"] else "(deleted project)")
+        people = {m["user_id"]: m["name"] for m in store.list_members(org_id)}
+        for row in summary.get("by_user", []):
+            row["name"] = people.get(row["key"], "(server or MCP)" if not row["key"] else "(former member)")
         return {"days": days, "month_start": month_start(), "month_spend_usd": round(spent, 4), "budget": budget,
                 "used_percent": round(used, 1) if used is not None else None,
                 "status": "blocked" if limit is not None and spent >= limit

@@ -4,8 +4,9 @@ The model edits the canvas through the same tools an MCP agent would use (add_co
 connect_components, ...). Tool calls are collected and applied as one atomic batch through
 ``ops.apply_ops`` — the AI never produces a picture, only operations on the shared model.
 
-All model calls go through the provider-agnostic gateway in ``llm.py`` (LiteLLM Router: Gemini
-primary, Claude and OpenAI as fallbacks). If no provider key is configured (or ``ARCHFLOW_AI=offline``),
+The command is a Pydantic AI agent (``agents``) whose prompt is versioned in ``prompts/canvas.command.yaml``;
+its model calls go through the provider-agnostic gateway in ``llm.py`` (LiteLLM Router: Gemini primary,
+Claude and OpenAI as fallbacks). If no provider key is configured (or ``ARCHFLOW_AI=offline``),
 a small rule-based parser handles common canvas commands so the product still works offline.
 """
 
@@ -18,7 +19,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import llm
+from . import agents, cloud_docs, llm
 from .models import NODE_TYPES, ProjectState
 from .ops import resolve_node
 
@@ -35,6 +36,7 @@ class CommandResult:
     ops: list[dict[str, Any]] = field(default_factory=list)
     explanation: str = ""
     questions: list[str] = field(default_factory=list)
+    question_options: dict[str, list[str]] = field(default_factory=dict)  # question -> answers the user can tap
     engine: str = "offline"
 
 
@@ -112,45 +114,20 @@ _TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "ask_clarifying_questions",
-        "description": "Ask the user questions whose answers are needed to complete the requirements or architecture.",
-        "parameters": {"type": "object", "properties": {"questions": _STRS}, "required": ["questions"]},
+        "description": "Ask the user questions whose answers are needed to complete the requirements or architecture. "
+                       "Give each question 2-4 short answer options, the most likely first; the user taps one.",
+        "parameters": {"type": "object", "properties": {"questions": {"type": "array", "items": {
+            "type": "object", "properties": {"question": _STR, "options": _STRS}, "required": ["question"]}}},
+            "required": ["questions"]},
     },
 ]
 
 # OpenAI function-calling format (LiteLLM translates it for Gemini and Claude).
 TOOLS: list[dict[str, Any]] = [{"type": "function", "function": t} for t in _TOOL_DEFS]
 
-SYSTEM = """You are ArchFlow's architecture co-pilot. You edit a live, structured architecture canvas and \
-requirements model that humans are editing at the same time.
-
-You change the model only by calling the provided tools. Make every change needed for the user's request in \
-this single response — call as many tools as needed, in order (create a component before connecting it). \
-Refer to existing components by their id or exact name. After the tool calls, write one or two sentences \
-explaining what you changed and why.
-
-Guidelines:
-- Keep edits minimal and targeted; do not rebuild what already exists.
-- "Add X between A and B" means: disconnect A→B, add X, connect A→X and X→B.
-- Layout: the canvas y axis grows downward. Clients at the top, then gateways, services/agents, then data \
-stores. Space components about 320 apart horizontally and 150-160 apart vertically. Place new components near \
-the ones they connect to and avoid overlapping existing positions.
-- Link components to the requirement IDs they satisfy via requirement_ids.
-- When the user describes a product idea, act as a requirements interviewer: add well-formed requirements \
-(actors, measurable acceptance criteria, NFRs with numbers), sketch an initial architecture, and use \
-ask_clarifying_questions for the most important open questions (at most 4).
-- Project memory lists facts the team has settled (cloud, compliance, budget, preferences); respect them.
-- The recent conversation tells you what "it", "that" or "the same" refer to. Act only on the current request.
-- If the request is ambiguous or impossible, change nothing and ask a clarifying question instead."""
-
-ASK_SYSTEM = """You are ArchFlow's project assistant. Answer questions about the user's system using only the \
-structured project data provided (requirements, architecture components and connections, version history \
-and activity log). Cite requirement IDs and component names. When you review an architecture, be specific \
-about failure modes, bottlenecks, security and missing pieces, and suggest concrete changes. Be concise.
-
-This is a conversation: use earlier turns (and the summary of older ones) to resolve follow-up questions. \
-Project memory holds facts the team has settled; treat them as true unless the project data contradicts them, \
-and say so when it does. Write in Markdown: short paragraphs, bullet lists, **bold** for key terms, `code` for \
-identifiers. Refer to components by their exact names."""
+# The system prompts live in archflow/prompts/ (canvas.command, assistant.ask), versioned; see agents.prompts.
+COMMAND_PROMPT = "canvas.command"  # v2: clarifying questions with answer options
+ASK_PROMPT = "assistant.ask"
 
 
 def _tool_to_op(name: str, args: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
@@ -180,8 +157,18 @@ def _tool_to_op(name: str, args: dict[str, Any]) -> tuple[dict[str, Any] | None,
     if name == "remove_requirement":
         return {"op": "remove_requirement", "id": args["requirement"]}, []
     if name == "ask_clarifying_questions":
-        return None, list(args.get("questions") or [])
+        return None, [q for q in (_question(x) for x in args.get("questions") or []) if q]
     return None, []
+
+
+def _question(x: Any) -> dict[str, Any] | None:
+    """A clarifying question with its answer options (models sometimes send a bare string)."""
+    if isinstance(x, str):
+        return {"question": x.strip(), "options": []} if x.strip() else None
+    if isinstance(x, dict) and str(x.get("question") or "").strip():
+        opts = [str(o).strip()[:80] for o in x.get("options") or [] if str(o).strip()][:4]
+        return {"question": str(x["question"]).strip(), "options": opts}
+    return None
 
 
 def _state_for_prompt(state: ProjectState) -> str:
@@ -201,72 +188,75 @@ class AIUnavailable(RuntimeError):
     pass
 
 
-def _user_prompt(state: ProjectState, text: str, selection: list[str], context: str = "") -> str:
+def _prompt_vars(state: ProjectState, text: str, selection: list[str], context: str = "") -> dict[str, Any]:
     selected = [f"{state.nodes[s].name} ({s})" for s in selection if s in state.nodes]
-    return (f"<project_state>\n{_state_for_prompt(state)}\n</project_state>\n\n"
-            + (f"{context}\n\n" if context else "")
-            + (f"Currently selected on the canvas: {', '.join(selected)}\n\n" if selected else "")
-            + f"Request: {text}")
+    return {"state_json": _state_for_prompt(state), "context": context, "selected": ", ".join(selected),
+            "request": text}
 
 
-MAX_ROUNDS = 3
+# Model requests per command: tool rounds plus the closing explanation.
+MAX_ROUNDS = 4
+
+
+@dataclass
+class _CommandDeps:
+    """What the canvas agent's tools act on: a working copy of the state, and everything applied to it."""
+    working: ProjectState
+    ops: list[dict[str, Any]] = field(default_factory=list)
+    done: list[str] = field(default_factory=list)
+    questions: list[dict[str, Any]] = field(default_factory=list)  # {question, options}
+
+
+def _apply_tool(name: str):
+    def handler(deps: _CommandDeps, **args: Any) -> str:
+        from .ops import ConflictError, OpError, apply_ops
+
+        op, questions = _tool_to_op(name, args)
+        if questions:
+            deps.questions += questions
+            return "The questions will be shown to the user with your answer."
+        if op is None:
+            return f"rejected: unknown tool {name}"
+        try:
+            deps.working, summary = apply_ops(deps.working, [op])
+        except (OpError, ConflictError) as exc:
+            return f"rejected: {exc}. Nothing was changed; fix the call and try again."
+        deps.ops.append(op)
+        deps.done += summary
+        return "applied: " + ("; ".join(summary) or "no change")
+    return handler
+
+
+def _tools():
+    return [agents.tool_from_schema(t["name"], t["description"], t["parameters"], _apply_tool(t["name"]))
+            for t in _TOOL_DEFS]
 
 
 def llm_command(state: ProjectState, text: str, selection: list[str], org_id: str | None = None,
                 context: str = "") -> CommandResult:
-    """Turn a request into operations. Thinking models sometimes return only the first step(s) of a plan,
-    so each batch is applied to a working copy and the model sees the updated architecture (and any errors)
-    until it stops calling tools — at most MAX_ROUNDS model calls.
+    """Turn a request into operations with a Pydantic AI agent. Each tool call is applied to a working copy of
+    the state and its result (or the reason it was rejected) goes back to the model, which keeps going until it
+    answers in text, at most MAX_ROUNDS model requests. The applied operations are returned as one batch.
 
     ``context`` is the project memory and recent conversation (conversations.command_context), so a follow-up
     such as "now put a cache in front of it" can refer to earlier turns."""
-    from .ops import ConflictError, OpError, apply_ops
-
     result = CommandResult(engine="llm")
-    working = state
-    done: list[str] = []
-    feedback = ""
-    for _ in range(MAX_ROUNDS):
-        prompt = _user_prompt(working, text, selection, context)
-        if done or feedback:
-            prompt += ("\n\nChanges already applied for this request (the project state above includes them):\n"
-                       + "\n".join(f"- {d}" for d in done)
-                       + (f"\n\nThe last batch was rejected: {feedback}. Fix it." if feedback else "")
-                       + ("\n\nQuestions already asked (do not ask them again):\n"
-                          + "\n".join(f"- {q}" for q in result.questions) if result.questions else "")
-                       + "\n\nIf anything in the request is still missing, call the tools for the remaining changes only. "
-                         "Otherwise call no tools and reply with one or two sentences describing everything you changed.")
-        try:
-            explanation, calls = llm.complete_tools(SYSTEM, [{"role": "user", "content": prompt}], TOOLS,
-                                                    group="reasoning", org_id=org_id, max_tokens=MAX_TOKENS)
-        except llm.LLMRefused:
-            result.explanation = result.explanation or "The model declined this request."
-            return result
-        except llm.LLMUnavailable as exc:
-            if result.ops:  # keep what was already planned
-                break
+    deps = _CommandDeps(working=state)
+    try:
+        run = agents.run_tools(COMMAND_PROMPT, _tools(), deps, variables=_prompt_vars(state, text, selection, context),
+                               org_id=org_id, max_tokens=MAX_TOKENS, request_limit=MAX_ROUNDS)
+        result.explanation = run.output
+    except llm.LLMRefused:
+        result.explanation = "The model declined this request."
+    except llm.LLMUnavailable as exc:
+        if not deps.ops:
             raise AIUnavailable(str(exc)) from exc
-        if explanation.strip():
-            result.explanation = explanation.strip()
-        ops = []
-        for call in calls:
-            op, questions = _tool_to_op(call["name"], call["arguments"])
-            if op:
-                ops.append(op)
-            result.questions += questions
-        if not ops:
-            break
-        try:
-            working, summary = apply_ops(working, ops)
-        except (OpError, ConflictError) as exc:
-            feedback = str(exc)
-            continue
-        feedback = ""
-        result.ops += ops
-        done += summary
-    if not result.explanation and done:
-        result.explanation = "Changed: " + "; ".join(done) + "."
-    result.questions = dedupe_questions(result.questions)
+    result.ops = deps.ops
+    if not result.explanation and deps.done:
+        result.explanation = "Changed: " + "; ".join(deps.done) + "."
+    result.questions = dedupe_questions([q["question"] for q in deps.questions])
+    options = {q["question"]: q["options"] for q in deps.questions if q["options"]}
+    result.question_options = {q: options[q] for q in result.questions if q in options}
     return result
 
 
@@ -288,20 +278,19 @@ def dedupe_questions(questions: list[str]) -> list[str]:
     return [q for q, _ in kept]
 
 
-claude_command = llm_command  # backwards-compatible name
 
 
 def claude_ask(context: str, question: str, org_id: str | None = None) -> str:
     """Answer a question about the project (name kept for compatibility; uses the "reasoning" group)."""
-    messages = [{"role": "user", "content": f"{context}\n\nQuestion: {question}"}]
     try:
-        text, _ = llm.complete_tools(ASK_SYSTEM, messages, [], group="reasoning", org_id=org_id,
-                                     max_tokens=MAX_TOKENS)
+        return agents.run_text(ASK_PROMPT, variables={"project_context": "", "memory": "", "summary": "",
+                                                      "context": context, "question": question},
+                               org_id=org_id, max_tokens=MAX_TOKENS,
+                               docs=cloud_docs.DocsRequest(query=question, about=context))
     except llm.LLMRefused:
         return "The model declined to answer this question."
     except llm.LLMUnavailable as exc:
         raise AIUnavailable(str(exc)) from exc
-    return text
 
 
 def run_command(state: ProjectState, text: str, selection: list[str] | None = None,

@@ -66,7 +66,7 @@ log = logging.getLogger("archflow.llm")
 __all__ = ["LLMUnavailable", "LLMRefused", "LLMInvalidOutput", "available", "status",
            "complete_json", "complete_tools", "stream_text", "set_org_key_resolver", "invalidate_org",
            "LLMBudgetExceeded", "usage_scope", "set_usage_scope", "set_usage_hooks", "budget_block", "estimate_cost",
-           "set_org_config_resolver", "test_connection"]
+           "set_org_config_resolver", "test_connection", "observe_calls"]
 
 
 # Thinking models (Gemini 3.x, Claude, GPT-5) spend output tokens on reasoning before answering; a small
@@ -297,6 +297,11 @@ def usage_scope(**fields: str) -> Iterator[None]:
         _usage_scope.reset(token)
 
 
+def current_scope() -> dict[str, str]:
+    """The attribution (project_id, feature, prompt) of calls made in the current context."""
+    return dict(_usage_scope.get())
+
+
 def set_usage_scope(**fields: str) -> None:
     """Set the attribution for the rest of the current context (one request)."""
     _usage_scope.set({**_usage_scope.get(), **{k: v for k, v in fields.items() if v}})
@@ -364,18 +369,43 @@ def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int, resp: 
     return (prompt_tokens * pin + completion_tokens * pout) / 1_000_000, "table"
 
 
+# Observers of every model call made in the current context (agents.tracing uses them to attach the model,
+# tokens and cost of each call to the trace of the agent run that made it).
+CallObserver = Callable[[dict[str, Any]], None]
+_call_observers: ContextVar[tuple[CallObserver, ...]] = ContextVar("archflow_llm_call_observers", default=())
+
+
+@contextmanager
+def observe_calls(observer: CallObserver) -> Iterator[None]:
+    token = _call_observers.set((*_call_observers.get(), observer))
+    try:
+        yield
+    finally:
+        _call_observers.reset(token)
+
+
 def _record(org_id: str | None, group: str, model: str, prompt_tokens: int, completion_tokens: int,
             latency_ms: float, resp: Any = None, estimated: bool = False) -> None:
-    if _usage_recorder is None:
+    observers = _call_observers.get()
+    if _usage_recorder is None and not observers:
         return
     cost, source = estimate_cost(model, prompt_tokens, completion_tokens, resp)
     scope = _usage_scope.get()
+    event = {"org_id": org_id or "", "project_id": scope.get("project_id", ""),
+             "feature": scope.get("feature", "other"), "prompt": scope.get("prompt", ""),
+             "user_id": scope.get("user_id", ""), "group": group,
+             "model": model, "prompt_tokens": int(prompt_tokens or 0), "completion_tokens": int(completion_tokens or 0),
+             "cost_usd": round(cost, 6), "cost_source": "estimate" if estimated else source,
+             "latency_ms": int(latency_ms)}
+    for observe in observers:
+        try:
+            observe(event)
+        except Exception:  # noqa: BLE001 - tracing must never fail a model call
+            log.exception("LLM call observer failed")
+    if _usage_recorder is None:
+        return
     try:
-        _usage_recorder({"org_id": org_id or "", "project_id": scope.get("project_id", ""),
-                         "feature": scope.get("feature", "other"), "group": group, "model": model,
-                         "prompt_tokens": int(prompt_tokens or 0), "completion_tokens": int(completion_tokens or 0),
-                         "cost_usd": round(cost, 6), "cost_source": "estimate" if estimated else source,
-                         "latency_ms": int(latency_ms)})
+        _usage_recorder(event)
     except Exception:  # noqa: BLE001 - never fail a model call because usage could not be stored
         log.exception("recording LLM usage failed")
 

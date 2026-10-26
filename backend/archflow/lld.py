@@ -20,7 +20,7 @@ import logging
 import re
 from typing import Any
 
-from . import llm
+from . import agents, cloud_docs, llm
 from .models import LLD_TYPES, Node, ProjectState
 from .ops import descendants, resolve_node, slugify
 
@@ -337,27 +337,7 @@ LLD_SCHEMA: dict[str, Any] = {
     },
 }
 
-LLD_SYSTEM = """You are a senior software architect producing the low-level design (C4 component level) of ONE \
-component of a larger system. Return only JSON matching the schema.
-
-Element types:
-- component: an internal module or class group (controller, service, repository, client adapter, consumer…)
-- endpoint: one API operation; set method and path (REST style, e.g. GET /orders/{id}); name = "METHOD /path"
-- table: one database table owned by this component; set columns as "name type [pk|fk]" comma-separated
-- event: one domain event it publishes or consumes (PascalCase, past tense, e.g. OrderPlaced)
-
-Rules:
-- Cover the full lifecycle of each entity this component owns: create, read one, list (e.g. "my bookings" for \
-the caller), and every state change the requirements imply (cancel, reschedule, refund, approve, …). Read \
-"primary_requirements" (traced to this component) fully, and also implement any part of "other_requirements" \
-that falls to this component (e.g. cancellation rules stated under payments).
-- API-facing components: usually 4-10 endpoints. Tables only for databases it actually uses; enforce invariants \
-with keys (e.g. a "uk" column so a slot cannot be booked twice) and add status/expiry columns for holds and states.
-- Events only if it talks to a queue/stream: one per state change other components care about (e.g. \
-BookingConfirmed and BookingCancelled).
-- 8-30 elements in total. Connections go from caller to callee (endpoint → controller → service → repository → \
-table; publisher → event). Use requirement_ids from the given requirements where an element implements one. \
-Keys are short unique identifiers referenced by connections."""
+LLD_PROMPT = "lld.design"  # prompts/lld.design.yaml (versioned; see agents.prompts)
 
 
 def _llm_prompt(state: ProjectState, node: Node) -> str:
@@ -413,8 +393,12 @@ def normalize_design(raw: dict[str, Any], state: ProjectState) -> dict[str, Any]
 
 
 def llm_design(state: ProjectState, node: Node, org_id: str | None = None) -> dict[str, Any]:
-    data = llm.complete_json(LLD_SYSTEM, [{"role": "user", "content": _llm_prompt(state, node)}], LLD_SCHEMA,
-                             group="reasoning", org_id=org_id)
+    out, inc = neighbours(state, node)
+    about = " ".join(f"{n.name} {n.technology}" for n, _ in [*out, *inc])
+    docs = cloud_docs.DocsRequest(query=f"{node.technology or node.name} {node.type} design best practices",
+                                  about=f"{node.name} {node.technology} {about}")
+    data = agents.run_json(LLD_PROMPT, LLD_SCHEMA, org_id=org_id, docs=docs,
+                           variables={"prompt": _llm_prompt(state, node)})
     return normalize_design(data, state)
 
 

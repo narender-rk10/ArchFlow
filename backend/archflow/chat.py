@@ -357,20 +357,7 @@ def compose_architectures(idea: str, answers: dict) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- LLM interviewer
-CHAT_SYSTEM = """You are ArchFlow's architecture interviewer. You help a user turn an idea into requirements \
-and a software architecture by asking multiple-choice questions, then proposing alternative architectures.
-
-Each turn, return JSON:
-- action "ask": one focused question with 2-5 concrete options (short label + one-line description). Mark \
-exactly one option recommended. Set multi=true only when several answers can be true at once. Never re-ask \
-something already answered or obvious from the idea or the existing project. Ask at most {max_q} questions in \
-total; stop earlier when you have enough.
-- action "propose": 2-4 genuinely different architectures (e.g. modular monolith, microservices, serverless, \
-event-driven, agentic), ranked, the first recommended. Each lists components (with type from: {types}; \
-concrete technology for the chosen cloud; layer 0=clients,1=edge/auth,2=services/agents,3=messaging/LLM/cache,\
-4=data) and directed connections (from/to component keys, protocol). Also return the requirements implied by \
-the conversation, with measurable acceptance criteria and NFRs with numbers.
-Propose immediately if the user asks to skip or see options. Keep "message" to one short sentence."""
+CHAT_PROMPT = "design.turn"  # prompts/design.turn.yaml (versioned; see agents.prompts)
 
 
 def _schema() -> dict[str, Any]:
@@ -418,15 +405,17 @@ def _project_summary(state: ProjectState) -> str:
 
 def llm_turn(turns: list[dict[str, Any]], state: ProjectState, org_id: str | None = None,
              memory: str = "") -> dict[str, Any]:
-    from . import llm  # imported lazily so the offline path never depends on provider configuration
+    from . import agents  # imported lazily so the offline path never depends on provider configuration
+    from .cloud_docs import DocsRequest
 
     asked = sum(1 for t in turns if t.get("role") == "assistant" and (t.get("card") or {}).get("type") == "question")
-    system = CHAT_SYSTEM.format(max_q=MAX_QUESTIONS, types=", ".join(NODE_TYPES))
-    user = (f"Existing project: {_project_summary(state)}\n\n"
-            + (f"{memory}\nDo not ask about anything the project memory already settles.\n\n" if memory else "")
-            + f"Conversation so far:\n{transcript_text(turns)}\n\n"
-            f"Questions asked so far: {asked}." + (" You must propose now." if asked >= MAX_QUESTIONS else ""))
-    data = llm.complete_json(system, [{"role": "user", "content": user}], _schema(), group="reasoning", org_id=org_id)
+    project, transcript = _project_summary(state), transcript_text(turns)
+    # The idea stays the same for the whole interview, so later turns reuse the cached lookup.
+    docs = DocsRequest(query=f"reference architecture {_idea(turns)[:200]}", about=f"{transcript}\n{project}")
+    data = agents.run_json(CHAT_PROMPT, _schema(), org_id=org_id, docs=docs, variables={
+        "max_q": MAX_QUESTIONS, "types": ", ".join(NODE_TYPES), "project": project,
+        "memory": memory, "transcript": transcript, "asked": asked,
+        "must_propose": asked >= MAX_QUESTIONS})
 
     if data.get("action") == "ask" and data.get("question") and asked < MAX_QUESTIONS:
         q = data["question"]

@@ -718,12 +718,7 @@ REFINE_SCHEMA = {
         "required": ["id"]}}},
     "required": ["components"],
 }
-REFINE_SYSTEM = ("You name and describe software architecture components reconstructed from a code repository. "
-                 "For each component return a one-sentence description of what it does. For components of type "
-                 "'service' you may also propose a better name: a short Title Case noun phrase of at most 3 words "
-                 "naming its business role (e.g. 'Orders API', 'Billing Worker'), with no parentheses, no "
-                 "technology or framework names and no lists. Keep the given name if unsure. Do not invent "
-                 "components; keep every id exactly as given.")
+REFINE_PROMPT = "codegraph.refine"  # prompts/codegraph.refine.yaml (versioned)
 _TITLE_WORD = re.compile(r"^(?:[A-Z][a-z0-9]*|[A-Z0-9]{2,5}|[A-Z][a-z]+[0-9]*)$")
 _TECH_WORDS = {"react", "typescript", "javascript", "python", "fastapi", "starlette", "django", "flask", "express",
                "node", "nodejs", "vue", "angular", "svelte", "java", "spring", "go", "golang", "rust", "postgresql",
@@ -756,9 +751,9 @@ def refine(recon: dict[str, Any], graph: dict[str, Any], org_id: str | None = No
               "\nLargest code communities (hub symbol @ paths): " +
               "; ".join(f"{c['label']} @ {', '.join(c.get('paths', [])[:2])}" for c in comms))
     try:
-        data = llm.complete_json(REFINE_SYSTEM, [{"role": "user", "content": prompt[:12000]}], REFINE_SCHEMA,
-                                 group="fast",
-                                 org_id=org_id, max_tokens=2000)
+        from .. import agents
+
+        data = agents.run_json(REFINE_PROMPT, REFINE_SCHEMA, org_id=org_id, variables={"prompt": prompt[:12000]})
     except Exception as exc:  # silent fallback: refinement is cosmetic
         log.info("reconstruction refinement skipped: %s", exc)
         return "offline"

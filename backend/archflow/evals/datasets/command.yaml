@@ -1,0 +1,34 @@
+suite: command
+description: Canvas edits (canvas.command tool agent) make the requested change, apply cleanly and touch nothing else.
+cases:
+  - id: cache-between-service-and-db
+    project: {template: ai-customer-support}
+    request: Add a Redis cache between Order Service and Orders DB
+    expect:
+      adds_types: [cache]
+      adds_any: [redis]
+      connects: [[Order Service, Redis]]
+      removes_nothing: true
+    ragas: [technically_sound]
+
+  - id: dead-letter-queue
+    project:
+      ops:
+        - {op: add_node, node: {name: Order Service, type: service, technology: Spring Boot}}
+        - {op: add_node, node: {name: Order Events, type: queue, technology: Apache Kafka}}
+        - {op: add_node, node: {name: Fulfillment Worker, type: service, technology: Spring Boot}}
+        - {op: add_edge, edge: {source: Order Service, target: Order Events, protocol: Kafka}}
+        - {op: add_edge, edge: {source: Order Events, target: Fulfillment Worker, protocol: Kafka}}
+    request: Add a dead-letter queue for Order Events messages that Fulfillment Worker fails to process
+    expect:
+      adds_types: [queue]
+      adds_any: [dead, dlq]
+      removes_nothing: true
+    ragas: [technically_sound]
+
+  - id: ambiguous-request-changes-nothing
+    project: {template: ai-customer-support}
+    request: Remove the old one
+    expect:
+      max_ops: 0
+      removes_nothing: true

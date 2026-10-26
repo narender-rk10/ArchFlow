@@ -1,0 +1,28 @@
+suite: suggestions
+description: Suggested next steps (assistant.suggestions) are grounded in the project and technically sensible.
+cases:
+  - id: edit-support-project
+    project: {template: ai-customer-support}
+    mode: edit
+    expect:
+      grounded_share: 0.75
+      forbid:
+        - "CDN[^\\n]*(WhatsApp|Orders DB|Order Service|Claude|Helpdesk|Kafka)"
+        - "(WhatsApp|Orders DB|Order Service|Claude|Helpdesk)[^\\n]*CDN"
+    ragas: [technically_sound, grounded_in_project]
+
+  - id: ask-follow-up-builds-on-answer
+    project: {template: ai-customer-support}
+    mode: ask
+    last_question: What happens if Claude is unavailable?
+    last_answer: >-
+      Support Agent calls to Claude fail and customers get no answer: there is no fallback model, no timeout and
+      no queue, so REQ-005 (response latency) is missed and nothing escalates to the Helpdesk automatically.
+    expect:
+      mentions_any: [fallback, Claude, Support Agent, Helpdesk, REQ-005, timeout]
+    ragas: [grounded_in_project]
+
+  - id: empty-project-design-starts
+    project: {template: blank}
+    mode: design
+    expect: {}

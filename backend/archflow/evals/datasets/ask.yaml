@@ -1,0 +1,29 @@
+suite: ask
+description: The project assistant (assistant.ask) answers from the project data, names real components and does not invent facts.
+cases:
+  - id: database-failure-impact
+    project: {template: ai-customer-support}
+    question: What happens to order lookups if Orders DB goes down?
+    reference: >-
+      Order lookup (REQ-003) fails. The Support Agent reads orders through the Orders MCP Server and the Order
+      Service, which both depend on the single Orders DB, so there is no fallback; add a replica with failover
+      and a cached or degraded answer so the agent can escalate to the Helpdesk.
+    expect:
+      mentions_all: [Orders DB]
+      mentions_any: [Order Service, Orders MCP Server, REQ-003]
+    ragas: [faithfulness, answer_accuracy]
+
+  - id: authentication-path
+    project: {template: ai-customer-support}
+    question: How are customers authenticated before the agent can see their orders?
+    expect:
+      mentions_any: [Auth Service, REQ-002]
+    ragas: [faithfulness]
+
+  - id: unknown-fact-is-not-invented
+    project: {template: ai-customer-support}
+    question: Which payment provider does this system use?
+    expect:
+      mentions_any: [not, no payment, isn't, doesn't, none]
+      forbid: ["(uses|use|integrates with) (Stripe|PayPal|Adyen|Braintree)"]
+    ragas: [faithfulness]
