@@ -58,6 +58,15 @@ ArchFlow treats requirements, architecture, decisions and versions as **one stru
 ### Versions, Branches & Activity
 ![Versions](docs/screenshots/09_versions.png)
 
+### Live Collaboration — Presence, Cursors & Selections
+![Live Collaboration](docs/screenshots/21_live_collaboration.png)
+
+### Comments — Threads, Replies & @Mentions
+![Comments](docs/screenshots/19_comments.png)
+
+### Notifications — Mentions & Replies
+![Notifications](docs/screenshots/20_notifications.png)
+
 ### Architecture Decisions (ADRs)
 ![Decisions](docs/screenshots/10_decisions.png)
 
@@ -179,6 +188,8 @@ One assistant panel with three modes, docked **left**, **right** or **floating**
 - Google Docs-style editing on a shared **Yjs** document (Hocuspocus server): edits merge automatically, offline edits sync on reconnect, undo/redo (`Ctrl+Z` / `Ctrl+Y`)
 - Presence avatars, live cursors and selection outlines
 - AI, MCP and API edits merge into the live document **field by field**, so they never overwrite what people are typing; if someone changes the field you are editing, you get a "Use theirs" option
+- **Comments** on components or the whole project: threaded replies, resolve / reopen, edit and delete, live for everyone; components with open threads show a 💬 badge on the canvas
+- **@mentions** — type `@` to tag a teammate; they get a notification in the 🔔 bell (mentions and replies), which jumps straight to the thread
 
 ---
 
