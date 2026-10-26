@@ -40,12 +40,14 @@ export interface ArchNodeData extends Record<string, unknown> {
   remote?: { name: string; color: string }[];
   issues?: number;
   childCount?: number; // elements in this component's internal (LLD) diagram
+  comments?: number; // open comment threads on this component
+  onComments?: () => void;
 }
 
 export type ArchFlowNode = Node<ArchNodeData, "arch">;
 
 function ArchNodeView({ data, selected }: NodeProps<ArchFlowNode>) {
-  const { model, dimmed, highlighted, diff, remote, issues, childCount } = data;
+  const { model, dimmed, highlighted, diff, remote, issues, childCount, comments, onComments } = data;
   const meta = TYPE_META[model.type] ?? TYPE_META.service;
   const logo = brandIcon(model.technology, model.name);
   const ring = remote?.[0]?.color;
@@ -74,6 +76,10 @@ function ArchNodeView({ data, selected }: NodeProps<ArchFlowNode>) {
           <span className="vbadge" style={{ ["--vc" as string]: VENDOR_STYLE[model.vendor].color }}>{VENDOR_STYLE[model.vendor].short}</span>
         )}
         {!!issues && <span className="an-issues" title={`${issues} issue(s)`}>{issues}</span>}
+        {!!comments && (
+          <button className="an-comments nodrag" title={`${comments} open comment thread(s) · click to read`} aria-label={`${comments} open comments`}
+            onClick={(e) => { e.stopPropagation(); onComments?.(); }} onDoubleClick={(e) => e.stopPropagation()}>💬 {comments}</button>
+        )}
         {!!childCount && <span className="an-children" title={`${childCount} internal element(s) · double-click to open`}>↘ {childCount}</span>}
       </div>
       {model.type === "endpoint" ? (

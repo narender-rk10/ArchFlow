@@ -1,5 +1,5 @@
 import type { Activity, Analysis, ArchOption, Branch, ChatCard, ChatTurn, ApiToken, Catalog, Diff, Op, Org, Project, ProjectState, Version } from "./types";
-import type { Decision, Evaluation } from "./types";
+import type { AppNotification, Comment, CommentTarget, Decision, Evaluation } from "./types";
 import type { AIConfig, AIGroup, AIProvider, AISettings, AITestResult, Invite, InviteInfo, Me, Member, Role } from "./types";
 import type { ComponentViews, LldResult } from "./types";
 import type { CodeGraphRecord, CodeJob, CodeOverview, DriftResult, ImpactResult, ReconstructResult } from "./types";
@@ -232,6 +232,16 @@ export const api = {
     call<{ suggestions: AiSuggestion[]; engine: "llm" | "none"; cached?: boolean }>("POST", `/projects/${pid}/ai/suggestions`, body, b(branch)),
   ask: (pid: string, branch: string, question: string) =>
     call<{ answer: string }>("POST", `/projects/${pid}/ai/ask`, { question }, b(branch)),
+  // ---- comments and notifications ----
+  comments: (pid: string, branch: string) => call<Comment[]>("GET", `/projects/${pid}/comments`, undefined, b(branch)),
+  addComment: (pid: string, branch: string, data: { body: string; target_type?: CommentTarget; target_id?: string; parent_id?: string; mentions?: string[] }) =>
+    call<Comment>("POST", `/projects/${pid}/comments`, data, b(branch)),
+  updateComment: (pid: string, id: string, changes: { body?: string; mentions?: string[]; resolved?: boolean }) =>
+    call<Comment>("PATCH", `/projects/${pid}/comments/${id}`, changes),
+  deleteComment: (pid: string, id: string) => call<null>("DELETE", `/projects/${pid}/comments/${id}`),
+  notifications: () => call<{ items: AppNotification[]; unread: number }>("GET", "/notifications"),
+  readNotifications: (ids?: number[]) => call<{ unread: number }>("POST", "/notifications/read", { ids: ids ?? null }),
+
   // ---- architecture decisions ----
   decisions: (pid: string) => call<Decision[]>("GET", `/projects/${pid}/decisions`),
   decision: (pid: string, id: string) => call<Decision>("GET", `/projects/${pid}/decisions/${id}`),

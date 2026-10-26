@@ -1,0 +1,66 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api } from "../api";
+import type { AppNotification } from "../types";
+
+const POLL_MS = 20_000;
+
+/** Your mentions and replies across projects. Refreshes on a timer and whenever ``refreshKey`` changes. */
+export function NotificationBell({ refreshKey, onOpen }: { refreshKey: number; onOpen: (n: AppNotification) => void }) {
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState<AppNotification[]>([]);
+  const [unread, setUnread] = useState(0);
+  const ref = useRef<HTMLDivElement>(null);
+
+  const load = useCallback(() => {
+    api.notifications().then((r) => { setItems(r.items); setUnread(r.unread); }).catch(() => {});
+  }, []);
+  useEffect(() => { load(); }, [load, refreshKey]);
+  useEffect(() => {
+    const t = window.setInterval(load, POLL_MS);
+    return () => window.clearInterval(t);
+  }, [load]);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const markAll = () => api.readNotifications().then(() => { setUnread(0); setItems((xs) => xs.map((x) => ({ ...x, read: true }))); }).catch(() => {});
+  const choose = (n: AppNotification) => {
+    setOpen(false);
+    if (!n.read) api.readNotifications([n.id]).then((r) => setUnread(r.unread)).catch(() => {});
+    setItems((xs) => xs.map((x) => (x.id === n.id ? { ...x, read: true } : x)));
+    onOpen(n);
+  };
+
+  return (
+    <div className="notif" ref={ref}>
+      <button className="ghost notif-btn" onClick={() => { setOpen(!open); if (!open) load(); }} aria-haspopup="menu" aria-expanded={open}
+        aria-label={unread ? `Notifications, ${unread} unread` : "Notifications"} title="Mentions and replies">
+        <span aria-hidden>🔔</span>
+        {unread > 0 && <span className="notif-count">{unread > 99 ? "99+" : unread}</span>}
+      </button>
+      {open && (
+        <div className="notif-pop" role="menu">
+          <div className="row between">
+            <b>Notifications</b>
+            {unread > 0 && <button className="small ghost" onClick={markAll}>Mark all read</button>}
+          </div>
+          {items.length === 0 && <p className="muted small">Nothing yet. You'll see it here when someone mentions you or replies to you.</p>}
+          <ul>
+            {items.map((n) => (
+              <li key={n.id}>
+                <button role="menuitem" className={`notif-item ${n.read ? "" : "unread"}`} onClick={() => choose(n)}>
+                  <span className="small"><b>{n.actor_name}</b> {n.kind === "mention" ? "mentioned you" : "replied"} in <b>{n.project_name}</b></span>
+                  <span className="notif-preview small">{n.preview}</span>
+                  <span className="muted small">{new Date(n.created_at).toLocaleString()}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}

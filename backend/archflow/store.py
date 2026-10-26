@@ -29,15 +29,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from .db import migrate
-from .db.models import (Activity, AITrace, AIUsage, ApiToken, Base, Branch, CodeGraph, Conversation,
-                        ConversationMessage, Decision, Invite, Membership, OAuthClient, OAuthCode, OpenSpecChange,
-                        OpenSpecFile, Org, OrgAIBudget, OrgAIConfig, OrgAIKey, Project, ProjectMemory, User,
-                        UserSession, Version, YDoc)
+from .db.models import (Activity, AITrace, AIUsage, ApiToken, Base, Branch, CodeGraph, Comment, Conversation,
+                        ConversationMessage, Decision, Invite, Membership, Notification, OAuthClient, OAuthCode,
+                        OpenSpecChange, OpenSpecFile, Org, OrgAIBudget, OrgAIConfig, OrgAIKey, Project, ProjectMemory,
+                        User, UserSession, Version, YDoc)
 from .db.types import now
 from .models import ProjectState
 
 __all__ = ["Store", "default_store", "DEFAULT_ORG_ID", "DECISION_STATUSES", "CONVERSATION_KINDS", "MESSAGE_MODES",
-           "MEMORY_CATEGORIES", "OPENSPEC_STATUSES", "now"]
+           "MEMORY_CATEGORIES", "OPENSPEC_STATUSES", "COMMENT_TARGETS", "now"]
 
 DEFAULT_ORG_ID = "org-default"
 DEFAULT_ORG_NAME = "Default"
@@ -70,6 +70,11 @@ AI_TRACE_FILTERS = ("project_id", "feature", "prompt", "status", "user_id", "par
 AI_TRACE_LIST_COLS = ("id", "org_id", "project_id", "parent_id", "user_id", "user_name", "feature", "prompt", "agent",
                       "status", "error", "question", "answer", "models", "prompt_tokens", "completion_tokens",
                       "cost_usd", "latency_ms", "model_calls", "tool_calls", "created_at")
+COMMENT_TARGETS = ("project", "node", "decision")
+COMMENT_COLS = ("id", "project_id", "branch", "target_type", "target_id", "parent_id", "author_id", "author_name",
+                "body", "mentions", "resolved", "resolved_by", "created_at", "edited_at")
+NOTIFICATION_COLS = ("id", "project_id", "branch", "comment_id", "thread_id", "kind", "actor_name", "preview", "read",
+                     "created_at")
 USER_COLS = ("id", "email", "name", "created_at", "last_login_at")
 INVITE_COLS = ("id", "org_id", "email", "role", "created_by", "created_at", "expires_at", "accepted_at",
                "accepted_by", "revoked")
@@ -88,6 +93,10 @@ def conversation_id() -> str:
 
 def memory_id() -> str:
     return f"mem-{secrets.token_hex(5)}"
+
+
+def comment_id() -> str:
+    return f"cm-{secrets.token_hex(6)}"
 
 
 def decision_id(seq: int) -> str:
@@ -733,6 +742,88 @@ class Store:
         with self._s() as s:
             return s.execute(delete(ProjectMemory).where(ProjectMemory.project_id == pid,
                                                          ProjectMemory.id == mid)).rowcount > 0
+
+    # ---- comments and notifications ------------------------------------------
+    def add_comment(self, pid: str, branch: str, *, author_id: str, author_name: str, body: str,
+                    target_type: str = "project", target_id: str = "", parent_id: str = "",
+                    mentions: list[str] | None = None) -> dict[str, Any]:
+        if target_type not in COMMENT_TARGETS:
+            raise ValueError(f"target_type must be one of {', '.join(COMMENT_TARGETS)}")
+        cid = comment_id()
+        with self._s() as s:
+            s.add(Comment(id=cid, project_id=pid, branch=branch, target_type=target_type, target_id=target_id,
+                          parent_id=parent_id, author_id=author_id, author_name=author_name, body=body,
+                          mentions=list(dict.fromkeys(mentions or [])), created_at=now()))
+        return self.get_comment(pid, cid)
+
+    def get_comment(self, pid: str, cid: str) -> dict[str, Any] | None:
+        with self._s() as s:
+            c = s.scalars(select(Comment).where(Comment.project_id == pid, Comment.id == cid)).first()
+            return c.to_dict(*COMMENT_COLS) if c else None
+
+    def list_comments(self, pid: str, branch: str | None = None) -> list[dict[str, Any]]:
+        """Every comment of a project, oldest first: a branch's own, plus decision threads (decisions are
+        project-wide)."""
+        with self._s() as s:
+            q = select(Comment).where(Comment.project_id == pid)
+            if branch is not None:
+                q = q.where((Comment.branch == branch) | (Comment.target_type == "decision"))
+            return [c.to_dict(*COMMENT_COLS) for c in s.scalars(q.order_by(Comment.created_at, Comment.id))]
+
+    def thread_participants(self, pid: str, thread_id: str) -> list[str]:
+        """User ids who wrote in a thread (its root and replies)."""
+        with self._s() as s:
+            return list(s.scalars(select(Comment.author_id).where(
+                Comment.project_id == pid, (Comment.id == thread_id) | (Comment.parent_id == thread_id)).distinct()))
+
+    def update_comment(self, pid: str, cid: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        data = {k: v for k, v in fields.items() if k in ("body", "mentions", "resolved", "resolved_by", "edited_at")}
+        if data:
+            with self._s() as s:
+                s.execute(update(Comment).where(Comment.project_id == pid, Comment.id == cid).values(**data))
+        return self.get_comment(pid, cid)
+
+    def delete_comment(self, pid: str, cid: str) -> bool:
+        """Delete a comment; deleting a thread's root deletes its replies too."""
+        with self._s() as s:
+            ids = list(s.scalars(select(Comment.id).where(Comment.project_id == pid,
+                                                          (Comment.id == cid) | (Comment.parent_id == cid))))
+            if not ids:
+                return False
+            s.execute(delete(Notification).where(Notification.comment_id.in_(ids)))
+            s.execute(delete(Comment).where(Comment.id.in_(ids)))
+            return True
+
+    def add_notifications(self, user_ids: list[str], *, comment: dict[str, Any], kind: str, actor_name: str) -> None:
+        if not user_ids:
+            return
+        thread = comment["parent_id"] or comment["id"]
+        preview = comment["body"][:200]
+        with self._s() as s:
+            for uid in dict.fromkeys(user_ids):
+                s.add(Notification(user_id=uid, project_id=comment["project_id"], branch=comment["branch"],
+                                   comment_id=comment["id"], thread_id=thread, kind=kind, actor_name=actor_name,
+                                   preview=preview, created_at=now()))
+
+    def list_notifications(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self._s() as s:
+            rows = s.execute(select(Notification, Project.name).join(Project, Project.id == Notification.project_id)
+                             .where(Notification.user_id == user_id)
+                             .order_by(Notification.created_at.desc(), Notification.id.desc()).limit(limit))
+            return [{**n.to_dict(*NOTIFICATION_COLS), "project_name": name} for n, name in rows]
+
+    def count_unread_notifications(self, user_id: str) -> int:
+        with self._s() as s:
+            return s.scalar(select(func.count()).select_from(Notification)
+                            .where(Notification.user_id == user_id, Notification.read == False)) or 0  # noqa: E712
+
+    def mark_notifications_read(self, user_id: str, ids: list[int] | None = None) -> int:
+        """Mark the given notifications (default: all of them) read; returns how many changed."""
+        with self._s() as s:
+            q = update(Notification).where(Notification.user_id == user_id, Notification.read == False)  # noqa: E712
+            if ids is not None:
+                q = q.where(Notification.id.in_(ids))
+            return s.execute(q.values(read=True)).rowcount
 
     # ---- OpenSpec files and changes ---------------------------------------
     def list_openspec_files(self, pid: str, prefix: str = "", with_content: bool = True) -> list[dict[str, Any]]:

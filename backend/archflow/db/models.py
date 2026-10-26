@@ -288,6 +288,47 @@ class ProjectMemory(Base):
     updated_at: Mapped[str] = mapped_column(UTCDateTime, nullable=False, default=now)
 
 
+# --------------------------------------------------------------------------- comments and notifications
+class Comment(Base):
+    """A comment thread (``parent_id`` empty) or a reply, on a component, a decision or the whole project."""
+    __tablename__ = "comments"
+    __table_args__ = (CheckConstraint("target_type IN ('project', 'node', 'decision')", name="ck_comments_target"),
+                      Index("idx_comments_project", "project_id", "branch", "created_at"),
+                      Index("idx_comments_parent", "parent_id"))
+    id: Mapped[str] = mapped_column(Text, primary_key=True)  # cm-<hex>
+    project_id: Mapped[str] = mapped_column(Text, _fk("projects.id"), nullable=False)
+    branch: Mapped[str] = mapped_column(Text, nullable=False)
+    target_type: Mapped[str] = mapped_column(Text, nullable=False, default="project", server_default="project")
+    target_id: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")  # node id / ADR id
+    parent_id: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")  # thread root
+    author_id: Mapped[str] = mapped_column(Text, nullable=False)
+    author_name: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    mentions: Mapped[list[str]] = mapped_column(JSONType, nullable=False, default=list, server_default="[]")  # user ids
+    resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    resolved_by: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    created_at: Mapped[str] = created()
+    edited_at: Mapped[str | None] = mapped_column(UTCDateTime)
+
+
+class Notification(Base):
+    """Someone mentioned you, or replied in a thread you are part of."""
+    __tablename__ = "notifications"
+    __table_args__ = (CheckConstraint("kind IN ('mention', 'reply')", name="ck_notifications_kind"),
+                      Index("idx_notifications_user", "user_id", text("created_at DESC")))
+    id: Mapped[int] = mapped_column(BigId, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(Text, _fk("users.id"), nullable=False)
+    project_id: Mapped[str] = mapped_column(Text, _fk("projects.id"), nullable=False)
+    branch: Mapped[str] = mapped_column(Text, nullable=False)
+    comment_id: Mapped[str] = mapped_column(Text, _fk("comments.id"), nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_name: Mapped[str] = mapped_column(Text, nullable=False)
+    preview: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    created_at: Mapped[str] = created()
+
+
 # --------------------------------------------------------------------------- OpenSpec
 class OpenSpecFile(Base):
     __tablename__ = "openspec_files"

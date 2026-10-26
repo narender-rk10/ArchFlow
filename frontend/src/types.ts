@@ -371,3 +371,15 @@ export interface PromptInfo {
   id: string; feature: string; description: string; active: string; default: string;
   versions: { version: string; date: string; notes: string; sha: string }[];
 }
+
+// ---- comments and notifications ----
+export type CommentTarget = "project" | "node" | "decision";
+export interface Comment {
+  id: string; project_id: string; branch: string; target_type: CommentTarget; target_id: string; parent_id: string;
+  author_id: string; author_name: string; body: string; mentions: string[]; resolved: boolean; resolved_by: string;
+  created_at: string; edited_at: string | null;
+}
+export interface AppNotification {
+  id: number; project_id: string; project_name: string; branch: string; comment_id: string; thread_id: string;
+  kind: "mention" | "reply"; actor_name: string; preview: string; read: boolean; created_at: string;
+}

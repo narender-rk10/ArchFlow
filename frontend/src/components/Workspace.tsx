@@ -22,6 +22,9 @@ import { ArchNodeComponent, TYPE_META, type ArchFlowNode, type DiffMark } from "
 import { CodeDialog } from "./CodeDialog";
 import { AISettingsDialog } from "./OrgDialogs";
 import { CommandBar, type ChatDock, type ChatMode } from "./CommandBar";
+import { CommentsPanel } from "./CommentsPanel";
+import { NotificationBell } from "./NotificationBell";
+import type { AppNotification, Comment, Member } from "../types";
 import { ConnectDialog } from "./ConnectDialog";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { DesignChat } from "./DesignChat";
@@ -50,15 +53,18 @@ interface Props {
 }
 
 const nodeTypes = { arch: ArchNodeComponent };
-type Tab = "chat" | "requirements" | "issues" | "versions" | "decisions";
+type Tab = "chat" | "requirements" | "issues" | "comments" | "versions" | "decisions";
 const TAB_META: Record<Tab, { icon: string; label: string; title: string }> = {
   chat: { icon: "✦", label: "Assistant", title: "AI assistant: design, edit and ask" },
   requirements: { icon: "☰", label: "Requirements", title: "What the system must do, and how well" },
   issues: { icon: "♥", label: "Health", title: "Checks and the AI review of this design" },
+  comments: { icon: "💬", label: "Comments", title: "Discuss components and the design with your team" },
   versions: { icon: "⟲", label: "History", title: "Saved versions and activity" },
   decisions: { icon: "⚖", label: "Decisions", title: "Compare drafts and record architecture decisions" },
 };
 const DOCK_KEY = "archflow.chatDock";
+/** A comment thread to open once a workspace loads (set when a notification leads to another project). */
+const OPEN_THREAD_KEY = "archflow.openThread";
 const rand = () => Math.random().toString(36).slice(2, 6);
 
 export function Workspace(props: Props) {
@@ -95,6 +101,10 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const [diff, setDiff] = useState<{ from: number; data: Diff } | null>(null);
   const [promptFor, setPromptFor] = useState<{ nodeIds: string[]; requirementIds: string[] } | null>(null);
   const [memory, setMemory] = useState<MemoryItem[]>([]);
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [members, setMembers] = useState<Member[]>([]);
+  const [focusThread, setFocusThread] = useState<string | null>(null);
+  const [notifKey, setNotifKey] = useState(0);
   const [memoryOpen, setMemoryOpen] = useState(false);
   // Latest server event about a conversation, for the design chat (the assistant hook gets it directly).
   const [designRemote, setDesignRemote] = useState<{ id: string; at: number } | null>(null);
@@ -261,6 +271,25 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
     }
   });
   const loadMemory = useCallback(() => { api.memory(pid).then(setMemory).catch(() => {}); }, [pid]);
+  const loadComments = useCallback(() => { api.comments(pid, branch).then(setComments).catch(() => {}); }, [pid, branch]);
+  useEffect(() => { setComments([]); loadComments(); }, [loadComments]);
+  // People you can @mention: refreshed when comments open and when someone new comes online (they may have just joined).
+  const peerNames = live.peers.map((p) => p.name).sort().join("|");
+  useEffect(() => {
+    if (project?.org_id) api.members(project.org_id).then(setMembers).catch(() => {});
+  }, [project?.org_id, tab === "comments", peerNames]); // eslint-disable-line react-hooks/exhaustive-deps
+  const openThread = useCallback((threadId: string) => { setTab("comments"); setFocusThread(threadId); }, []);
+  useEffect(() => {
+    try {
+      const pending = JSON.parse(sessionStorage.getItem(OPEN_THREAD_KEY) ?? "null");
+      if (pending?.pid === pid) { sessionStorage.removeItem(OPEN_THREAD_KEY); openThread(pending.thread); }
+    } catch { /* storage unavailable */ }
+  }, [pid, branch, openThread]);
+  const openNotification = (n: AppNotification) => {
+    if (n.project_id === pid && n.branch === branch) { loadComments(); openThread(n.thread_id); return; }
+    try { sessionStorage.setItem(OPEN_THREAD_KEY, JSON.stringify({ pid: n.project_id, thread: n.thread_id })); } catch { /* ignore */ }
+    if (n.project_id === pid) onBranch(n.branch); else onOpenProject(n.project_id, n.branch);
+  };
   useEffect(() => { loadMemory(); }, [loadMemory]);
 
   // ---- realtime ----
@@ -272,6 +301,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
     },
     onVersions: refreshMeta,
     onConversation: (id) => { assistant.onRemote(id); setDesignRemote({ id, at: Date.now() }); },
+    onComments: () => { loadComments(); setNotifKey((k) => k + 1); },
     onMemory: (_actor, added) => {
       loadMemory();
       if (added.length) toast(`✦ Remembered: ${added.join(" · ")}`);
@@ -333,6 +363,14 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
     return m;
   }, [analysis]);
 
+  // Open comment threads per component (the canvas shows a badge; clicking it opens the newest thread).
+  const commentsByNode = useMemo(() => {
+    const m: Record<string, string[]> = {};
+    for (const c of comments) if (!c.parent_id && !c.resolved && c.target_type === "node") (m[c.target_id] ??= []).push(c.id);
+    return m;
+  }, [comments]);
+  const openThreadsCount = comments.filter((c) => !c.parent_id && !c.resolved).length;
+
   const highlight = useMemo<Set<string> | null>(() => {
     if (!state) return null;
     if (traced) return new Set(Object.values(state.nodes).filter((n) => n.requirement_ids.includes(traced)).map((n) => n.id));
@@ -374,6 +412,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
             model: m, dimmed: !!highlight && !highlight.has(m.id), highlighted: !!highlight?.has(m.id),
             diff: mark(m.id, d?.nodes), remote: remoteByNode[m.id], issues: issuesByNode[m.id],
             childCount: childCount[m.id],
+            comments: commentsByNode[m.id]?.length, onComments: commentsByNode[m.id] ? () => openThread(commentsByNode[m.id].at(-1)!) : undefined,
           },
         };
       });
@@ -412,7 +451,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
       }
       return out;
     });
-  }, [state, diff, highlight, remoteByNode, issuesByNode, level, levelOf, childCount]);
+  }, [state, diff, highlight, remoteByNode, issuesByNode, level, levelOf, childCount, commentsByNode, openThread]);
 
 
   const selectedNodeIds = useMemo(() => nodes.filter((n) => n.selected && !n.id.startsWith("ghost:")).map((n) => n.id), [nodes]);
@@ -656,7 +695,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         </button>
         <ProjectSwitcher me={me} current={project} open={switcherOpen} onOpenChange={setSwitcherOpen}
           onOpen={onOpenProject} onHome={onExit} />
-        {readOnly && <span className="ro-badge" title="Your role can view and comment on decisions, but not edit">Read only · {role}</span>}
+        {readOnly && <span className="ro-badge" title={can(role, "review") ? "Your role can view and comment, but not edit" : "Your role can view, but not edit or comment"}>Read only · {role}</span>}
         <div className="branch">
           <select value={branch} onChange={(e) => onBranch(e.target.value)} aria-label="Branch">
             {branches.map((b) => <option key={b.name} value={b.name}>⎇ {b.name}</option>)}
@@ -769,6 +808,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           title="Turn this design (or the selected components) into a change spec for a coding agent">
           ⚙ Vibe code{selectedNodeIds.length ? ` (${selectedNodeIds.length})` : ""}
         </button>
+        <NotificationBell refreshKey={notifKey} onOpen={openNotification} />
         <UserMenu me={me} user={user} role={role} onLogout={onLogout} />
         </div>
       </header>
@@ -779,10 +819,11 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
 
       <aside className="sidebar">
         <nav className="tabs side-tabs" role="tablist" aria-label="Project panels">
-          {((dock === "left" ? ["chat"] : []).concat(["requirements", "issues", "versions", "decisions"]) as Tab[]).map((t) => {
+          {((dock === "left" ? ["chat"] : []).concat(["requirements", "issues", "comments", "versions", "decisions"]) as Tab[]).map((t) => {
             const meta = TAB_META[t];
             const problems = analysis ? analysis.health.issues.errors + analysis.health.issues.warnings : 0;
-            const count = t === "requirements" && state ? Object.keys(state.requirements).length : t === "issues" ? problems : 0;
+            const count = t === "requirements" && state ? Object.keys(state.requirements).length : t === "issues" ? problems
+              : t === "comments" ? openThreadsCount : 0;
             return (
               <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)} role="tab" aria-selected={tab === t} title={meta.title}>
                 <span className="tab-icon" aria-hidden>{meta.icon}</span>
@@ -801,6 +842,12 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           <IssuesPanel pid={pid} branch={branch} analysis={analysis} aiAvailable={!!ai?.available} onFocus={focusIssue}
             onShow={(names) => focusNodes(Object.values(state?.nodes ?? {}).filter((n) => names.includes(n.name)).map((n) => n.id))}
             onFix={fixWithAI} onOpenCode={() => setCodeOpen(true)} />
+        )}
+        {tab === "comments" && (
+          <CommentsPanel pid={pid} branch={branch} comments={comments} members={members} meId={me.user.id} state={state}
+            selectedNode={selectedNodeIds.length === 1 ? selectedNodeIds[0] : null} focusThread={focusThread}
+            canComment={can(role, "review")} canResolveAny={can(role, "edit")} isAdmin={can(role, "admin")}
+            onChanged={loadComments} onShowNode={(id) => focusNodes([id])} toast={toast} />
         )}
         {tab === "versions" && (
           <VersionsPanel versions={versions} activity={activity} branch={branch} headVersion={headVersion} diff={diff}

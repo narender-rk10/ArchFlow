@@ -8,10 +8,12 @@ interface Handlers {
   onConversation?: (id: string, actor: string) => void;
   /** Project memory changed; ``added`` lists facts the AI just learned. */
   onMemory?: (actor: string, added: string[]) => void;
+  /** Someone added, edited, resolved or deleted a comment. */
+  onComments?: (actor: string) => void;
 }
 
 /**
- * Server events per (project, branch): AI status, new versions, activity, conversations and project memory.
+ * Server events per (project, branch): AI status, new versions, activity, conversations, project memory and comments.
  * Canvas content, presence, cursors and selections sync through Yjs (see collab.ts).
  */
 export function useRealtime(pid: string, branch: string, user: User, handlers: Handlers) {
@@ -36,6 +38,7 @@ export function useRealtime(pid: string, branch: string, user: User, handlers: H
         else if (msg.type === "ai_status") setAiStatus(msg);
         else if (msg.type === "conversation") handlersRef.current.onConversation?.(msg.id, msg.actor ?? "");
         else if (msg.type === "memory") handlersRef.current.onMemory?.(msg.actor ?? "", msg.added ?? []);
+        else if (msg.type === "comments") handlersRef.current.onComments?.(msg.actor ?? "");
       };
     };
     connect();
