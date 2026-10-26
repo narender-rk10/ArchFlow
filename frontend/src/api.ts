@@ -5,7 +5,7 @@ import type { ComponentViews, LldResult } from "./types";
 import type { CodeGraphRecord, CodeJob, CodeOverview, DriftResult, ImpactResult, ReconstructResult } from "./types";
 import type { Conversation, ConversationKind, ConversationMessage, MemoryCategory, MemoryItem } from "./types";
 import type { OpenSpecChange, OpenSpecJob, OpenSpecOverview } from "./types";
-import type { AIUsageReport } from "./types";
+import type { AIUsageReport, AiSuggestion, AiTrace, AiTraceList, PromptInfo, ReviewResult, SuggestionMode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, public data: any) {
@@ -124,6 +124,10 @@ export const api = {
     call<AISettings>("PUT", `/orgs/${org}/ai-settings`, keys),
   saveAiConfig: (org: string, config: AIConfig) => call<AISettings>("PUT", `/orgs/${org}/ai-config`, config),
   testAi: (org: string, group: AIGroup) => call<AITestResult>("POST", `/orgs/${org}/ai-test`, { group }),
+  aiTraces: (org: string, filters: Record<string, string> = {}) =>
+    call<AiTraceList>("GET", `/orgs/${org}/ai/traces`, undefined, filters),
+  aiTrace: (org: string, id: string) => call<AiTrace>("GET", `/orgs/${org}/ai/traces/${id}`),
+  aiPrompts: (org: string) => call<{ prompts: PromptInfo[]; problems: string[] }>("GET", `/orgs/${org}/ai/prompts`),
   aiUsage: (org: string, days = 30) => call<AIUsageReport>("GET", `/orgs/${org}/ai-usage`, undefined, { days: String(days) }),
   setAiBudget: (org: string, monthly_limit_usd: number | null, alert_percent: number) =>
     call<AIUsageReport>("PUT", `/orgs/${org}/ai-budget`, { monthly_limit_usd, alert_percent }),
@@ -220,6 +224,12 @@ export const api = {
   updateMemory: (pid: string, branch: string, id: string, changes: Partial<Pick<MemoryItem, "text" | "category" | "pinned">>) =>
     call<MemoryItem>("PATCH", `/projects/${pid}/memory/${id}`, changes, b(branch)),
   deleteMemory: (pid: string, branch: string, id: string) => call<null>("DELETE", `/projects/${pid}/memory/${id}`, undefined, b(branch)),
+  /** Specialist agents review the design in parallel (security, reliability, performance, cost). */
+  review: (pid: string, branch: string) => call<ReviewResult>("POST", `/projects/${pid}/ai/review`, undefined, b(branch)),
+  /** LLM suggestions (starting prompts or follow-ups); engine "none" when no AI is configured. */
+  suggestions: (pid: string, branch: string, body: { mode: SuggestionMode; selection?: string[]; conversation_id?: string | null;
+    last_question?: string; last_answer?: string }) =>
+    call<{ suggestions: AiSuggestion[]; engine: "llm" | "none"; cached?: boolean }>("POST", `/projects/${pid}/ai/suggestions`, body, b(branch)),
   ask: (pid: string, branch: string, question: string) =>
     call<{ answer: string }>("POST", `/projects/${pid}/ai/ask`, { question }, b(branch)),
   // ---- architecture decisions ----
@@ -234,6 +244,8 @@ export const api = {
       "POST", `/projects/${pid}/decisions/${id}/adopt`, { target_branch, actor }),
   evaluate: (pid: string, branches: string[], actor: string, create_decision = false) =>
     call<Evaluation & { decision?: Decision }>("POST", `/projects/${pid}/evaluate`, { branches, actor, create_decision }),
+  askComparison: (pid: string, branches: string[], question: string, evaluation: Evaluation | null) =>
+    call<{ answer: string; follow_ups: string[] }>("POST", `/projects/${pid}/evaluate/ask`, { branches, question, evaluation: evaluation ? { ...evaluation, raw: undefined } : null }),
   generateLld: (pid: string, branch: string, nodeId: string, actor: string, replace = false) =>
     call<LldResult>("POST", `/projects/${pid}/nodes/${encodeURIComponent(nodeId)}/lld`, { actor, replace }, b(branch)),
   /** Interactive diagram of one level (system, or a component's internals), rendered by Archify on the server. */

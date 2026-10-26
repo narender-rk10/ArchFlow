@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { can, type Branch, type Decision, type DecisionAlternative, type DecisionStatus, type Evaluation, type Role, type User } from "../types";
+import { useEscape } from "../useEscape";
+import { Markdown } from "./Markdown";
 
 interface Props {
   pid: string;
@@ -13,7 +15,7 @@ interface Props {
 
 const STATUSES: DecisionStatus[] = ["proposed", "accepted", "rejected", "superseded"];
 const ENGINE_LABEL: Record<Evaluation["engine"], string> = {
-  llm: "LLM evaluation", heuristic: "Offline heuristic",
+  jev: "Jev decision API", llm: "LLM evaluation", heuristic: "Offline heuristic",
 };
 const TARGET = "main";
 
@@ -21,9 +23,43 @@ function label(ev: Evaluation, c: string) {
   return ev.criteria_labels?.[c] ?? c.replace(/_/g, " ");
 }
 
-/** Criteria × alternatives score table; the best value in each row is highlighted. */
-export function ScoreMatrix({ ev }: { ev: Evaluation }) {
+/** How much a criterion matters to the team; the weight multiplies its score in the weighted average. */
+const PRIORITIES = [
+  { id: "ignore", label: "Ignore", weight: 0 },
+  { id: "low", label: "Low", weight: 0.5 },
+  { id: "normal", label: "Normal", weight: 1 },
+  { id: "high", label: "High", weight: 2 },
+  { id: "critical", label: "Critical", weight: 3 },
+] as const;
+type Weights = Record<string, number>;
+
+function nearestPriority(w: number) {
+  return PRIORITIES.reduce((best, p) => (Math.abs(p.weight - w) < Math.abs(best.weight - w) ? p : best), PRIORITIES[2]).weight;
+}
+
+/** Weighted averages under the given weights, and the alternative that ranks first (ties keep the listed order). */
+function rank(ev: Evaluation, weights: Weights) {
+  const totals: Record<string, number> = {};
+  for (const a of ev.alternatives) {
+    const s = ev.scores[a] ?? {};
+    let sum = 0, wsum = 0;
+    for (const c of ev.criteria) {
+      const w = weights[c] ?? 1;
+      if (typeof s[c] === "number" && w > 0) { sum += s[c] * w; wsum += w; }
+    }
+    totals[a] = wsum ? Math.round((sum / wsum) * 100) / 100 : 0;
+  }
+  const top = ev.alternatives.reduce((best, a) => (totals[a] > totals[best] ? a : best), ev.alternatives[0]);
+  return { totals, top };
+}
+
+/** Criteria × alternatives score table; the best value in each row is highlighted. Click a criterion for the reasons. */
+export function ScoreMatrix({ ev, totals, top }: { ev: Evaluation; totals?: Record<string, number>; top?: string }) {
   const alts = ev.alternatives;
+  const best = top ?? ev.recommended;
+  const shownTotals = totals ?? ev.totals;
+  const [open, setOpen] = useState<string | null>(null);
+  const hasReasons = alts.some((a) => Object.keys(ev.details?.[a]?.reasons ?? {}).length > 0);
   return (
     <div className="adr-matrix-wrap">
       <table className="adr-matrix">
@@ -31,8 +67,8 @@ export function ScoreMatrix({ ev }: { ev: Evaluation }) {
           <tr>
             <th>Criterion</th>
             {alts.map((a) => (
-              <th key={a} className={a === ev.recommended ? "rec" : ""} title={a}>
-                {a === ev.recommended && <span aria-label="recommended">★ </span>}{a}
+              <th key={a} className={a === best ? "rec" : ""} title={a}>
+                {a === best && <span aria-label="ranks first">★ </span>}{a}
               </th>
             ))}
           </tr>
@@ -40,43 +76,267 @@ export function ScoreMatrix({ ev }: { ev: Evaluation }) {
         <tbody>
           {ev.criteria.map((c) => {
             const vals = alts.map((a) => ev.scores[a]?.[c]).filter((v): v is number => typeof v === "number");
-            const best = vals.length ? Math.max(...vals) : null;
+            const max = vals.length ? Math.max(...vals) : null;
+            const reasons = alts.map((a) => ev.details?.[a]?.reasons?.[c]).filter(Boolean);
             return (
-              <tr key={c}>
-                <td>{label(ev, c)}</td>
-                {alts.map((a) => {
-                  const v = ev.scores[a]?.[c];
-                  return <td key={a} className={v !== undefined && v === best && vals.length > 1 ? "best" : ""}>{v ?? "–"}</td>;
-                })}
-              </tr>
+              <Fragment key={c}>
+                <tr className={reasons.length ? "has-why" : ""} onClick={() => reasons.length && setOpen(open === c ? null : c)}
+                  title={reasons.length ? "Show why" : undefined}>
+                  <td>{reasons.length > 0 && <span className="why-caret">{open === c ? "▾" : "▸"} </span>}{label(ev, c)}</td>
+                  {alts.map((a) => {
+                    const v = ev.scores[a]?.[c];
+                    return <td key={a} className={v !== undefined && v === max && vals.length > 1 ? "best" : ""}
+                      title={ev.details?.[a]?.reasons?.[c]}>{v ?? "–"}</td>;
+                  })}
+                </tr>
+                {open === c && (
+                  <tr className="why-row">
+                    <td colSpan={alts.length + 1}>
+                      {alts.map((a) => ev.details?.[a]?.reasons?.[c] && (
+                        <div key={a} className="small"><b className="mono">{a}</b>
+                          {ev.second_opinion?.scores[a]?.[c] !== undefined && <span className="muted"> (AI: {ev.second_opinion.scores[a][c]})</span>}: {ev.details[a].reasons[c]}</div>
+                      ))}
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             );
           })}
         </tbody>
         <tfoot>
           <tr>
             <td>Weighted avg</td>
-            {alts.map((a) => <td key={a} className={a === ev.recommended ? "best" : ""}>{ev.totals?.[a] ?? "–"}</td>)}
+            {alts.map((a) => <td key={a} className={a === best ? "best" : ""}>{shownTotals?.[a] ?? "–"}</td>)}
           </tr>
         </tfoot>
       </table>
       <div className="row between small muted">
         <span className={`adr-engine e-${ev.engine}`}>{ENGINE_LABEL[ev.engine] ?? ev.engine}</span>
-        <span>1–5, higher is better{ev.confidence != null ? ` · confidence ${Math.round(ev.confidence * 100)}%` : ""}</span>
+        <span>1–5, higher is better{hasReasons ? " · click a criterion for why" : ""}{ev.confidence != null ? ` · confidence ${Math.round(ev.confidence * 100)}%` : ""}</span>
       </div>
     </div>
   );
 }
 
-/** Alternatives for a decision record, derived from an evaluation (strong criteria = pros, weak = cons). */
-function alternativesFrom(ev: Evaluation): DecisionAlternative[] {
+/** Alternatives for a decision record: the evaluation's strengths and risks, else strong / weak criteria. */
+function alternativesFrom(ev: Evaluation, totals: Record<string, number>): DecisionAlternative[] {
   return ev.alternatives.map((b) => {
     const s = ev.scores[b] ?? {};
+    const d = ev.details?.[b];
     return {
-      name: b, branch: b, summary: `Weighted score ${ev.totals?.[b] ?? "–"} / 5 (${ev.engine})`,
-      pros: Object.entries(s).filter(([, v]) => v >= 4).map(([c, v]) => `${label(ev, c)} ${v}/5`),
-      cons: Object.entries(s).filter(([, v]) => v <= 2).map(([c, v]) => `${label(ev, c)} ${v}/5`),
+      name: b, branch: b,
+      summary: [d?.summary, `Weighted score ${totals[b] ?? "–"} / 5 (${ev.engine})`, d?.best_when ? `Best when: ${d.best_when}` : ""]
+        .filter(Boolean).join(" "),
+      pros: d?.strengths.length ? d.strengths : Object.entries(s).filter(([, v]) => v >= 4).map(([c, v]) => `${label(ev, c)} ${v}/5`),
+      cons: d?.risks.length ? d.risks : Object.entries(s).filter(([, v]) => v <= 2).map(([c, v]) => `${label(ev, c)} ${v}/5`),
     };
   });
+}
+
+interface CompareProps {
+  pid: string;
+  branches: Branch[];
+  user: User;
+  onClose: () => void;
+  onRecorded: (d: Decision) => void;
+  toast: (text: string) => void;
+}
+
+/** Pick 2–4 drafts, let the AI score them, tune the team's priorities, ask follow-ups, and record the decision. */
+function CompareDialog({ pid, branches, user, onClose, onRecorded, toast }: CompareProps) {
+  const [picked, setPicked] = useState<string[]>(() => branches.filter((b) => b.name !== TARGET).slice(0, 2).map((b) => b.name));
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<Evaluation | null>(null);
+  const [weights, setWeights] = useState<Weights>({});
+  const [error, setError] = useState("");
+  const [question, setQuestion] = useState("");
+  const [asking, setAsking] = useState(false);
+  const [answers, setAnswers] = useState<{ q: string; a: string; followUps: string[] }[]>([]);
+  const [recording, setRecording] = useState(false);
+  const ref = useEscape(() => { if (!running && !recording) onClose(); });
+
+  const toggle = (name: string) => {
+    setPicked((p) => (p.includes(name) ? p.filter((x) => x !== name) : p.length >= 4 ? p : [...p, name]));
+    setResult(null); setAnswers([]);
+  };
+
+  const run = async () => {
+    setRunning(true); setError(""); setResult(null); setAnswers([]);
+    try {
+      const ev = await api.evaluate(pid, picked, user.name);
+      setResult(ev);
+      setWeights(Object.fromEntries(ev.criteria.map((c) => [c, nearestPriority(ev.weights?.[c] ?? 1)])));
+    } catch (e) { setError((e as Error).message); }
+    finally { setRunning(false); }
+  };
+
+  const ranked = useMemo(() => (result ? rank(result, weights) : null), [result, weights]);
+  const changedPriorities = !!ranked && ranked.top !== result?.recommended;
+
+  const ask = async (q: string) => {
+    const text = q.trim();
+    if (!text || !result) return;
+    setAsking(true);
+    try {
+      const priorities = result.criteria.map((c) => `${label(result, c)}: ${PRIORITIES.find((p) => p.weight === weights[c])?.label ?? "Normal"}`).join(", ");
+      const { answer, follow_ups } = await api.askComparison(pid, result.alternatives, `${text}\n\n(The team's priorities: ${priorities}.)`,
+        { ...result, totals: ranked?.totals ?? result.totals });
+      setAnswers((xs) => [...xs, { q: text, a: answer, followUps: follow_ups ?? [] }]);
+      setQuestion("");
+    } catch (e) { toast(`⚠ ${(e as Error).message}`); }
+    finally { setAsking(false); }
+  };
+
+  const record = async () => {
+    if (!result || !ranked) return;
+    setRecording(true);
+    const chosen = ranked.top;
+    const factors = result.deciding_factors?.length ? ` Deciding factors: ${result.deciding_factors.join("; ")}.` : "";
+    try {
+      const d = await api.createDecision(pid, {
+        title: `Choose an architecture: ${result.alternatives.join(" vs ")}`,
+        status: "proposed",
+        context: `${result.alternatives.length} candidate architectures were compared against the project's requirements. Evaluation engine: ${ENGINE_LABEL[result.engine] ?? result.engine}.`
+          + (changedPriorities ? ` The team re-weighted the criteria, which moved ${chosen} ahead of the AI's pick (${result.recommended}).` : ""),
+        decision: `Adopt the architecture in branch '${chosen}'. ${chosen === result.recommended ? result.rationale : ""}`.trim() + factors,
+        consequences: [result.details?.[chosen]?.risks.length ? `Risks to manage: ${result.details[chosen].risks.join("; ")}.` : "",
+          result.flip_conditions ? `Revisit if: ${result.flip_conditions}` : ""].filter(Boolean).join(" "),
+        alternatives: alternativesFrom(result, ranked.totals),
+        chosen,
+        requirement_ids: result.requirement_ids ?? [],
+        evaluation: { ...result, raw: undefined, weights, totals: ranked.totals, recommended: chosen },
+        actor: user.name,
+      });
+      toast(`Recorded ${d.id}`);
+      onRecorded(d);
+    } catch (e) { toast(`⚠ ${(e as Error).message}`); }
+    finally { setRecording(false); }
+  };
+
+  return (
+    <div className="modal-backdrop" ref={ref} onClick={() => !running && !recording && onClose()}>
+      <div className="modal wide compare" role="dialog" aria-label="Compare architectures" onClick={(e) => e.stopPropagation()}>
+        <div className="row between">
+          <h3>Compare architectures</h3>
+          <button className="ghost" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+
+        <div className="compare-pick">
+          <span className="small muted">Pick 2–4 drafts to score against the requirements:</span>
+          <div className="row gap wrap">
+            {branches.map((b) => (
+              <button key={b.name} className={`chip toggle ${picked.includes(b.name) ? "on" : ""}`} onClick={() => toggle(b.name)}
+                disabled={!picked.includes(b.name) && picked.length >= 4} aria-pressed={picked.includes(b.name)}>
+                ⎇ {b.name}
+              </button>
+            ))}
+          </div>
+          {branches.length < 2 && <p className="small warn">Create at least two branches (drafts) to compare, e.g. from the design chat.</p>}
+          <div className="row gap">
+            <button className="primary" disabled={running || picked.length < 2} onClick={run}>
+              {running ? "Evaluating…" : result ? "Re-evaluate" : `Compare ${picked.length || ""}`.trim()}
+            </button>
+            {running && <span className="small muted">The AI is scoring each option on seven criteria…</span>}
+          </div>
+          {error && <p className="small error">{error}</p>}
+        </div>
+
+        {result && ranked && (
+          <>
+            <div className="compare-rec">
+              <div className="row between wrap">
+                <b>★ {changedPriorities ? `With your priorities: ${ranked.top}` : `Recommended: ${result.recommended}`}</b>
+                {result.confidence != null && <span className="small muted">AI confidence {Math.round(result.confidence * 100)}%</span>}
+              </div>
+              {changedPriorities && <p className="small warn">The AI recommended <b>{result.recommended}</b> with the requirement-based weights; your priorities put <b>{ranked.top}</b> first.</p>}
+              <p className="small">{result.rationale}</p>
+              {!!result.deciding_factors?.length && (
+                <div className="small"><span className="muted">Deciding factors: </span>{result.deciding_factors.map((f, i) => <span key={i} className="chip">{f}</span>)}</div>
+              )}
+              {result.second_opinion && (
+                <p className={`small opinion ${result.second_opinion.agrees ? "agree" : "disagree"}`}>
+                  {result.second_opinion.agrees
+                    ? <>✓ Jev and the AI review agree on <b>{result.recommended}</b>.</>
+                    : <>⚠ Jev picks <b>{result.recommended}</b>; the AI review would pick <b>{result.second_opinion.recommended}</b>. Ask below why they differ.</>}
+                </p>
+              )}
+              {result.flip_conditions && <p className="small"><span className="muted">What would change this: </span>{result.flip_conditions}</p>}
+              {result.notes.length > 0 && <p className="tiny muted">{result.notes.join(" · ")}</p>}
+            </div>
+
+            <div className="compare-grid">
+              <div className="compare-col">
+                <h4>Scores</h4>
+                <ScoreMatrix ev={result} totals={ranked.totals} top={ranked.top} />
+              </div>
+              <div className="compare-col">
+                <h4>Your priorities</h4>
+                <p className="tiny muted">Pre-set from the non-functional requirements. Change them to see how the ranking moves.</p>
+                <div className="prio-list">
+                  {result.criteria.map((c) => (
+                    <label key={c} className="prio-row small">
+                      <span>{label(result, c)}</span>
+                      <select value={weights[c] ?? 1} onChange={(e) => setWeights((w) => ({ ...w, [c]: Number(e.target.value) }))}>
+                        {PRIORITIES.map((p) => <option key={p.id} value={p.weight}>{p.label}</option>)}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="compare-cards">
+              {result.alternatives.map((a) => {
+                const d = result.details?.[a];
+                return (
+                  <div key={a} className={`compare-card ${a === ranked.top ? "top" : ""}`}>
+                    <div className="row between"><b className="mono">{a}</b><span className="small">{ranked.totals[a]} / 5</span></div>
+                    {d?.summary && <div className="small">{d.summary}</div>}
+                    {!!d?.strengths.length && <ul className="pros small">{d.strengths.map((s, i) => <li key={i}>{s}</li>)}</ul>}
+                    {!!d?.risks.length && <ul className="cons small">{d.risks.map((s, i) => <li key={i}>{s}</li>)}</ul>}
+                    {d?.best_when && <div className="small"><span className="muted">Best when </span>{d.best_when}</div>}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="compare-ask">
+              <h4>Ask about this comparison</h4>
+              {answers.map((x, i) => (
+                <div key={i} className="compare-qa">
+                  <div className="small"><b>{x.q}</b></div>
+                  <Markdown text={x.a} className="small" />
+                </div>
+              ))}
+              {(() => {
+                // The AI's suggested next questions: from the evaluation at first, then from the latest answer.
+                const next = answers.length ? answers[answers.length - 1].followUps : result.follow_up_questions ?? [];
+                const asked = new Set(answers.map((x) => x.q));
+                const fresh = next.filter((q) => !asked.has(q));
+                return fresh.length > 0 && (
+                  <div className="row gap wrap">
+                    <span className="tiny muted">{answers.length ? "Ask next" : "Suggested questions"} <span className="ai-tag">AI</span></span>
+                    {fresh.map((q) => <button key={q} className="chip toggle" disabled={asking} onClick={() => ask(q)}>{q}</button>)}
+                  </div>
+                );
+              })()}
+              {result.engine !== "llm" && <p className="tiny muted">Asking about a comparison needs an AI model (AI settings).</p>}
+              <form className="row gap" onSubmit={(e) => { e.preventDefault(); ask(question); }}>
+                <input className="grow" value={question} onChange={(e) => setQuestion(e.target.value)} disabled={asking}
+                  placeholder={result.engine === "llm" ? "e.g. Which option handles a 10× traffic spike best?" : "Needs an AI model (AI settings)"} aria-label="Question about the comparison" />
+                <button disabled={asking || !question.trim()}>{asking ? "Thinking…" : "Ask"}</button>
+              </form>
+            </div>
+
+            <div className="row gap end">
+              <button onClick={onClose}>Close</button>
+              <button className="primary" disabled={recording} onClick={record}>{recording ? "Recording…" : `Record decision: adopt ${ranked.top}`}</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export function DecisionsPanel({ pid, branches, user, role, onAdopted, toast }: Props) {
@@ -84,47 +344,12 @@ export function DecisionsPanel({ pid, branches, user, role, onAdopted, toast }: 
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   const [comparing, setComparing] = useState(false);
-  const [picked, setPicked] = useState<string[]>([]);
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<Evaluation | null>(null);
   const [error, setError] = useState("");
 
   const reload = useCallback(() => {
     api.decisions(pid).then(setDecisions).catch((e) => setError((e as Error).message));
   }, [pid]);
   useEffect(reload, [reload]);
-
-  const toggle = (name: string) =>
-    setPicked((p) => (p.includes(name) ? p.filter((x) => x !== name) : p.length >= 4 ? p : [...p, name]));
-
-  const run = async () => {
-    setRunning(true); setError(""); setResult(null);
-    try { setResult(await api.evaluate(pid, picked, user.name)); }
-    catch (e) { setError((e as Error).message); }
-    finally { setRunning(false); }
-  };
-
-  const record = async () => {
-    if (!result) return;
-    try {
-      const d = await api.createDecision(pid, {
-        title: `Choose an architecture: ${result.alternatives.join(" vs ")}`,
-        status: "proposed",
-        context: `${result.alternatives.length} candidate architectures were compared against the project's requirements. Evaluation engine: ${ENGINE_LABEL[result.engine] ?? result.engine}.`,
-        decision: `Adopt the architecture in branch '${result.recommended}'. ${result.rationale}`.trim(),
-        consequences: "",
-        alternatives: alternativesFrom(result),
-        chosen: result.recommended,
-        requirement_ids: result.requirement_ids ?? [],
-        evaluation: { ...result, raw: undefined },
-        actor: user.name,
-      });
-      toast(`Recorded ${d.id}`);
-      setComparing(false); setResult(null); setPicked([]);
-      reload();
-      setOpenId(d.id);
-    } catch (e) { toast(`⚠ ${(e as Error).message}`); }
-  };
 
   const open = decisions.find((d) => d.id === openId);
   if (open) {
@@ -140,43 +365,24 @@ export function DecisionsPanel({ pid, branches, user, role, onAdopted, toast }: 
     <div className="panel">
       <div className="panel-tools">
         <span className="grow muted small">Architecture decision records</span>
-        {canEdit && <button className={comparing ? "" : "primary"} onClick={() => { setComparing(!comparing); setResult(null); setError(""); }}>
-          {comparing ? "Close" : "Compare drafts"}
+        {canEdit && <button className="primary" onClick={() => setComparing(true)} title="Score 2–4 drafts with AI and record the choice">
+          ⚖ Compare drafts
         </button>}
       </div>
 
       {comparing && (
-        <div className="adr-compare">
-          <div className="small muted">Pick 2–4 branches to score against the requirements.</div>
-          <div className="adr-branches">
-            {branches.map((b) => (
-              <label key={b.name} className="row gap small">
-                <input type="checkbox" checked={picked.includes(b.name)} onChange={() => toggle(b.name)}
-                  disabled={!picked.includes(b.name) && picked.length >= 4} />
-                <span className="mono">{b.name}</span>
-              </label>
-            ))}
-            {branches.length < 2 && <p className="small warn">Create at least two branches (drafts) to compare, e.g. from the design chat.</p>}
-          </div>
-          <div className="row gap">
-            <button className="primary" disabled={running || picked.length < 2} onClick={run}>
-              {running ? "Evaluating…" : `Evaluate ${picked.length || ""}`.trim()}
-            </button>
-          </div>
-          {error && <p className="small error">{error}</p>}
-          {result && (
-            <div className="adr-result">
-              <ScoreMatrix ev={result} />
-              <p className="small"><b>Recommended: {result.recommended}.</b> {result.rationale}</p>
-              {result.notes.length > 0 && <p className="tiny muted">{result.notes.join(" · ")}</p>}
-              <button onClick={record}>Create decision record</button>
-            </div>
-          )}
-        </div>
+        <CompareDialog pid={pid} branches={branches} user={user} toast={toast} onClose={() => setComparing(false)}
+          onRecorded={(d) => { setComparing(false); reload(); setOpenId(d.id); }} />
       )}
 
       <h4 className="pad">Decisions</h4>
-      {decisions.length === 0 && <p className="muted small pad">No decisions yet. Compare drafts to record your first ADR.</p>}
+      {decisions.length === 0 && (
+        <div className="muted small pad">
+          <p>No decisions yet.</p>
+          <p>Have two or more draft architectures (branches)? <b>Compare drafts</b> scores them against your requirements, explains
+            the trade-offs and records the choice as an ADR you can adopt into main.</p>
+        </div>
+      )}
       <ul className="adr-list">
         {decisions.map((d) => (
           <li key={d.id} onClick={() => setOpenId(d.id)}>
@@ -192,7 +398,7 @@ export function DecisionsPanel({ pid, branches, user, role, onAdopted, toast }: 
           </li>
         ))}
       </ul>
-      {!comparing && error && <p className="small error pad">{error}</p>}
+      {error && <p className="small error pad">{error}</p>}
     </div>
   );
 }

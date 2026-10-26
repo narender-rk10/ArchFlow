@@ -1,0 +1,5 @@
+fastapi
+sqlalchemy
+psycopg[binary]
+redis
+uvicorn

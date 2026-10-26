@@ -11,6 +11,7 @@ import { exportCanvasImage, exportName } from "../exportImage";
 import { autoLayout } from "../layout";
 import { touchRecent } from "../recent";
 import { buildSuggestions } from "../suggestions";
+import { asSuggestions, useAiSuggestions } from "../aiSuggestions";
 import { useRealtime } from "../realtime";
 import type {
   Activity, Analysis, ArchNode, Branch, Catalog, CatalogItem, Diff, Issue, Me, MemoryItem, Op, Project, Role, User, Version,
@@ -50,6 +51,13 @@ interface Props {
 
 const nodeTypes = { arch: ArchNodeComponent };
 type Tab = "chat" | "requirements" | "issues" | "versions" | "decisions";
+const TAB_META: Record<Tab, { icon: string; label: string; title: string }> = {
+  chat: { icon: "✦", label: "Assistant", title: "AI assistant: design, edit and ask" },
+  requirements: { icon: "☰", label: "Requirements", title: "What the system must do, and how well" },
+  issues: { icon: "♥", label: "Health", title: "Checks and the AI review of this design" },
+  versions: { icon: "⟲", label: "History", title: "Saved versions and activity" },
+  decisions: { icon: "⚖", label: "Decisions", title: "Compare drafts and record architecture decisions" },
+};
 const DOCK_KEY = "archflow.chatDock";
 const rand = () => Math.random().toString(36).slice(2, 6);
 
@@ -510,7 +518,13 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   }, [copySelection, paste, readOnly]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- AI ----
-  const runAsk = (question: string) => { assistant.ask(question); };
+  // "Fix with AI": put the instruction in the assistant's Edit mode; the person reviews it and presses Apply.
+  const [prefill, setPrefill] = useState<{ text: string; at: number } | null>(null);
+  const fixWithAI = (instruction: string) => {
+    setChatMode("command");
+    if (dock === "left") setTab("chat"); else if (dock === "right") setRightTab("chat");
+    setPrefill({ text: instruction, at: Date.now() });
+  };
 
   const generateLld = async (nodeId: string) => {
     setGenerating(true);
@@ -580,6 +594,20 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
     if (highlight?.size) flow.fitView({ nodes: [...highlight].map((id) => ({ id })), padding: 0.5, duration: 400, maxZoom: 1.2 });
   };
 
+  // What to suggest in the assistant: the LLM writes starting prompts for this project, or follow-ups to the last
+  // answer; without AI the offline ones from suggestions.ts are used. (Hooks stay above the early return below.)
+  const canvasIsEmpty = !!state && Object.keys(state.nodes).length === 0;
+  const chatModeNow: ChatMode = chatMode ?? (canvasIsEmpty && !readOnly ? "design" : readOnly ? "ask" : "command");
+  const lastMsg = assistant.messages[assistant.messages.length - 1];
+  const lastQuestion = lastMsg?.role === "assistant"
+    ? [...assistant.messages].reverse().find((m) => m.role === "user" && m.seq < lastMsg.seq)?.content ?? "" : "";
+  const followUp = lastMsg?.role === "assistant" && !lastMsg.data.error && !assistant.busy;
+  const aiSuggest = useAiSuggestions(pid, branch, {
+    mode: chatModeNow === "command" ? "edit" : "ask", selection: selectedNodeIds,
+    conversationId: followUp ? assistant.current?.id : null,
+    lastQuestion: followUp ? lastQuestion : "", lastAnswer: followUp ? lastMsg.content + (lastMsg.data.summary?.length ? "\n" + lastMsg.data.summary.join("\n") : "") : "",
+  }, !!ai?.available && !!state && chatModeNow !== "design" && (!lastMsg || followUp), state?.rev);
+
   if (loadError) {
     return (
       <div className="picker">
@@ -595,14 +623,16 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const others = live.peers.filter((p) => p.clientId !== live.selfId);
   const aiBusy = rt.aiStatus.status === "thinking" ? `AI is applying “${rt.aiStatus.text}” for ${rt.aiStatus.actor}` : null;
 
-  const canvasEmpty = !!state && Object.keys(state.nodes).length === 0;
-  const chatSuggestions = buildSuggestions(state, analysis, selectedNodeIds); // cheap; no hook after the early return above
-  const effectiveMode: ChatMode = chatMode ?? (canvasEmpty && !readOnly ? "design" : readOnly ? "ask" : "command");
+  const canvasEmpty = canvasIsEmpty;
+  const offline = buildSuggestions(state, analysis, selectedNodeIds); // cheap; no hook after the early return above
+  const chatSuggestions = aiSuggest.items ?? (aiSuggest.loading || lastMsg ? [] : asSuggestions(chatModeNow === "command" ? offline.edit : offline.ask));
+  const effectiveMode = chatModeNow;
   const chatPanel = (
     <CommandBar assistant={assistant} selection={selectedNodeIds} aiBusy={aiBusy} links={entityLinks}
       memoryCount={memory.length} onOpenMemory={() => setMemoryOpen(true)} meId={me.user.id} isAdmin={can(role, "admin")}
       userName={user.name} readOnly={readOnly} mode={effectiveMode} onMode={setChatMode} dock={dock} onDock={setDock}
-      suggestions={chatSuggestions}
+      suggestions={chatSuggestions} suggestionsSource={aiSuggest.items ? "ai" : "offline"} suggestionsLoading={aiSuggest.loading}
+      prefill={prefill}
       designSlot={state && !readOnly ? (
         <DesignChat pid={pid} branch={branch} user={user} aiAvailable={ai?.available ?? true} canvasEmpty={canvasEmpty}
           remote={designRemote}
@@ -621,7 +651,9 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
     <div className={`workspace ${canvasFull ? "canvas-full" : ""}`}>
       <header className="topbar">
         <div className="tb-group tb-left">
-        <button className="ghost brand-btn" onClick={onExit} title="All projects"><span className="logo">▲</span></button>
+        <button className="ghost back-btn" onClick={onExit} title="Back to all projects" aria-label="Back to all projects">
+          <span aria-hidden>←</span> <span className="back-label">Projects</span>
+        </button>
         <ProjectSwitcher me={me} current={project} open={switcherOpen} onOpenChange={setSwitcherOpen}
           onOpen={onOpenProject} onHome={onExit} />
         {readOnly && <span className="ro-badge" title="Your role can view and comment on decisions, but not edit">Read only · {role}</span>}
@@ -629,6 +661,9 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           <select value={branch} onChange={(e) => onBranch(e.target.value)} aria-label="Branch">
             {branches.map((b) => <option key={b.name} value={b.name}>⎇ {b.name}</option>)}
           </select>
+          {branch !== "main" && branches.some((b) => b.name === "main") && (
+            <button className="small ghost" onClick={() => onBranch("main")} title="Switch back to the main branch">↩ main</button>
+          )}
           {readOnly ? null : newBranch === null ? (
             <button className="small ghost icon-btn" onClick={() => setNewBranch("experiment/")} title="New branch" aria-label="New branch">+</button>
           ) : (
@@ -646,10 +681,15 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         <div className="spacer" />
         <div className="tb-group tb-right">
         {analysis && (
-          <button className="health-pill" onClick={() => setTab("issues")} title="Architecture health">
+          <button className="health-pill" onClick={() => setTab("issues")}
+            title={`Architecture health: ${analysis.health.issues.errors} error(s), ${analysis.health.issues.warnings} warning(s). `
+              + `${analysis.health.traceability}% of requirements are linked to a component. Click for details.`}>
             {analysis.health.issues.errors > 0 && <span className="dot error" />}
             {analysis.health.issues.warnings > 0 && <span className="dot warning" />}
-            {analysis.health.issues.errors + analysis.health.issues.warnings} issues · trace {analysis.health.traceability}%
+            {analysis.health.issues.errors + analysis.health.issues.warnings === 0
+              ? "✓ No issues"
+              : `${analysis.health.issues.errors + analysis.health.issues.warnings} issue${analysis.health.issues.errors + analysis.health.issues.warnings === 1 ? "" : "s"}`}
+            {" · "}{analysis.health.traceability}% traced
           </button>
         )}
         {ai && (() => {
@@ -678,6 +718,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           onChange={async (e) => {
             const target = e.target.value;
             if (!target) return;
+            setToolsOpen(false);
             setConverting(true);
             try {
               const r = await api.convert(pid, branch, target, user.name);
@@ -697,6 +738,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           onChange={async (e) => {
             const kind = e.target.value as "png" | "svg" | "html" | "";
             if (!kind) return;
+            setToolsOpen(false);
             setExporting(true);
             const name = exportName(project?.name ?? "diagram", branch, level ? state?.nodes[level]?.name ?? level : "");
             try {
@@ -721,10 +763,10 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         <div className="presence">
           <span className={`conn ${live.status === "connected" && live.synced ? "on" : ""}`}
             title={live.status === "connected" ? (live.synced ? "Live: changes sync instantly" : "Syncing…") : "Reconnecting… your edits are kept and sync when back online"} />
-          <span className="avatar" style={{ background: user.color }} title={`${user.name} (you)`}>{user.name[0]?.toUpperCase()}</span>
           {others.map((u) => <span key={u.clientId} className="avatar" style={{ background: u.color }} title={u.name}>{u.name[0]?.toUpperCase()}</span>)}
         </div>
-        <button className="primary" onClick={() => setPromptFor({ nodeIds: selectedNodeIds, requirementIds: [] })}>
+        <button className="primary" onClick={() => setPromptFor({ nodeIds: selectedNodeIds, requirementIds: [] })}
+          title="Turn this design (or the selected components) into a change spec for a coding agent">
           ⚙ Vibe code{selectedNodeIds.length ? ` (${selectedNodeIds.length})` : ""}
         </button>
         <UserMenu me={me} user={user} role={role} onLogout={onLogout} />
@@ -736,22 +778,30 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
       )}
 
       <aside className="sidebar">
-        <nav className="tabs">
-          {((dock === "left" ? ["chat"] : []).concat(["requirements", "issues", "versions", "decisions"]) as Tab[]).map((t) => (
-            <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)} role="tab" aria-selected={tab === t}>
-              {t === "chat" ? "Assistant" : t === "requirements" ? "Reqs" : t === "issues" ? "Health" : t === "decisions" ? "Decisions" : "Versions"}
-              {t === "requirements" && state && <span className="tab-count">{Object.keys(state.requirements).length}</span>}
-              {t === "issues" && analysis && analysis.health.issues.errors + analysis.health.issues.warnings > 0 &&
-                <span className={`tab-count ${analysis.health.issues.errors ? "bad" : "warn"}`}>{analysis.health.issues.errors + analysis.health.issues.warnings}</span>}
-            </button>
-          ))}
+        <nav className="tabs side-tabs" role="tablist" aria-label="Project panels">
+          {((dock === "left" ? ["chat"] : []).concat(["requirements", "issues", "versions", "decisions"]) as Tab[]).map((t) => {
+            const meta = TAB_META[t];
+            const problems = analysis ? analysis.health.issues.errors + analysis.health.issues.warnings : 0;
+            const count = t === "requirements" && state ? Object.keys(state.requirements).length : t === "issues" ? problems : 0;
+            return (
+              <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)} role="tab" aria-selected={tab === t} title={meta.title}>
+                <span className="tab-icon" aria-hidden>{meta.icon}</span>
+                <span className="tab-label">{meta.label}</span>
+                {count > 0 && <span className={`tab-count ${t === "issues" ? (analysis?.health.issues.errors ? "bad" : "warn") : ""}`}>{count}</span>}
+              </button>
+            );
+          })}
         </nav>
         {tab === "chat" && dock === "left" && chatPanel}
         {state && tab === "requirements" && (
           <RequirementsPanel state={state} issues={analysis?.requirement_issues ?? []} traced={traced} onTrace={setTraced} readOnly={readOnly}
             send={send} onPrompt={(rid) => setPromptFor({ nodeIds: [], requirementIds: [rid] })} />
         )}
-        {tab === "issues" && <IssuesPanel analysis={analysis} onFocus={focusIssue} onAsk={runAsk} onOpenCode={() => setCodeOpen(true)} />}
+        {tab === "issues" && (
+          <IssuesPanel pid={pid} branch={branch} analysis={analysis} aiAvailable={!!ai?.available} onFocus={focusIssue}
+            onShow={(names) => focusNodes(Object.values(state?.nodes ?? {}).filter((n) => names.includes(n.name)).map((n) => n.id))}
+            onFix={fixWithAI} onOpenCode={() => setCodeOpen(true)} />
+        )}
         {tab === "versions" && (
           <VersionsPanel versions={versions} activity={activity} branch={branch} headVersion={headVersion} diff={diff}
             onCommit={commit} onDiff={showDiff} onRestore={restore} onBranchFrom={(v, name) => createBranch(name, v)} />

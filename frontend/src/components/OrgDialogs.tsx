@@ -6,7 +6,7 @@ import { Copy } from "./ConnectDialog";
 
 interface Base { orgId: string; orgName: string; role: Role; selfId: string; onClose: () => void; onChanged?: () => void }
 
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   const escRef = useEscape(onClose);
   return (
     <div className="modal-backdrop" onClick={onClose} ref={escRef}>
@@ -305,13 +305,13 @@ export function AISettingsDialog({ orgId, orgName, onClose }: Base) {
   );
 }
 
-const FEATURE_LABEL: Record<string, string> = {
+export const FEATURE_LABEL: Record<string, string> = {
   assistant: "Assistant (Ask)", "canvas-edit": "Canvas edits", "design-chat": "Design chat", openspec: "Vibe code (OpenSpec)",
   "low-level-design": "Low-level design", decisions: "Decisions", "code-analysis": "Code analysis", memory: "Memory & summaries",
-  mcp: "MCP agents", other: "Other",
+  mcp: "MCP agents", suggestions: "Suggestions & follow-ups", review: "AI review", eval: "Evals", other: "Other",
 };
-const usd = (n: number) => (n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`);
-const tokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));
+export const usd = (n: number) => (n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`);
+export const tokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));
 
 function UsageTable({ title, rows, label }: { title: string; rows: AIUsageRow[]; label: (r: AIUsageRow) => string }) {
   if (!rows.length) return null;
@@ -406,6 +406,10 @@ export function AIUsageDialog({ orgId, orgName, onClose }: Base) {
             <UsageTable title="By feature" rows={r.by_feature} label={(x) => FEATURE_LABEL[x.key] ?? x.key} />
             <UsageTable title="By model" rows={r.by_model} label={(x) => x.key || "unknown"} />
             <UsageTable title="By project" rows={r.by_project} label={(x) => x.name ?? x.key} />
+            {r.by_user && r.by_user.length > 0 && <UsageTable title="By person" rows={r.by_user} label={(x) => x.name ?? x.key} />}
+            {r.by_prompt && r.by_prompt.some((x) => x.key) && (
+              <UsageTable title="By prompt version" rows={r.by_prompt.filter((x) => x.key)} label={(x) => x.key} />
+            )}
           </div>
           {r.total.calls === 0 && <p className="muted small">No AI calls recorded yet.</p>}
         </>

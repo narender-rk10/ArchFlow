@@ -3,6 +3,7 @@ import { api } from "../api";
 import type {
   ArchitecturesCard, ArchOption, ChatTurn, Conversation, ConversationMessage, ProjectState, QuestionCard, User,
 } from "../types";
+import { useAiSuggestions } from "../aiSuggestions";
 import { TYPE_META } from "./ArchNode";
 
 interface Props {
@@ -20,11 +21,12 @@ interface Props {
 
 export interface DesignContext { name: string; description: string; requirements: { id: string; title: string }[]; components: number }
 
+/** Offline only (no AI configured): examples for a project that has nothing yet. */
 const EXAMPLES = ["AI customer-support platform on WhatsApp and web", "Food delivery marketplace with live tracking",
   "Internal knowledge assistant over company documents"];
 
-/** Starting prompts built from the project (its requirements, canvas, name and description). The generic examples are
- * shown only for a project that has nothing yet. */
+/** Offline starting prompts built from the project (its requirements, canvas, name and description); with AI the
+ * starting points come from the LLM (useAiSuggestions). The generic examples are shown only for an empty project. */
 export function starters(c: DesignContext): { label: string; prompt: string }[] {
   const out: { label: string; prompt: string }[] = [];
   const reqs = c.requirements;
@@ -85,6 +87,16 @@ export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onAppl
   const convRef = useRef<Conversation | null>(null);
   convRef.current = conv;
   const busyRef = useRef(false);
+  // Starting ideas written by the LLM for this project; the built-in starters are the offline fallback.
+  const aiStarters = useAiSuggestions(pid, branch, { mode: "design" }, aiAvailable && !loading && turns.length === 0,
+    context.components * 1000 + context.requirements.length);
+  // After options are proposed or applied (not while a multiple-choice question is open): next steps from the LLM.
+  const last = turns[turns.length - 1];
+  const lastUser = [...turns].reverse().find((t) => t.role === "user" && t.content)?.content ?? "";
+  const lastAnswer = last?.role === "assistant" && last.card?.type !== "question"
+    ? [last.content, ...(last.card?.type === "architectures" ? last.card.options.map((o) => `${o.name}: ${o.summary}`) : [])].join("\n") : "";
+  const aiNext = useAiSuggestions(pid, branch, { mode: "design", conversationId: conv?.id, lastQuestion: lastUser, lastAnswer },
+    aiAvailable && !busy && !!lastAnswer, context.components * 1000 + context.requirements.length);
 
   const loadThreads = useCallback(async () => {
     const list = await api.conversations(pid, "design");
@@ -232,6 +244,17 @@ export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onAppl
             <p className="muted small">Describe what you want to build. I'll ask a few multiple-choice questions, then show
               you architecture options to pick from. Your answers are saved to the project memory.</p>
             {(() => {
+              if (aiStarters.items) {
+                return (
+                  <>
+                    <span className="tiny muted dc-starters-label">Start from this project <span className="ai-tag" title="Written by the AI from this project">AI</span></span>
+                    {aiStarters.items.map((s) => (
+                      <button key={s.label} className="dc-suggest" title={s.why || s.prompt} onClick={() => step({ role: "user", content: s.prompt })}>{s.label}</button>
+                    ))}
+                  </>
+                );
+              }
+              if (aiStarters.loading) return <span className="tiny muted dc-starters-label pulse">Finding starting points for this project…</span>;
               const fromProject = starters(context);
               return fromProject.length ? (
                 <>
@@ -268,6 +291,15 @@ export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onAppl
             </div>
           );
         })}
+        {!busy && lastAnswer && (aiNext.items?.length || aiNext.loading) ? (
+          <div className="cmd-followups dc-next" aria-label="Next steps">
+            <span className="tiny muted">{aiNext.loading ? "Thinking of next steps…" : "Next"}</span>
+            {(aiNext.items ?? []).map((s) => (
+              <button key={s.label} type="button" className={s.kind === "reply" ? "reply-chip" : "followup-chip"} title={s.why || s.prompt}
+                onClick={() => step({ role: "user", content: s.prompt })}>{s.label}</button>
+            ))}
+          </div>
+        ) : null}
         {busy && <div className="dc-msg bot muted pulse">Thinking…</div>}
         {error && <div className="error small pad">{error}</div>}
       </div>

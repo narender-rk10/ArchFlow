@@ -172,7 +172,7 @@ export interface ChatTurn {
 export type DecisionStatus = "proposed" | "accepted" | "rejected" | "superseded";
 export interface DecisionAlternative { name: string; branch?: string | null; summary: string; pros: string[]; cons: string[] }
 export interface Evaluation {
-  engine: "llm" | "heuristic";
+  engine: "jev" | "llm" | "heuristic";
   recommended: string;
   alternatives: string[];
   criteria: string[];
@@ -185,6 +185,23 @@ export interface Evaluation {
   requirement_ids?: string[];
   probabilities?: Record<string, number>;
   raw?: unknown;
+  /** NFR-derived criterion weights behind `totals` (older evaluations lack them). */
+  weights?: Record<string, number>;
+  details?: Record<string, EvaluationDetail>;
+  deciding_factors?: string[];
+  flip_conditions?: string;
+  /** With Jev scoring: the LLM agent's own pick, run in parallel, and whether it agrees. */
+  second_opinion?: { engine: "llm"; recommended: string; totals: Record<string, number>; scores: Record<string, Record<string, number>>;
+    rationale: string; confidence: number | null; agrees: boolean };
+  /** Questions the AI suggests asking next about this comparison. */
+  follow_up_questions?: string[];
+}
+export interface EvaluationDetail {
+  summary: string;
+  strengths: string[];
+  risks: string[];
+  best_when: string;
+  reasons: Record<string, string>;
 }
 export interface Decision {
   id: string; title: string; status: DecisionStatus; context: string; decision: string; consequences: string;
@@ -268,7 +285,7 @@ export interface ConversationMessage {
   seq: number; role: "user" | "assistant"; mode: "ask" | "command" | "design" | "note"; content: string;
   data: {
     engine?: string; error?: string; applied?: boolean | { option: string; branch: string; version: number };
-    summary?: string[]; questions?: string[]; selection?: string[];
+    summary?: string[]; questions?: string[]; question_options?: Record<string, string[]>; selection?: string[];
     card?: ChatCard | null; answer?: { option_ids: string[]; other?: string };
   };
   author: string; created_at: string;
@@ -306,4 +323,51 @@ export interface AIUsageReport {
   budget: { monthly_limit_usd: number | null; alert_percent: number; updated_by: string | null; updated_at: string | null };
   total: { calls: number; prompt_tokens: number; completion_tokens: number; cost_usd: number };
   by_feature: AIUsageRow[]; by_model: AIUsageRow[]; by_project: AIUsageRow[]; daily: AIUsageRow[];
+  /** Calls per prompt version (id@version); missing on servers before prompt versioning. */
+  by_prompt?: AIUsageRow[];
+  /** Calls per person (name filled in); missing on older servers. */
+  by_user?: AIUsageRow[];
+}
+
+// ---- AI architecture review (specialist agents in parallel, see review.py) ----
+export interface ReviewFinding {
+  focus: string; severity: "critical" | "high" | "medium" | "low"; title: string; detail: string;
+  components: string[]; requirement_ids: string[]; fix: string;
+}
+export interface ReviewResult {
+  findings: ReviewFinding[];
+  specialists: Record<string, { label: string; status: "ok" | "error"; findings: number; summary: string; error?: string }>;
+}
+
+// ---- AI suggestions (LLM follow-ups and starting prompts) ----
+/** kind: "start" (empty conversation), "follow_up" (after an answer), "reply" (an answer to the AI's question). */
+export interface AiSuggestion { label: string; prompt: string; why?: string; kind?: "start" | "follow_up" | "reply" }
+export type SuggestionMode = "edit" | "ask" | "design";
+
+// ---- AI observability: agent traces and the prompt catalog ----
+export interface AiSpan {
+  kind: "model" | "tool" | "api"; name: string; started_at: string; latency_ms: number; status: "ok" | "error" | "running";
+  input: unknown; output: unknown; error: string; model: string;
+  prompt_tokens: number; completion_tokens: number; cost_usd: number; calls: number;
+}
+export interface AiTraceSummary {
+  id: string; org_id: string; project_id: string; project_name?: string; feature: string; prompt: string; agent: string;
+  /** Who asked, what they asked and what the AI answered (short previews). */
+  user_id: string; user_name: string; question: string; answer: string;
+  /** The run that fired this one (agents run in parallel); "" for a top-level run. */
+  parent_id: string;
+  status: "ok" | "error"; error: string; prompt_tokens: number; completion_tokens: number; cost_usd: number;
+  latency_ms: number; model_calls: number; tool_calls: number; models: string[]; created_at: string;
+}
+export interface AiTrace extends AiTraceSummary {
+  input: unknown; output: unknown; spans: AiSpan[]; metadata: Record<string, unknown>;
+  /** Agents this run fired in parallel. */
+  children: AiTraceSummary[];
+}
+export interface AiTraceList {
+  traces: AiTraceSummary[]; people: { id: string; name: string }[]; content: "full" | "metadata" | "off"; retention_days: number;
+}
+export interface PromptInfo {
+  id: string; feature: string; description: string; active: string; default: string;
+  versions: { version: string; date: string; notes: string; sha: string }[];
 }
