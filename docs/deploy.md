@@ -7,7 +7,7 @@
 | `web` | `frontend/Dockerfile` (build context: repo root) | 8080 | nginx: the app, plus routing of `/api`, `/ws`, `/collab`, `/mcp` and the OAuth paths |
 | `api` | `backend/Dockerfile` | 8000 | FastAPI, one worker. Includes Node.js (diagram export, OpenSpec CLI) and git (repository analysis) |
 | `collab` | `collab/Dockerfile` | 1234 | Hocuspocus real-time server; talks to the API with `ARCHFLOW_INTERNAL_TOKEN` |
-| `postgres` | `pgvector/pgvector:pg16` | 5432 | Schema is created and migrated by the API at start (`archflow/migrations/*.sql`) |
+| `postgres` | `pgvector/pgvector:pg16` | 5432 | Schema is created and upgraded by the API at start (SQLAlchemy models + Alembic, `archflow/db/`); databases from earlier versions are converged in place |
 
 Only `web` needs to be reachable from outside. Put TLS in front of it (a load balancer, Caddy, Cloudflare).
 
@@ -42,8 +42,8 @@ Estimates use LiteLLM's price list, else built-in prices; override with
 ## Operations
 
 - **Backups**: back up the `pgdata` volume (or use a managed Postgres with point-in-time recovery).
-- **Health**: `GET /healthz` (web), `GET /api/health` (API, also reports LLM and export availability).
-- **Upgrades**: `git pull && docker compose -f docker-compose.prod.yml up -d --build`; migrations run on start.
+- **Health**: `GET /healthz` (web), `GET /api/health` (API liveness; also reports LLM and export availability), `GET /api/ready` (readiness: the database answers and the schema is at the latest migration; 503 otherwise).
+- **Upgrades**: `git pull && docker compose -f docker-compose.prod.yml up -d --build`; Alembic migrations run on start (serialized across API processes with a Postgres advisory lock). Check with `GET /api/ready` or `docker compose exec api alembic -c archflow/db/alembic.ini current`.
 - **Logs**: `docker compose -f docker-compose.prod.yml logs -f api` (prompts and keys are never logged).
 
 ## Current limits (single instance)

@@ -22,3 +22,11 @@ Thumbs.db
 
 # Graphify cache/output (repository analysis runs)
 graphify-out/
+
+# archflow-eval reports
+backend/evals/reports/
+
+# Playwright
+**/e2e/.auth/
+test-results/
+playwright-report/

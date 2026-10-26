@@ -135,13 +135,13 @@ One assistant panel with three modes, docked **left**, **right** or **floating**
 
 - **Architecture checks** — orphans, client → database access, shared databases, unguarded LLMs, missing auth or PII controls, missing gateway
 - **Health dashboard** — requirements completeness and approval, traceability %, architecture score, issue counts, and how well the design matches the code
-- One-click **AI architecture review** and failure-mode analysis
+- **AI review** — four specialist agents (security & privacy, reliability, performance & scale, cost & operations) review the design **in parallel**; findings are ranked by severity, name the components and requirements at risk, and come with **Fix with AI**, an instruction the Edit mode applies after you check it
 
 ---
 
 ### 🌿 Versions, Branches & Diff
 
-- Commit snapshots, restore any version, create a branch from any version, switch branches
+- Save versions, restore any version (the state it replaces is saved first, so a restore can be undone), branch from any version, switch branches
 - **Structural diff** between versions or branches, rendered **on the canvas** (added / changed / removed ghosts) plus text
 - **Activity history** — who changed what, and when, per branch
 
@@ -150,7 +150,7 @@ One assistant panel with three modes, docked **left**, **right** or **floating**
 ### ⚖️ Architecture Decisions (ADRs)
 
 - ADRs (ADR-001, …) with status, context, decision, consequences, alternatives and linked requirements
-- **Compare drafts** — scores 2–4 branches against the requirements/NFRs on cost, scalability, performance, security, reliability, operability and delivery speed (1–5 matrix + recommendation) using the LLM, or an offline heuristic; the engine used is always shown
+- **Compare drafts** — scores 2–4 branches against the requirements/NFRs on cost, scalability, performance, security, reliability, operability and delivery speed. The [Jev](https://thejevai.com/docs) decision API (`JEV_API_KEY`) scores and picks while an LLM agent, **in parallel**, explains every score, lists strengths, risks and when each option wins, and gives a **second opinion** (agree / disagree is shown). Without Jev the LLM scores; without either, an offline heuristic. Re-weight the criteria to your priorities, and **ask** follow-up questions (the AI suggests them)
 - Record the result as an ADR and **adopt** the chosen draft into `main` (a safety version first)
 
 ---
@@ -211,6 +211,23 @@ One assistant panel with three modes, docked **left**, **right** or **floating**
 | xAI Grok | `xai/` | required | |
 | Azure OpenAI | `azure/` | required | Endpoint + API version |
 | OpenAI-compatible | `openai/` + endpoint | optional | Ollama, vLLM, LM Studio, a LiteLLM proxy |
+
+### 🧠 Agents, Versioned Prompts, Evals & Traces
+
+- **Multi-agent** — the AI review fires four specialist agents at once and Compare drafts runs Jev and an LLM agent side by side (`agents.parallel`); one failing agent never loses the others' results
+- **Pydantic AI agents** — every AI feature (canvas edits, Ask, design chat, comparisons, suggestions, specs, LLD, memory, code refinement) is a Pydantic AI `Agent` whose model sends each request through the LiteLLM gateway, so fallbacks, per-org keys, budgets and usage accounting still apply. Canvas edits are a real tool loop: each tool call is applied to a working copy and its result (or why it was rejected) goes back to the model
+- **Official cloud documentation as context** — when a design-chat turn, an Ask question, an AI review or a low-level design is about **Azure** or **AWS**, the agent first searches that provider's documentation MCP server — [Microsoft Learn](https://learn.microsoft.com/api/mcp) or [AWS Knowledge](https://github.com/awslabs/mcp/tree/main/src/aws-knowledge-mcp-server) — and gets the top reference architectures, Well-Architected and service guides in its prompt, so service choices and limits follow current documentation, and answers cite the URLs. Only a search phrase (the request plus the services on the canvas) leaves ArchFlow; results are cached, each lookup appears in the run's trace, and a source that is down is skipped. Swap in the local [AWS Documentation server](https://github.com/awslabs/mcp/tree/main/src/aws-documentation-mcp-server) with `ARCHFLOW_DOCS_AWS=stdio:uvx awslabs.aws-documentation-mcp-server@latest`, or turn it off with `ARCHFLOW_DOCS=off`
+- **LLM follow-ups instead of fixed prompts** — starting prompts, follow-ups after each answer, design-chat next steps and comparison questions are written by the `assistant.suggestions` agent from the project's components, requirements, health issues and the last exchange (the rule-based ones remain only for offline use)
+- **The AI asks in bubbles** — in Edit mode clarifying questions arrive as chat bubbles with answers to tap; in Ask mode the assistant asks back when a question is ambiguous and offers quick replies; the Design interview asks multiple-choice questions
+- **Prompts in YAML, versioned** — `backend/archflow/prompts/<id>.yaml` holds every version of a prompt; released versions are locked by hash in `prompts.lock.json` (tests fail if one is edited), a change ships as a new version, and `ARCHFLOW_PROMPTS=compare.evaluate=v1` pins or rolls back without a deploy. Every usage row and trace records `id@version`
+- **Evals** — `uv run archflow-eval` runs golden datasets (`archflow/evals/datasets/*.yaml`: compare, ask, command, design, suggestions) against your models with deterministic checks, and with `--ragas` adds RAGAS metrics (faithfulness, groundedness, answer accuracy, aspect critics) judged through the same gateway. `--prompt id=v2 --baseline old.json` A/B tests a prompt version; `--fail-under 0.8` gates CI
+- **Traces** — each run records **who asked**, **what they asked**, **what the AI answered**, the full input and output, every LLM call (model, tokens, cost, latency), every tool and API call (arguments, result), and the prompt version. Agents fired in parallel (the AI review, the Jev + LLM comparison panel) appear as one run with its child agents. Admins browse them under **Traces** on the home page, filter by person, feature or status, and see the prompt catalog; **Usage & budget** breaks spend down by feature, model, project, prompt version and person. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to also export the agents' OpenTelemetry spans to Langfuse, Phoenix, Jaeger or Logfire
+
+```bash
+uv run archflow-prompts list | check | lock | show compare.evaluate@v1
+uv run archflow-eval --suite compare --suite ask
+uv run --with ragas==0.3.9 --with "langchain-community>=0.3,<0.4" archflow-eval --ragas --baseline evals/reports/last.json
+```
 
 ---
 
@@ -375,6 +392,7 @@ Any feature calls llm.py
 | **AI agents (MCP)** | Claude Code, Claude.ai, Claude Desktop, Codex, any MCP client (Streamable HTTP + OAuth 2.1, or a local stdio server) |
 | **Coding agents (OpenSpec / briefs)** | Claude Code, Codex, Cursor and others via OpenSpec changes or a one-file prompt |
 | **Cloud catalogs** | AWS, Azure, Google Cloud, self-hosted open source, SaaS (151 components) |
+| **Cloud documentation (MCP)** | Microsoft Learn MCP server, AWS Knowledge MCP server (hosted), AWS Documentation MCP server (local, optional) |
 | **Code analysis** | Public Git repositories (HTTPS), local graphs via `archflow-codegraph`; ~30 languages through tree-sitter |
 | **Observability** | Langfuse (optional LLM tracing) |
 
@@ -386,15 +404,17 @@ Any feature calls llm.py
 |---|---|
 | **Backend** | Python 3.11+, FastAPI, Pydantic v2, Uvicorn, uv |
 | **AI gateway** | LiteLLM (Router: fallbacks, retries, cooldowns, cost tracking) |
+| **Agents** | Pydantic AI (agents, tool loops, typed outputs) on the gateway; versioned YAML prompts (Jinja2) |
+| **Evals** | `archflow-eval` golden datasets + RAGAS (optional, judged through the gateway) |
 | **Frontend** | React 19, TypeScript 7, Vite 8, React Flow (`@xyflow/react` 12), Mermaid 12, Simple Icons |
 | **Real-time** | Yjs + Hocuspocus 4 (Node.js collab server), WebSocket |
-| **Database** | PostgreSQL (psycopg 3 + pool, SQL migrations) or SQLite for local use |
+| **Database** | SQLAlchemy 2.0 ORM + Alembic migrations on PostgreSQL (psycopg 3) or SQLite for local use |
 | **Code analysis** | Graphify (`graphifyy`), tree-sitter, isolated worker process (optional extra) |
 | **Spec-driven coding** | OpenSpec 1.x (npm, run on the API server) |
 | **Diagram export** | ArchFlow renderer (`backend/renderer`, Node.js 18+), html-to-image |
-| **Agents** | MCP Python SDK (Streamable HTTP, OAuth 2.1) |
+| **MCP** | MCP Python SDK (Streamable HTTP, OAuth 2.1) |
 | **Security** | scrypt passwords, HttpOnly session cookies, AES-256-GCM secrets, HMAC collab tickets, SSRF guards |
-| **Observability** | Langfuse (optional) |
+| **Observability** | Built-in agent traces (input, output, LLM and tool calls, cost); OpenTelemetry export; Langfuse (optional) |
 | **Deployment** | Docker Compose (nginx web, API, collab, Postgres), GitHub Actions CI |
 
 ---
@@ -513,6 +533,14 @@ claude mcp add --transport http archflow http://localhost:8000/mcp --header "Aut
 | `ARCHFLOW_LLM_PRICES` | — | USD per million (input, output) tokens for models LiteLLM has no price for |
 | `ARCHFLOW_ALLOW_PRIVATE_AI_URLS` | `false` | Allow model endpoints on private/loopback addresses (local Ollama, vLLM); keep off on shared servers |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | — | Optional LLM tracing |
+| `ARCHFLOW_DOCS` | on | `off` stops the cloud-documentation lookups (they are also off with `ARCHFLOW_AI=offline`) |
+| `ARCHFLOW_DOCS_AZURE` | `https://learn.microsoft.com/api/mcp` | Azure documentation MCP server (URL, `stdio:<command>` or `off`) |
+| `ARCHFLOW_DOCS_AWS` | `https://knowledge-mcp.global.api.aws` | AWS documentation MCP server, e.g. `stdio:uvx awslabs.aws-documentation-mcp-server@latest` for the local one |
+| `ARCHFLOW_PROMPTS` | — | Pin prompt versions, e.g. `compare.evaluate=v1,design.turn=v2` (default: each prompt's `active` version) |
+| `ARCHFLOW_TRACES` | `full` | Agent traces: `full` (with prompt and response text), `metadata` (tokens, cost, timings only) or `off` |
+| `ARCHFLOW_TRACE_RETENTION_DAYS` | `30` | How long traces are kept |
+| `ARCHFLOW_TRACE_MAX_CHARS` | `20000` | Per-field cap on stored trace text |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Export agent spans over OTLP (needs `uv sync --extra otel`); `OTEL_SERVICE_NAME` defaults to `archflow` |
 
 > **Per-organization keys and models** are set in the UI under **AI settings** and stored encrypted — the env keys above are only the defaults for organizations that configure nothing.
 
@@ -588,7 +616,7 @@ docker compose up -d postgres redis
 DATABASE_URL=postgresql://archflow:<POSTGRES_PASSWORD>@localhost:5432/archflow uv run uvicorn archflow.main:app --port 8000
 ```
 
-Migrations in `backend/archflow/migrations/` apply automatically on startup. Branch edits take a row lock (`SELECT … FOR UPDATE`), so several API processes can run side by side.
+The schema is defined by the SQLAlchemy models in `backend/archflow/db/models.py`; Alembic migrations (`backend/archflow/db/migrations/`) apply automatically on startup, and databases created by earlier versions are converged in place. Branch edits take a row lock (`SELECT … FOR UPDATE`), so several API processes can run side by side.
 
 ---
 
@@ -622,8 +650,15 @@ ArchFlow/
 │   │   ├── secrets_box.py       # AES-256-GCM encryption of org secrets
 │   │   ├── mcp_remote.py        # Remote MCP server (OAuth 2.1, 40 tools)
 │   │   ├── mcp_server.py        # Local stdio MCP server
-│   │   ├── store.py · store_pg.py  # SQLite / Postgres persistence
-│   │   ├── migrations/          # Postgres SQL migrations (001–010)
+│   │   ├── store.py             # persistence (one store for SQLite and Postgres)
+│   │   ├── db/                  # SQLAlchemy models, column types, Alembic migrations
+│   │   ├── agents/              # Pydantic AI runtime on the gateway, prompt registry, run tracing
+│   │   ├── prompts/             # Versioned YAML prompts + prompts.lock.json
+│   │   ├── evals/               # archflow-eval: golden datasets, checks, RAGAS judge
+│   │   ├── review.py            # AI review: specialist agents in parallel
+│   │   ├── suggestions.py       # LLM starting prompts, follow-ups and quick replies
+│   │   ├── jev.py               # Jev decision API client (Compare drafts)
+│   │   ├── observability.py     # Trace storage, retention and the admin API
 │   │   └── codegraph/           # Repo analysis: Graphify adapter, worker, CLI, detections,
 │   │                            # clone + SSRF guard, jobs, reconstruction, drift, impact
 │   ├── openspec/                # OpenSpec npm dependency
@@ -673,9 +708,14 @@ ArchFlow/
 cd backend && uv run pytest        # add TEST_DATABASE_URL=postgresql://… to also run the Postgres store tests
 cd frontend && npm run build       # typecheck + production build
 cd collab && npm test              # end-to-end: two live clients + MCP/AI edits (needs the API and collab server)
+cd frontend && npx playwright install chromium && npm run e2e   # browser end-to-end (starts its own servers)
+E2E_REAL_AI=1 npm run e2e          # ... plus the AI flows, with the provider keys in .env
+cd backend && uv run archflow-eval # AI quality evals against your models (see Agents, Versioned Prompts, Evals & Traces)
 ```
 
-CI (`.github/workflows/ci.yml`) runs the backend tests on SQLite and Postgres, the frontend build and audit, the collaboration end-to-end test, and the Docker image builds.
+The Playwright suite (`frontend/e2e/`) starts the API, collab server and web app on their own ports with a fresh database and drives them in Chromium: sign up, create a project, edit the canvas from the assistant and the inspector, requirements, **connect code** (upload a code graph and reconstruct the architecture), **get the diagram** (PNG, SVG and interactive HTML downloads), history (save, compare, restore, undo a restore), decisions (compare drafts, record, adopt) and health. With `E2E_REAL_AI=1` it also checks the AI: starting points in Design, follow-ups after Ask answers, question bubbles in Edit, the parallel review, and traces showing who asked what.
+
+CI (`.github/workflows/ci.yml`) runs the backend tests on SQLite and Postgres (including the migration drift checks), the frontend build and audit, the Playwright suite, the collaboration end-to-end test, and the Docker image builds.
 
 An end-to-end AI evaluation on a complex spec (a multi-region telehealth platform) lives in [docs/evaluation](docs/evaluation): requirements, a scoring rubric and results, reproducible with `scripts/eval_carelink.py`.
 
@@ -693,6 +733,14 @@ The full production plan is in [docs/production-plan.md](docs/production-plan.md
 6. **Document intake** — SRS/PDF → requirements; meeting transcripts → live canvas
 7. **Generation** of tests, infrastructure as code and documentation (SRS/BRD/runbooks)
 8. **Scale-out** — shared Redis for rate limits, jobs and real-time fan-out across API instances
+
+---
+
+## 🤝 Contributing
+
+Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md) (setup, tests, migrations, prompt
+versions and the contribution terms), the [code of conduct](CODE_OF_CONDUCT.md), and [SECURITY.md](SECURITY.md) for
+reporting vulnerabilities privately.
 
 ---
 
