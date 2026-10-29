@@ -102,3 +102,64 @@ cases:
       scores_higher: [[draft/secured, draft/open, security]]
       mentions_any: [SSO, OIDC, Keycloak, audit, encrypt]
     ragas: [faithfulness]
+
+  - id: iot-throughput-favours-streaming
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Ingest 50,000 sensor readings per second with bursts to 3x", kind: non_functional, category: scalability, priority: critical}}
+        - {op: add_requirement, requirement: {title: "No reading is lost when the database is slow or down for 10 minutes", kind: non_functional, category: reliability, priority: high}}
+    alternatives:
+      draft/direct:
+        ops:
+          - {op: add_node, node: {name: Sensors, type: client, technology: HTTP devices}}
+          - {op: add_node, node: {name: Ingest API, type: service, technology: Express}}
+          - {op: add_node, node: {name: Telemetry DB, type: database, technology: PostgreSQL}}
+          - {op: add_edge, edge: {source: Sensors, target: Ingest API, protocol: HTTPS}}
+          - {op: add_edge, edge: {source: Ingest API, target: Telemetry DB, protocol: SQL}}
+      draft/streaming:
+        ops:
+          - {op: add_node, node: {name: Sensors, type: client, technology: MQTT devices}}
+          - {op: add_node, node: {name: MQTT Broker, type: gateway, technology: EMQX cluster}}
+          - {op: add_node, node: {name: Readings Stream, type: queue, technology: Apache Kafka (7-day retention)}}
+          - {op: add_node, node: {name: Stream Processor, type: service, technology: Apache Flink, props: {replicas: "6"}}}
+          - {op: add_node, node: {name: Telemetry DB, type: database, technology: TimescaleDB}}
+          - {op: add_edge, edge: {source: Sensors, target: MQTT Broker, protocol: MQTT}}
+          - {op: add_edge, edge: {source: MQTT Broker, target: Readings Stream, protocol: Kafka}}
+          - {op: add_edge, edge: {source: Readings Stream, target: Stream Processor, protocol: Kafka}}
+          - {op: add_edge, edge: {source: Stream Processor, target: Telemetry DB, protocol: "SQL (batched)"}}
+    expect:
+      recommended: draft/streaming
+      scores_higher: [[draft/streaming, draft/direct, scalability], [draft/streaming, draft/direct, reliability]]
+      mentions_any: [Kafka, buffer, backpressure, burst, retention, "50,000"]
+    ragas: [faithfulness]
+
+  - id: fintech-consistency-favours-ledger
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Balances are strongly consistent; no transfer is lost or applied twice", kind: non_functional, category: reliability, priority: critical}}
+        - {op: add_requirement, requirement: {title: "RPO 0 and RTO under 15 minutes for the ledger", kind: non_functional, category: availability, priority: critical}}
+        - {op: add_requirement, requirement: {title: "Customers transfer money between their accounts", kind: functional, priority: high}}
+    alternatives:
+      draft/eventual:
+        ops:
+          - {op: add_node, node: {name: Mobile App, type: client, technology: Flutter}}
+          - {op: add_node, node: {name: Transfer Function, type: service, technology: AWS Lambda}}
+          - {op: add_node, node: {name: Balances Table, type: database, technology: "DynamoDB (eventually consistent reads, single region)"}}
+          - {op: add_edge, edge: {source: Mobile App, target: Transfer Function, protocol: HTTPS}}
+          - {op: add_edge, edge: {source: Transfer Function, target: Balances Table, protocol: AWS SDK}}
+      draft/ledger:
+        ops:
+          - {op: add_node, node: {name: Mobile App, type: client, technology: Flutter}}
+          - {op: add_node, node: {name: Transfers API, type: service, technology: Java, description: "Idempotency keys on every transfer"}}
+          - {op: add_node, node: {name: Ledger DB, type: database, technology: "PostgreSQL (double-entry, synchronous standby)", props: {replicas: "2"}}}
+          - {op: add_node, node: {name: Outbox Relay, type: service, technology: Debezium}}
+          - {op: add_node, node: {name: Ledger Events, type: queue, technology: Apache Kafka}}
+          - {op: add_edge, edge: {source: Mobile App, target: Transfers API, protocol: HTTPS}}
+          - {op: add_edge, edge: {source: Transfers API, target: Ledger DB, protocol: SQL}}
+          - {op: add_edge, edge: {source: Outbox Relay, target: Ledger DB, protocol: CDC}}
+          - {op: add_edge, edge: {source: Outbox Relay, target: Ledger Events, protocol: Kafka}}
+    expect:
+      recommended: draft/ledger
+      scores_higher: [[draft/ledger, draft/eventual, reliability]]
+      mentions_any: [consisten, double-entry, idempoten, RPO, synchronous, ledger]
+    ragas: [faithfulness]

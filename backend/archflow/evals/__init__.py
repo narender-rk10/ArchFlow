@@ -1,6 +1,7 @@
 """Offline evaluation of ArchFlow's AI features against golden datasets (``archflow-eval``).
 
-Datasets live in ``evals/datasets/*.yaml`` (one suite per file: compare, ask, command, design, suggestions).
+Datasets live in ``evals/datasets/*.yaml`` (one suite per file: compare, ask, command, design, suggestions,
+review, lld, and adversarial, the red-team cases run against the other agents).
 Every case runs the real agent through the gateway (a provider key is needed) and is scored by:
 
 - deterministic checks from the case's ``expect`` block (recommended option, components added, mentions,

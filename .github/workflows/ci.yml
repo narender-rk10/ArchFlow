@@ -60,6 +60,46 @@ jobs:
           OPENSPEC_NO_UPDATE_CHECK: "1"
         run: uv run pytest -q -ra
 
+  ai-evals:
+    name: AI evals (golden datasets)
+    # Calls a real model (costs money), so only on pushes to main, and only when a key is configured.
+    # Secrets cannot be read in a job-level `if`, so the key is checked per step.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [backend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Skip without a GEMINI_API_KEY secret
+        if: env.GEMINI_API_KEY == ''
+        run: echo "::notice::GEMINI_API_KEY is not set; skipping the AI evals."
+      - uses: actions/checkout@v4
+        if: env.GEMINI_API_KEY != ''
+      - uses: astral-sh/setup-uv@v6
+        if: env.GEMINI_API_KEY != ''
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install Python dependencies
+        if: env.GEMINI_API_KEY != ''
+        run: uv sync --frozen
+      - name: Run every suite (fail below 0.7)
+        if: env.GEMINI_API_KEY != ''
+        run: uv run archflow-eval --fail-under 0.7 --out evals/reports/ci.json
+      - name: Report
+        if: always() && env.GEMINI_API_KEY != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: backend/evals/reports/ci.json
+          if-no-files-found: ignore
+          retention-days: 30
+
   frontend:
     name: Web app (typecheck + build)
     runs-on: ubuntu-latest
