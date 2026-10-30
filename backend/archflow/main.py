@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from . import (accounts, ai, openspec_service, diagram_export, auth, catalog, chat, collab_sync, comments, conversations, decisions, lld, llm,
                observability, review, secrets_box, suggestions, usage, users)
+from . import exports
 from .analysis import full_analysis, trace_requirement
 from .codegraph.service import CodeGraphService
 from .codegraph.service import register_routes as register_codegraph_routes
@@ -616,6 +617,8 @@ def create_app(store: Store | None = None) -> FastAPI:
     comments.register_routes(app, store, authz=authz, broadcast=broadcast_room)
     suggestions.register_routes(app, store, authz=authz, state_or_404=state_or_404)
     review.register_routes(app, store, authz=authz, state_or_404=state_or_404)
+    # ---- spec exports (Markdown, print/PDF, JSON, YAML) and coding-agent guides (exports.py) ----
+    exports.register_routes(app, store, authz=authz, state_or_404=state_or_404)
 
     # ---- OpenSpec: spec-driven changes stored per project (openspec_service.py) ----
     def openspec_context(pid: str, branch: str) -> dict[str, Any]:

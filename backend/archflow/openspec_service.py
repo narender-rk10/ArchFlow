@@ -388,12 +388,25 @@ def change_files(store: Any, pid: str, change: dict[str, Any]) -> dict[str, str]
             if not f["path"].endswith(".openspec.yaml")}
 
 
-def zip_tree(store: Any, pid: str) -> bytes:
+def zip_tree(store: Any, pid: str, extra: dict[str, str] | None = None) -> bytes:
+    """The project's openspec/ tree, plus ``extra`` files at the root (the coding-agent guides)."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for f in store.list_openspec_files(pid):
             z.writestr(f["path"], f["content"])
+        for path, content in (extra or {}).items():
+            z.writestr(path, content)
     return buf.getvalue()
+
+
+def guide_files(store: Any, pid: str) -> dict[str, str]:
+    """CLAUDE.md, AGENTS.md and .cursorrules derived from the main branch (no AI: the download stays instant)."""
+    from . import exports
+
+    try:
+        return exports.guide_files(exports.collect(store, pid, "main"), use_llm=False)["files"]
+    except KeyError:  # no main branch
+        return {}
 
 
 # --------------------------------------------------------------------------- REST
@@ -534,5 +547,5 @@ def register_routes(app: FastAPI, store: Any, *, authz: Any, project_context: Ca
     @app.get("/api/projects/{pid}/openspec.zip")
     def download(pid: str, a=Depends(read)):
         name = re.sub(r"[^A-Za-z0-9._-]+", "-", a.project["name"]).strip("-") or "project"
-        return Response(zip_tree(store, pid), media_type="application/zip",
+        return Response(zip_tree(store, pid, guide_files(store, pid)), media_type="application/zip",
                         headers={"Content-Disposition": f'attachment; filename="{name}-openspec.zip"'})

@@ -24,7 +24,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import auth, authz, catalog, lld
+from . import auth, authz, catalog, exports, lld
 from . import openspec_service as openspec_mod
 from . import conversations as conversations_mod
 from . import decisions as decisions_mod
@@ -260,6 +260,16 @@ def build_remote_mcp(services: Services) -> MCPServer:
         if not f:
             raise ToolError(f"{path} not found")
         return f["content"]
+
+    @mcp.tool()
+    def export_spec(project_id: str, format: str = "markdown", branch: str = "main") -> str:
+        """The branch as a specification document. format: markdown (requirements, architecture, low-level designs,
+        ADRs, memory, health) or json (the full project: state, decisions, memory, versions; schema_version'd)."""
+        _, state = project_for(Principal(store), project_id, branch)
+        if format not in ("markdown", "json"):
+            raise ToolError("format must be markdown or json")
+        b = exports.collect(store, project_id, branch, state)
+        return exports.spec_markdown(b) if format == "markdown" else exports.to_json(b)
 
     @mcp.tool()
     def generate_coding_prompt(project_id: str, component_ids: list[str] | None = None, target: str = "claude-code",

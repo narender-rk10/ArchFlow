@@ -176,6 +176,7 @@ def test_openspec_rest_lifecycle(client, no_llm):
     assert "### Requirement:" in living["content"]
     z = zipfile.ZipFile(io.BytesIO(client.get(f"/api/projects/{pid}/openspec.zip").content))
     assert specs[0]["path"] in z.namelist() and any("/changes/archive/" in n for n in z.namelist())
+    assert {"CLAUDE.md", "AGENTS.md", ".cursorrules"} <= set(z.namelist())  # coding-agent guides at the root
 
 
 def test_openspec_job_errors(client, no_llm):
