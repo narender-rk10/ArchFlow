@@ -26,6 +26,7 @@ import { CommentsPanel } from "./CommentsPanel";
 import { NotificationBell } from "./NotificationBell";
 import type { AppNotification, Comment, Member } from "../types";
 import { ConnectDialog } from "./ConnectDialog";
+import { ExportDialog } from "./ExportDialog";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { DesignChat } from "./DesignChat";
 import { PromptDialog } from "./Dialogs";
@@ -131,6 +132,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const [canvasFull, setCanvasFull] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
   const toolsRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -818,6 +820,8 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           <option value="html">Interactive diagram (HTML)</option>
         </select>
               </label>
+              <button role="menuitem" onClick={() => { setToolsOpen(false); setExportOpen(true); }}>
+                <b>⤓ Export spec &amp; agent guides</b><span className="muted tiny">Markdown, PDF, JSON, YAML, CLAUDE.md, AGENTS.md, .cursorrules</span></button>
             </div>
           )}
         </div>
@@ -978,6 +982,9 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         )}
       </aside>
 
+      {exportOpen && (
+        <ExportDialog pid={pid} branch={branch} aiAvailable={!!ai?.available} toast={toast} onClose={() => setExportOpen(false)} />
+      )}
       {connectOpen && project && (
         <ConnectDialog orgId={project.org_id ?? "org-default"} canManage={can(role, "admin")} onClose={() => setConnectOpen(false)} />
       )}

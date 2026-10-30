@@ -22,7 +22,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .. import ai, chat, evaluation, intake, lld, merge, review, suggestions
+from .. import ai, chat, evaluation, intake, lld, merge, review, suggestions, exports
 from ..analysis import full_analysis
 from ..models import LLD_TYPES, ProjectState
 from ..ops import apply_ops, resolve_node
@@ -342,6 +342,28 @@ def run_intake(case: dict[str, Any], org_id: str | None) -> Outcome:
                    contexts=[d["text"]], raw=out)
 
 
+def run_guide(case: dict[str, Any], org_id: str | None) -> Outcome:
+    state = build(case.get("project"))
+    b = exports.Bundle(project={"name": case.get("name", "Eval project")}, branch="main", state=state,
+                       memory=[{"category": m.get("category", "fact"), "text": m["text"]} for m in case.get("memory") or []],
+                       decisions=case.get("decisions") or [])
+    ctx = exports.guide_context(b)
+    guidance = exports.agent_guidance(ctx, exports.facts_text(ctx), org_id)
+    exp = case.get("expect") or {}
+    items = [x for _, xs in guidance.items() for x in xs]
+    names = [n.name.lower() for n in state.nodes.values() if n.type != "note"] + [r.lower() for r in state.requirements] \
+        + [n.technology.lower() for n in state.nodes.values() if n.technology]
+    grounded = [x for x in items if any(n in x.lower() for n in names)]
+    share = len(grounded) / len(items) if items else 0
+    checks: list[Check] = [("every section written", all(guidance.get(k) for k, _ in exports.GUIDANCE_SECTIONS), ""),
+                           ("most items name a real component, technology or requirement",
+                            share >= exp.get("grounded_share", 0.8), f"{share:.0%}")]
+    text = exports._guidance_md(guidance)
+    checks += _text_checks(text, exp)
+    return Outcome(response=text, checks=checks, question=f"Write the coding-agent guide for {b.name}",
+                   contexts=[exports._skeleton_md(ctx)], raw=guidance)
+
+
 SUITES: dict[str, tuple[Callable[[dict[str, Any], str | None], Outcome], list[str]]] = {
     # suite: (runner, prompt ids it exercises)
     "compare": (run_compare, ["compare.evaluate"]),
@@ -354,4 +376,5 @@ SUITES: dict[str, tuple[Callable[[dict[str, Any], str | None], Outcome], list[st
     "merge": (run_merge, ["merge.resolve"]),
     "intake": (run_intake, ["intake.extract"]),
     "adversarial": (run_adversarial, ["assistant.ask", "canvas.command", "design.turn", "review.specialist"]),
+    "guide": (run_guide, ["exports.agent_guide"]),
 }

@@ -252,6 +252,11 @@ uv run --with ragas==0.3.9 --with "langchain-community>=0.3,<0.4" archflow-eval 
 
 - **PNG** or **SVG** image of the diagram you are looking at (system or a component's internals)
 - **Interactive HTML diagram** — a standalone, ArchFlow-branded viewer (explore nodes, trace paths, themes, PNG/SVG/WebM export) made by ArchFlow's renderer in `backend/renderer`
+- **Markdown spec** of a branch (Tools → Export spec & agent guides): overview, requirements (FR/NFR with acceptance criteria, priority, status and the components that implement them), architecture by component type (technology, description, connections), low-level designs, ADRs, project memory and a health summary. Same model, same bytes
+- **PDF** — a print-ready page of the same spec (light background, a page break per chapter); choose *Save as PDF* in the print dialog. The API serves HTML because PDF libraries that render it well need system libraries or bundled fonts
+- **JSON / YAML** — the full project (branch state, decisions, memory, versions and branches metadata) with `schema: archflow.project` and `schema_version` for tools; `exports.load_document` reads it back
+- **CLAUDE.md, AGENTS.md, .cursorrules** for coding agents, previewed before download: stack, services and their responsibilities, data stores, NFRs as constraints, accepted ADRs as rules and a folder layout, all derived from the model, plus project-specific conventions, do / don't and testing guidance written by the `exports.agent_guide` agent (skeleton only without an AI model). The OpenSpec download (`openspec.zip`) includes the three files at its root
+- REST: `GET /api/projects/{id}/export/spec.md | spec.html | project.json | project.yaml`, `POST …/export/guides`, `GET …/export/guides/{claude-md|agents-md|cursorrules}` (any project role); MCP: `export_spec` (markdown or json)
 
 ---
 
@@ -676,6 +681,7 @@ ArchFlow/
 │   │   ├── prompts/             # Versioned YAML prompts + prompts.lock.json
 │   │   ├── evals/               # archflow-eval: golden datasets, checks, RAGAS judge
 │   │   ├── review.py            # AI review: specialist agents in parallel
+│   │   ├── exports.py           # Spec exports (Markdown, print/PDF, JSON, YAML) and coding-agent guides
 │   │   ├── suggestions.py       # LLM starting prompts, follow-ups and quick replies
 │   │   ├── jev.py               # Jev decision API client (Compare drafts)
 │   │   ├── observability.py     # Trace storage, retention and the admin API

@@ -284,6 +284,23 @@ export const api = {
   /** Interactive diagram of one level (system, or a component's internals), rendered by Archify on the server. */
   exportDiagram: (pid: string, branch: string, level = "") =>
     download(`/projects/${pid}/export/diagram`, { branch, level }, "diagram.html"),
+  /** Spec exports derived from the branch: Markdown, print-ready HTML (Save as PDF), full project JSON / YAML. */
+  exportSpec: (pid: string, branch: string, format: "spec.md" | "spec.html" | "project.json" | "project.yaml") =>
+    download(`/projects/${pid}/export/${format}`, { branch }, format),
+  /** The print-ready spec as HTML text, to open in a new tab and print to PDF. */
+  exportPrintHtml: async (pid: string, branch: string): Promise<string> => {
+    const res = await fetch(`/api/projects/${pid}/export/spec.html?${new URLSearchParams({ branch, inline: "true" })}`,
+      { credentials: "include" });
+    if (!res.ok) {
+      if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+      throw new ApiError(res.status, await res.json().catch(() => null));
+    }
+    return res.text();
+  },
+  /** CLAUDE.md, AGENTS.md and .cursorrules: derived skeleton, plus AI-written guidance when ``use_ai``. */
+  exportGuides: (pid: string, branch: string, use_ai: boolean) =>
+    call<{ files: Record<string, string>; engine: "llm" | "offline"; notes: string[] }>(
+      "POST", `/projects/${pid}/export/guides`, { use_ai }, b(branch)),
   exportSequence: (pid: string, branch: string, nodeId: string) =>
     download(`/projects/${pid}/nodes/${encodeURIComponent(nodeId)}/export/sequence`, { branch }, "request-flow.html"),
   views: (pid: string, branch: string, nodeId: string) =>

@@ -1,0 +1,46 @@
+suite: guide
+description: The coding-agent guide (exports.agent_guide) is specific to the project, follows its decisions and facts, and plans tests per requirement.
+cases:
+  - id: support-project-guide
+    project: {template: ai-customer-support}
+    name: Support Bot
+    memory:
+      - {category: constraint, text: All customer data stays in the EU.}
+    decisions:
+      - {id: ADR-001, title: Orders are read through the Orders MCP Server, status: accepted,
+         decision: The Support Agent never queries Orders DB directly; it goes through the Orders MCP Server.}
+    expect:
+      grounded_share: 0.8
+      mentions_all: [Orders MCP Server]
+      mentions_any: [REQ-003, REQ-005, ADR-001]
+      forbid:
+        - "(write clean code|follow best practices)"
+        - "(add|use|introduce) (MongoDB|DynamoDB|MySQL)"
+    ragas: [technically_sound, grounded_in_project]
+
+  - id: nfr-becomes-testable-constraint
+    project:
+      template: ai-customer-support
+      ops:
+        - {op: update_requirement, id: REQ-005, changes: {
+            title: p95 reply latency under 3 seconds,
+            acceptance_criteria: ["Given 50 concurrent chats, p95 time from message to reply is under 3 s"]}}
+    name: Support Bot
+    expect:
+      grounded_share: 0.8
+      mentions_all: [REQ-005]
+      mentions_any: [p95, latency, 3 s, 3 seconds, load test]
+    ragas: [technically_sound]
+
+  - id: new-service-appears-in-guide
+    project:
+      template: ai-customer-support
+      ops:
+        - {op: add_node, node: {id: notif, name: Notification Service, type: service, technology: Go,
+                                requirement_ids: [REQ-004]}}
+        - {op: add_edge, edge: {source: support-agent, target: notif, protocol: gRPC}}
+    name: Support Bot
+    expect:
+      grounded_share: 0.8
+      mentions_any: [Notification Service, gRPC, Go]
+    ragas: [grounded_in_project]
