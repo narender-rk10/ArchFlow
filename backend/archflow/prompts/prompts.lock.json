@@ -16,6 +16,7 @@
  "lld.design@v2": "3fe19dec78f22b5e",
  "memory.extract@v1": "99e900970fb7505d",
  "memory.summarize@v1": "62b88a53a06031f5",
+ "merge.resolve@v1": "feaf2e06c9383c5c",
  "openspec.artifact@v1": "d527728d4ed00899",
  "openspec.name@v1": "0b6a3d63d5e6dd6a",
  "openspec.repair@v1": "acc624bacc4e32e9",

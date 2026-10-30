@@ -2,6 +2,7 @@ import type { Activity, Analysis, ArchOption, Branch, ChatCard, ChatTurn, ApiTok
 import type { AppNotification, Comment, CommentTarget, Decision, Evaluation } from "./types";
 import type { AIConfig, AIGroup, AIProvider, AISettings, AITestResult, Invite, InviteInfo, Me, Member, Role } from "./types";
 import type { ComponentViews, LldResult } from "./types";
+import type { MergePreview, MergeResolution, MergeResult, MergeSuggestion } from "./types";
 import type { CodeGraphRecord, CodeJob, CodeOverview, DriftResult, ImpactResult, ReconstructResult } from "./types";
 import type { Conversation, ConversationKind, ConversationMessage, MemoryCategory, MemoryItem } from "./types";
 import type { OpenSpecChange, OpenSpecJob, OpenSpecOverview } from "./types";
@@ -168,6 +169,14 @@ export const api = {
     call<{ state: ProjectState }>("POST", `/projects/${pid}/restore`, { version, actor }, b(branch)),
   createBranch: (pid: string, name: string, from_branch: string, from_version: number | null) =>
     call<{ name: string }>("POST", `/projects/${pid}/branches`, { name, from_branch, from_version }),
+  // ---- branch merge ----
+  mergePreview: (pid: string, source: string, target: string) =>
+    call<MergePreview>("POST", `/projects/${pid}/merge/preview`, { source, target }),
+  /** AI-proposed resolution per conflict; engine "none" when no AI is configured. */
+  mergeSuggest: (pid: string, source: string, target: string) =>
+    call<{ suggestions: MergeSuggestion[]; engine: "llm" | "none" }>("POST", `/projects/${pid}/merge/suggest`, { source, target }),
+  mergeApply: (pid: string, source: string, target: string, resolutions: MergeResolution[], source_rev: number, target_rev: number) =>
+    call<MergeResult>("POST", `/projects/${pid}/merge/apply`, { source, target, resolutions, source_rev, target_rev }),
   analysis: (pid: string, branch: string) => call<Analysis>("GET", `/projects/${pid}/analysis`, undefined, b(branch)),
   promptTargets: () => call<{ key: string; name: string }[]>("GET", "/prompt-targets"),
   prompt: (pid: string, branch: string, node_ids: string[], requirement_ids: string[], target: string, extra: string) =>

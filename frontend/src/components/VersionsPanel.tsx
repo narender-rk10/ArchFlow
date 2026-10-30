@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { APPROVER_ROLES, can, type Activity, type Diff, type ReviewStatus, type Role, type Version, type VersionReview } from "../types";
+import { APPROVER_ROLES, can, type Activity, type Branch, type Diff, type ReviewStatus, type Role, type Version, type VersionReview } from "../types";
 
 interface Props {
   pid: string;
@@ -16,6 +16,9 @@ interface Props {
   onBranchFrom: (v: number, name: string) => void;
   /** A review action changed a version's status (refresh the list). */
   onReviewed: () => void;
+  branches?: Branch[];
+  /** Open the merge dialog for this source branch (absent when the role cannot edit). */
+  onMerge?: (source: string) => void;
 }
 
 const REVIEW_LABEL: Record<ReviewStatus, string> = {
@@ -34,12 +37,13 @@ function ago(iso: string) {
 }
 
 /** Saved versions of the architecture (snapshots you can compare, restore or branch from) and the activity log. */
-export function VersionsPanel({ pid, role, versions, activity, branch, headVersion, diff, onCommit, onDiff, onRestore, onBranchFrom, onReviewed }: Props) {
+export function VersionsPanel({ pid, role, versions, activity, branch, headVersion, diff, onCommit, onDiff, onRestore, onBranchFrom, onReviewed, branches = [], onMerge }: Props) {
   const [msg, setMsg] = useState("");
   const [open, setOpen] = useState<number | null>(null);
   const [branchName, setBranchName] = useState("experiment/");
   const [confirmRestore, setConfirmRestore] = useState<number | null>(null);
   const [showActivity, setShowActivity] = useState(false);
+  const [showBranches, setShowBranches] = useState(false);
 
   return (
     <div className="panel">
@@ -101,6 +105,26 @@ export function VersionsPanel({ pid, role, versions, activity, branch, headVersi
           </li>
         ))}
       </ul>
+
+      {branches.length > 1 && (
+        <>
+          <button className="section-toggle" onClick={() => setShowBranches(!showBranches)} aria-expanded={showBranches}>
+            {showBranches ? "▾" : "▸"} Branches <span className="muted small">{branches.length}</span>
+          </button>
+          {showBranches && (
+            <ul className="branch-list">
+              {branches.map((b) => (
+                <li key={b.name}>
+                  <span className="grow small mono">⎇ {b.name}</span>
+                  {b.name === branch && <span className="chip on">current</span>}
+                  {b.base_version !== null && <span className="muted tiny">from v{b.base_version}</span>}
+                  {onMerge && <button className="small" onClick={() => onMerge(b.name)} title={`Three-way merge ${b.name} into another branch`}>Merge into…</button>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
 
       <button className="section-toggle" onClick={() => setShowActivity(!showActivity)} aria-expanded={showActivity}>
         {showActivity ? "▾" : "▸"} Activity <span className="muted small">{activity.length}</span>

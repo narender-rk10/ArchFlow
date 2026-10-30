@@ -152,6 +152,7 @@ One assistant panel with three modes, docked **left**, **right** or **floating**
 
 - Save versions, restore any version (the state it replaces is saved first, so a restore can be undone), branch from any version, switch branches
 - **Structural diff** between versions or branches, rendered **on the canvas** (added / changed / removed ghosts) plus text
+- **Branch merge** — merge any branch into another (Versions → Branches → **Merge into…**) with a **three-way diff** from the last version both share (or the version the branch was created from). Changes made on one side merge automatically, field by field; the same field changed differently on both sides, or a component deleted on one side and changed on the other, is a **conflict** you resolve with base / ours / theirs side by side (or a custom value). Properties merge key by key, requirement links as sets; connections left without an end are dropped and listed. **Suggest with AI** proposes a resolution per conflict with a rationale (you still choose). The merge is applied as ordinary operations, so it is validated, attributed in the activity log and synced live; a safety version of the target is saved first, and the merge point is recorded so the next merge starts from there
 - **Activity history** — who changed what, and when, per branch
 - **Approvals** — a saved version moves **Draft → In review → Approved / Changes requested**. Editors request a review; reviewers, architects, admins and owners approve or request changes with a comment. The version's author cannot approve it (unless they are the org's only owner). Each org sets how many approvals a version needs (default 1) and whether a draft must be approved, with no changes since, before it is **adopted** into `main` (otherwise adopting returns 409). Every action is recorded (who, when, which version, comment), logged in the activity history and sent as an in-app notification; the badge shows in the version list, and the MCP tool `get_approval_status` reads it
 
@@ -232,7 +233,7 @@ One assistant panel with three modes, docked **left**, **right** or **floating**
 - **LLM follow-ups instead of fixed prompts** — starting prompts, follow-ups after each answer, design-chat next steps and comparison questions are written by the `assistant.suggestions` agent from the project's components, requirements, health issues and the last exchange (the rule-based ones remain only for offline use)
 - **The AI asks in bubbles** — in Edit mode clarifying questions arrive as chat bubbles with answers to tap; in Ask mode the assistant asks back when a question is ambiguous and offers quick replies; the Design interview asks multiple-choice questions
 - **Prompts in YAML, versioned** — `backend/archflow/prompts/<id>.yaml` holds every version of a prompt; released versions are locked by hash in `prompts.lock.json` (tests fail if one is edited), a change ships as a new version, and `ARCHFLOW_PROMPTS=compare.evaluate=v1` pins or rolls back without a deploy. Every usage row and trace records `id@version`
-- **Evals** — `uv run archflow-eval` runs 58 golden cases (`archflow/evals/datasets/*.yaml`: compare, ask, command, design, suggestions, review, lld, and an adversarial red-team suite with prompt injection, system-prompt extraction, canvas-wipe attempts and PII echo) across fintech, healthcare, e-commerce, IoT and AI-agent projects against your models with deterministic checks, and with `--ragas` adds RAGAS metrics (faithfulness, groundedness, answer accuracy, aspect critics) judged through the same gateway. `--suite review` runs one suite; `--prompt id=v2 --baseline old.json` A/B tests a prompt version; `--fail-under 0.7` gates CI (pushes to `main`, when a `GEMINI_API_KEY` secret is set)
+- **Evals** — `uv run archflow-eval` runs 58 golden cases (`archflow/evals/datasets/*.yaml`: compare, ask, command, design, suggestions, review, lld, merge, and an adversarial red-team suite with prompt injection, system-prompt extraction, canvas-wipe attempts and PII echo) across fintech, healthcare, e-commerce, IoT and AI-agent projects against your models with deterministic checks, and with `--ragas` adds RAGAS metrics (faithfulness, groundedness, answer accuracy, aspect critics) judged through the same gateway. `--suite review` runs one suite; `--prompt id=v2 --baseline old.json` A/B tests a prompt version; `--fail-under 0.7` gates CI (pushes to `main`, when a `GEMINI_API_KEY` secret is set)
 - **Traces** — each run records **who asked**, **what they asked**, **what the AI answered**, the full input and output, every LLM call (model, tokens, cost, latency), every tool and API call (arguments, result), and the prompt version. Agents fired in parallel (the AI review, the Jev + LLM comparison panel) appear as one run with its child agents. Admins browse them under **Traces** on the home page, filter by person, feature or status, and see the prompt catalog; **Usage & budget** breaks spend down by feature, model, project, prompt version and person. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to also export the agents' OpenTelemetry spans to Langfuse, Phoenix, Jaeger or Logfire
 
 ```bash
@@ -654,6 +655,7 @@ ArchFlow/
 │   │   ├── ai_providers.py      # Provider catalog, model ids, endpoint guard
 │   │   ├── usage.py             # AI spend tracking and budgets
 │   │   ├── decisions.py         # ADRs, compare drafts, adopt
+│   │   ├── merge.py             # Branch merge: three-way diff, conflicts, AI-suggested resolutions
 │   │   ├── evaluation.py        # Draft scoring (LLM or heuristic)
 │   │   ├── openspec_service.py  # OpenSpec workflow (Vibe code)
 │   │   ├── vibe.py · change_spec.py  # Quick briefs and change specs
@@ -738,14 +740,13 @@ An end-to-end AI evaluation on a complex spec (a multi-region telehealth platfor
 
 The full production plan is in [docs/production-plan.md](docs/production-plan.md). In rough order of leverage:
 
-1. **Branch merge** with three-way diff and AI-assisted conflict resolution
-2. **Comments, @mentions and approval workflows** on any object; per-project role overrides, SSO
-3. **Repository analysis**: GitHub App, drift on every push/PR, PR review comments
-4. **Jira sync** — epics/stories from requirements, with status reflected on the canvas
-5. **More diagrams** from the same model: sequence, C4, ER, deployment, agent graph, MCP topology
-6. **Document intake** — SRS/PDF → requirements; meeting transcripts → live canvas
-7. **Generation** of tests, infrastructure as code and documentation (SRS/BRD/runbooks)
-8. **Scale-out** — shared Redis for rate limits, jobs and real-time fan-out across API instances
+1. **Comments, @mentions and approval workflows** on any object; per-project role overrides, SSO
+2. **Repository analysis**: GitHub App, drift on every push/PR, PR review comments
+3. **Jira sync** — epics/stories from requirements, with status reflected on the canvas
+4. **More diagrams** from the same model: sequence, C4, ER, deployment, agent graph, MCP topology
+5. **Document intake** — SRS/PDF → requirements; meeting transcripts → live canvas
+6. **Generation** of tests, infrastructure as code and documentation (SRS/BRD/runbooks)
+7. **Scale-out** — shared Redis for rate limits, jobs and real-time fan-out across API instances
 
 ---
 

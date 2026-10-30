@@ -34,6 +34,7 @@ import { Inspector } from "./Inspector";
 import { IssuesPanel } from "./IssuesPanel";
 import type { EntityLinks } from "./Markdown";
 import { MemoryDialog } from "./MemoryDialog";
+import { MergeDialog } from "./MergeDialog";
 import { DRAG_MIME, Palette } from "./Palette";
 import { RequirementsPanel } from "./RequirementsPanel";
 import { VersionsPanel } from "./VersionsPanel";
@@ -99,6 +100,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const [traced, setTraced] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [diff, setDiff] = useState<{ from: number; data: Diff } | null>(null);
+  const [mergeSource, setMergeSource] = useState<string | null>(null);
   const [promptFor, setPromptFor] = useState<{ nodeIds: string[]; requirementIds: string[] } | null>(null);
   const [memory, setMemory] = useState<MemoryItem[]>([]);
   const [comments, setComments] = useState<Comment[]>([]);
@@ -855,7 +857,8 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         )}
         {tab === "versions" && (
           <VersionsPanel pid={pid} role={role} versions={versions} activity={activity} branch={branch} headVersion={headVersion} diff={diff}
-            onCommit={commit} onDiff={showDiff} onRestore={restore} onBranchFrom={(v, name) => createBranch(name, v)} onReviewed={refreshMeta} />
+            onCommit={commit} onDiff={showDiff} onRestore={restore} onBranchFrom={(v, name) => createBranch(name, v)} onReviewed={refreshMeta}
+            branches={branches} onMerge={readOnly ? undefined : setMergeSource} />
         )}
         {tab === "decisions" && (
           <DecisionsPanel pid={pid} branches={branches} user={user} role={role ?? undefined} toast={toast}
@@ -967,6 +970,18 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
       {memoryOpen && (
         <MemoryDialog pid={pid} branch={branch} items={memory} readOnly={readOnly} onChanged={loadMemory}
           onClose={() => setMemoryOpen(false)} />
+      )}
+      {mergeSource && (
+        <MergeDialog pid={pid} branches={branches} source={mergeSource}
+          target={mergeSource !== branch ? branch : branches.some((b) => b.name === "main") && branch !== "main" ? "main" : branches.find((b) => b.name !== mergeSource)?.name ?? branch}
+          onClose={() => setMergeSource(null)}
+          onMerged={(r) => {
+            setMergeSource(null);
+            refreshMeta();
+            toast(`Merged ${r.source_branch} into ${r.branch} · v${r.version}${r.conflicts_resolved ? ` (${r.conflicts_resolved} conflict(s) resolved)` : ""}`);
+            // show what the merge changed on the canvas, like "Compare with now"
+            if (r.branch === branch && r.safety_version !== null) showDiff(r.safety_version);
+          }} />
       )}
       {promptFor && <PromptDialog pid={pid} branch={branch} nodeIds={promptFor.nodeIds} requirementIds={promptFor.requirementIds} readOnly={readOnly}
         onClose={() => setPromptFor(null)} />}

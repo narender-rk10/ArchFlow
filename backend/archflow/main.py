@@ -28,6 +28,7 @@ from . import (accounts, ai, approvals, openspec_service, diagram_export, auth, 
 from .analysis import full_analysis, trace_requirement
 from .codegraph.service import CodeGraphService
 from .codegraph.service import register_routes as register_codegraph_routes
+from .merge import register_routes as register_merge_routes
 from .authz import ROLES, Access, Authz, CSRFMiddleware, can, cap_scopes
 from .diff import diff_states, diff_to_text
 from .mcp_remote import Services, build_remote_mcp
@@ -617,6 +618,8 @@ def create_app(store: Store | None = None) -> FastAPI:
     approvals.register_routes(app, store, authz=authz, broadcast=broadcast_room)
     suggestions.register_routes(app, store, authz=authz, state_or_404=state_or_404)
     review.register_routes(app, store, authz=authz, state_or_404=state_or_404)
+    # branch merge: three-way diff, conflict resolution (optionally AI-assisted), applied as ops (merge.py)
+    register_merge_routes(app, store, authz=authz, commit_ops=commit_ops, broadcast=broadcast_room)
 
     # ---- OpenSpec: spec-driven changes stored per project (openspec_service.py) ----
     def openspec_context(pid: str, branch: str) -> dict[str, Any]:
