@@ -38,7 +38,7 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
@@ -79,7 +79,7 @@ jobs:
         run: echo "::notice::GEMINI_API_KEY is not set; skipping the AI evals."
       - uses: actions/checkout@v4
         if: env.GEMINI_API_KEY != ''
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         if: env.GEMINI_API_KEY != ''
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -129,7 +129,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
@@ -174,7 +174,7 @@ jobs:
       ARCHFLOW_API: http://localhost:8000
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
