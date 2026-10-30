@@ -6,6 +6,10 @@ tool calls are read from the run's messages afterwards. Finished traces go to a 
 ``main.create_app`` (the store's ``ai_traces`` table) and, when OpenTelemetry is configured, Pydantic AI's own
 spans are exported too (``setup_otel``).
 
+What the gateway redacted from the run's requests and masked in its answers is counted per category in
+``metadata.redactions`` / ``metadata.masked_secrets`` (counts only, never values), and prompt-injection signals found
+in untrusted content in ``metadata.injection`` ([{source, signals}]).
+
 Environment:
     ARCHFLOW_TRACES            full (default) | metadata (no prompt/response text) | off
     ARCHFLOW_TRACE_MAX_CHARS   per-field cap on stored text (default 20000)
@@ -26,7 +30,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterator
 
-from .. import llm
+from .. import llm, redact
 
 log = logging.getLogger("archflow.traces")
 
@@ -178,8 +182,22 @@ def trace_run(prompt_ref: str, agent: str, *, org_id: str | None, input: Any, qu
         if event["model"] and event["model"] not in tr.models:
             tr.models.append(event["model"])
 
+    def on_redact(event: dict[str, Any]) -> None:
+        for key, field_ in (("redacted", "redactions"), ("masked", "masked_secrets")):
+            if event.get(key):
+                counts = tr.metadata.setdefault(field_, {})
+                for kind, n in event[key].items():
+                    counts[kind] = counts.get(kind, 0) + int(n)
+        for hit in event.get("injection") or []:
+            seen = tr.metadata.setdefault("injection", [])
+            same = next((h for h in seen if h["source"] == hit["source"]), None)
+            if same is None:
+                seen.append({"source": hit["source"], "signals": list(hit["signals"])})
+            else:
+                same["signals"] = sorted(set(same["signals"]) | set(hit["signals"]))
+
     try:
-        with llm.observe_calls(on_call):
+        with llm.observe_calls(on_call), redact.observe(on_redact):
             yield tr
         if tr.status == "running":
             tr.status = "ok"

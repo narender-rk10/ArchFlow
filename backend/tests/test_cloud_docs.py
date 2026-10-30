@@ -84,7 +84,8 @@ def test_search_tool_and_arguments_follow_each_server():
 # ---------------------------------------------------------------- lookups
 def test_references_block_cites_title_source_and_url(docs_on):
     block, calls = cloud_docs.references(DocsRequest("secure ingress", about="Front Door, AKS"))
-    assert block.startswith("<cloud_docs>\n[1] Use Azure Front Door to secure AKS workloads (Microsoft Learn)\n")
+    assert block.startswith('<untrusted_data source="cloud_docs"') and block.endswith("</cloud_docs>\n</untrusted_data>")
+    assert "\n<cloud_docs>\n[1] Use Azure Front Door to secure AKS workloads (Microsoft Learn)\n" in block
     assert "https://learn.microsoft.com/azure/well-architected/service-guides/azure-front-door" in block
     assert [c["source"] for c in calls] == ["Microsoft Learn"] and calls[0]["results"] == 2
     assert docs_on == [("https://learn.microsoft.com/api/mcp", "Azure Front Door AKS secure ingress")]

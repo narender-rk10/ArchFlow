@@ -1,7 +1,7 @@
 """Official cloud documentation as context for the AI, from the providers' MCP servers.
 
 When a request is about Azure or AWS, the agents get the top matching official documents (reference
-architectures, service guides, Well-Architected guidance) as a ``<cloud_docs>`` block in their prompt, so service
+architectures, service guides, Well-Architected guidance) as a ``<cloud_docs>`` block in their prompt (wrapped as untrusted data, ``untrusted.wrap``), so service
 choices, limits and best practices follow current documentation rather than the model's memory.
 
 Sources (Streamable HTTP, no authentication; each can be replaced or turned off):
@@ -28,6 +28,8 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
+
+from . import untrusted
 
 log = logging.getLogger("archflow.cloud_docs")
 
@@ -240,7 +242,8 @@ def _clip(text: str, n: int) -> str:
 
 
 def block(docs_by_cloud: dict[str, list[dict[str, str]]]) -> str:
-    """The ``<cloud_docs>`` prompt block ('' when nothing was found)."""
+    """The ``<cloud_docs>`` prompt block ('' when nothing was found), inside an ``<untrusted_data>`` block: the
+    documents come from outside ArchFlow and must not be able to instruct the model."""
     parts, used, n = [], 0, 0
     seen: set[str] = set()
     for cloud, docs in docs_by_cloud.items():
@@ -256,7 +259,7 @@ def block(docs_by_cloud: dict[str, list[dict[str, str]]]) -> str:
             used += len(entry)
     if not parts:
         return ""
-    return "<cloud_docs>\n" + "\n\n".join(parts) + "\n</cloud_docs>"
+    return untrusted.wrap("<cloud_docs>\n" + "\n\n".join(parts) + "\n</cloud_docs>", "cloud_docs")
 
 
 def query_for(cloud: str, query: str, about: str = "", services: int = 4) -> str:

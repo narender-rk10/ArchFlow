@@ -547,6 +547,7 @@ claude mcp add --transport http archflow http://localhost:8000/mcp --header "Aut
 | `ARCHFLOW_DOCS` | on | `off` stops the cloud-documentation lookups (they are also off with `ARCHFLOW_AI=offline`) |
 | `ARCHFLOW_DOCS_AZURE` | `https://learn.microsoft.com/api/mcp` | Azure documentation MCP server (URL, `stdio:<command>` or `off`) |
 | `ARCHFLOW_DOCS_AWS` | `https://knowledge-mcp.global.api.aws` | AWS documentation MCP server, e.g. `stdio:uvx awslabs.aws-documentation-mcp-server@latest` for the local one |
+| `ARCHFLOW_REDACT` | `on` | What is removed from every model request: `on` (emails, phone, card and IBAN numbers, put back into the answer; and secrets — cloud/API keys, tokens, JWTs, private keys, `password=…` — never sent nor returned), `secrets` (secrets only) or `off`. Secrets in answers are masked; counts per category and prompt-injection signals in untrusted content are recorded in the run's trace |
 | `ARCHFLOW_PROMPTS` | — | Pin prompt versions, e.g. `compare.evaluate=v1,design.turn=v2` (default: each prompt's `active` version) |
 | `ARCHFLOW_TRACES` | `full` | Agent traces: `full` (with prompt and response text), `metadata` (tokens, cost, timings only) or `off` |
 | `ARCHFLOW_TRACE_RETENTION_DAYS` | `30` | How long traces are kept |

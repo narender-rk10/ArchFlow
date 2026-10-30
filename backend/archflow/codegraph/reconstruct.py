@@ -51,7 +51,7 @@ from collections import Counter, defaultdict
 from pathlib import PurePosixPath
 from typing import Any
 
-from .. import catalog, llm
+from .. import catalog, llm, untrusted
 from ..models import ProjectState
 from ..ops import apply_ops, slugify
 from . import detect
@@ -753,7 +753,9 @@ def refine(recon: dict[str, Any], graph: dict[str, Any], org_id: str | None = No
     try:
         from .. import agents
 
-        data = agents.run_json(REFINE_PROMPT, REFINE_SCHEMA, org_id=org_id, variables={"prompt": prompt[:12000]})
+        # Names, paths and symbols come from the repository: passed as untrusted data (prompt-injection defence)
+        data = agents.run_json(REFINE_PROMPT, REFINE_SCHEMA, org_id=org_id,
+                               variables={"prompt": untrusted.wrap(prompt[:12000], "code")})
     except Exception as exc:  # silent fallback: refinement is cosmetic
         log.info("reconstruction refinement skipped: %s", exc)
         return "offline"
