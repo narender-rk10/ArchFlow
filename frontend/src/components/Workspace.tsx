@@ -286,6 +286,10 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
     } catch { /* storage unavailable */ }
   }, [pid, branch, openThread]);
   const openNotification = (n: AppNotification) => {
+    if (n.version != null) {  // a version review: open the versions panel (it lists every branch's versions)
+      if (n.project_id === pid) { refreshMeta(); setTab("versions"); } else onOpenProject(n.project_id, n.branch);
+      return;
+    }
     if (n.project_id === pid && n.branch === branch) { loadComments(); openThread(n.thread_id); return; }
     try { sessionStorage.setItem(OPEN_THREAD_KEY, JSON.stringify({ pid: n.project_id, thread: n.thread_id })); } catch { /* ignore */ }
     if (n.project_id === pid) onBranch(n.branch); else onOpenProject(n.project_id, n.branch);
@@ -850,8 +854,8 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
             onChanged={loadComments} onShowNode={(id) => focusNodes([id])} toast={toast} />
         )}
         {tab === "versions" && (
-          <VersionsPanel versions={versions} activity={activity} branch={branch} headVersion={headVersion} diff={diff}
-            onCommit={commit} onDiff={showDiff} onRestore={restore} onBranchFrom={(v, name) => createBranch(name, v)} />
+          <VersionsPanel pid={pid} role={role} versions={versions} activity={activity} branch={branch} headVersion={headVersion} diff={diff}
+            onCommit={commit} onDiff={showDiff} onRestore={restore} onBranchFrom={(v, name) => createBranch(name, v)} onReviewed={refreshMeta} />
         )}
         {tab === "decisions" && (
           <DecisionsPanel pid={pid} branches={branches} user={user} role={role ?? undefined} toast={toast}

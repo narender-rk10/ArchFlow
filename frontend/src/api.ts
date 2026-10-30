@@ -5,6 +5,7 @@ import type { ComponentViews, LldResult } from "./types";
 import type { CodeGraphRecord, CodeJob, CodeOverview, DriftResult, ImpactResult, ReconstructResult } from "./types";
 import type { Conversation, ConversationKind, ConversationMessage, MemoryCategory, MemoryItem } from "./types";
 import type { OpenSpecChange, OpenSpecJob, OpenSpecOverview } from "./types";
+import type { ApprovalPolicy, VersionReview } from "./types";
 import type { AIUsageReport, AiSuggestion, AiTrace, AiTraceList, PromptInfo, ReviewResult, SuggestionMode } from "./types";
 
 export class ApiError extends Error {
@@ -241,6 +242,14 @@ export const api = {
   deleteComment: (pid: string, id: string) => call<null>("DELETE", `/projects/${pid}/comments/${id}`),
   notifications: () => call<{ items: AppNotification[]; unread: number }>("GET", "/notifications"),
   readNotifications: (ids?: number[]) => call<{ unread: number }>("POST", "/notifications/read", { ids: ids ?? null }),
+
+  // ---- version approvals ----
+  versionReview: (pid: string, version: number) => call<VersionReview>("GET", `/projects/${pid}/versions/${version}/review`),
+  reviewVersion: (pid: string, version: number, action: "request-review" | "approve" | "request-changes", comment = "") =>
+    call<VersionReview>("POST", `/projects/${pid}/versions/${version}/${action}`, { comment }),
+  approvalPolicy: (org: string) => call<ApprovalPolicy>("GET", `/orgs/${org}/approval-policy`),
+  setApprovalPolicy: (org: string, required_approvals: number, require_for_adopt: boolean) =>
+    call<ApprovalPolicy>("PUT", `/orgs/${org}/approval-policy`, { required_approvals, require_for_adopt }),
 
   // ---- architecture decisions ----
   decisions: (pid: string) => call<Decision[]>("GET", `/projects/${pid}/decisions`),

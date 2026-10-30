@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from . import (accounts, ai, openspec_service, diagram_export, auth, catalog, chat, collab_sync, comments, conversations, decisions, lld, llm,
+from . import (accounts, ai, approvals, openspec_service, diagram_export, auth, catalog, chat, collab_sync, comments, conversations, decisions, lld, llm,
                observability, review, secrets_box, suggestions, usage, users)
 from .analysis import full_analysis, trace_requirement
 from .codegraph.service import CodeGraphService
@@ -331,7 +331,7 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     @app.get("/api/projects/{pid}/versions")
     def versions(pid: str, a: Access = Depends(read)):
-        return store.list_versions(pid)
+        return approvals.with_status(store, a.org_id, pid, store.list_versions(pid))
 
     def resolve_ref(pid: str, branch: str, ref: str) -> ProjectState:
         """'working' = branch working state; 'N' or 'vN' = version N; 'branch:<name>' = another branch."""
@@ -614,6 +614,7 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     decisions.register_routes(app, store, authz=authz, sync_to_live_doc=sync_to_live_doc, broadcast=broadcast_room)
     comments.register_routes(app, store, authz=authz, broadcast=broadcast_room)
+    approvals.register_routes(app, store, authz=authz, broadcast=broadcast_room)
     suggestions.register_routes(app, store, authz=authz, state_or_404=state_or_404)
     review.register_routes(app, store, authz=authz, state_or_404=state_or_404)
 

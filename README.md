@@ -153,6 +153,7 @@ One assistant panel with three modes, docked **left**, **right** or **floating**
 - Save versions, restore any version (the state it replaces is saved first, so a restore can be undone), branch from any version, switch branches
 - **Structural diff** between versions or branches, rendered **on the canvas** (added / changed / removed ghosts) plus text
 - **Activity history** — who changed what, and when, per branch
+- **Approvals** — a saved version moves **Draft → In review → Approved / Changes requested**. Editors request a review; reviewers, architects, admins and owners approve or request changes with a comment. The version's author cannot approve it (unless they are the org's only owner). Each org sets how many approvals a version needs (default 1) and whether a draft must be approved, with no changes since, before it is **adopted** into `main` (otherwise adopting returns 409). Every action is recorded (who, when, which version, comment), logged in the activity history and sent as an in-app notification; the badge shows in the version list, and the MCP tool `get_approval_status` reads it
 
 ---
 
@@ -259,10 +260,10 @@ uv run --with ragas==0.3.9 --with "langchain-community>=0.3,<0.4" archflow-eval 
 | Role | Can |
 |---|---|
 | viewer | Read projects, versions, diffs, analysis, decisions and members; ask the AI questions; connect MCP agents read-only |
-| reviewer | viewer + change a decision's status (accept / reject / supersede) |
-| developer | Edit the canvas, requirements, versions, branches; AI commands, design chat, convert, low-level design, decisions, code analysis |
-| architect | Same as developer (reserved for per-project overrides) |
-| admin | + members and roles (up to admin), invite links, access tokens and connected apps, AI settings and budget, delete projects |
+| reviewer | viewer + change a decision's status (accept / reject / supersede); approve versions or request changes |
+| developer | Edit the canvas, requirements, versions, branches; request version reviews; AI commands, design chat, convert, low-level design, decisions, code analysis |
+| architect | developer + approve versions or request changes |
+| admin | + members and roles (up to admin), invite links, access tokens and connected apps, AI settings and budget, approval settings, delete projects |
 | owner | + rename the org, grant/remove the owner role (an org always keeps one owner) |
 
 ---

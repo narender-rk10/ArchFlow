@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from . import approvals
 from . import evaluation as evaluation_mod
 from . import llm
 from .models import ProjectState
@@ -278,6 +279,7 @@ def register_routes(app: FastAPI, store: Any, *, authz: Any,
         target = body.target_branch
         if source == target:
             raise HTTPException(422, f"the chosen branch is already '{target}'")
+        approvals.check_adopt(store, a.org_id, pid, source)  # 409 unless approved, when the org requires it
         chosen_state = store.get_state(pid, source)
         current = store.get_state(pid, target)
         if current is None:

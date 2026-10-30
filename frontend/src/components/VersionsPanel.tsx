@@ -1,7 +1,10 @@
-import { useState } from "react";
-import type { Activity, Diff, Version } from "../types";
+import { useEffect, useState } from "react";
+import { api } from "../api";
+import { APPROVER_ROLES, can, type Activity, type Diff, type ReviewStatus, type Role, type Version, type VersionReview } from "../types";
 
 interface Props {
+  pid: string;
+  role: Role | null;
   versions: Version[];
   activity: Activity[];
   branch: string;
@@ -11,7 +14,14 @@ interface Props {
   onDiff: (v: number | null) => void;
   onRestore: (v: number) => void;
   onBranchFrom: (v: number, name: string) => void;
+  /** A review action changed a version's status (refresh the list). */
+  onReviewed: () => void;
 }
+
+const REVIEW_LABEL: Record<ReviewStatus, string> = {
+  draft: "Draft", in_review: "In review", approved: "Approved", changes_requested: "Changes requested",
+};
+const ACTION_LABEL = { request: "requested review", approve: "approved", request_changes: "requested changes" };
 
 const BRANCH_RE = /^(?=.{1,60}$)[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 
@@ -24,7 +34,7 @@ function ago(iso: string) {
 }
 
 /** Saved versions of the architecture (snapshots you can compare, restore or branch from) and the activity log. */
-export function VersionsPanel({ versions, activity, branch, headVersion, diff, onCommit, onDiff, onRestore, onBranchFrom }: Props) {
+export function VersionsPanel({ pid, role, versions, activity, branch, headVersion, diff, onCommit, onDiff, onRestore, onBranchFrom, onReviewed }: Props) {
   const [msg, setMsg] = useState("");
   const [open, setOpen] = useState<number | null>(null);
   const [branchName, setBranchName] = useState("experiment/");
@@ -61,6 +71,11 @@ export function VersionsPanel({ versions, activity, branch, headVersion, diff, o
               <span className="grow small version-msg">{v.message}</span>
               {v.number === headVersion && <span className="chip on">latest</span>}
               {v.branch !== branch && <span className="chip mono">{v.branch}</span>}
+              {v.review && (
+                <span className={`status rv-${v.review.status}`} title={`${v.review.approvals} of ${v.review.required} approvals`}>
+                  {REVIEW_LABEL[v.review.status]}{v.review.status === "in_review" && v.review.required > 1 ? ` ${v.review.approvals}/${v.review.required}` : ""}
+                </span>
+              )}
             </button>
             <div className="muted tiny">{v.author} · {ago(v.created_at)}</div>
             {open === v.number && (
@@ -80,6 +95,7 @@ export function VersionsPanel({ versions, activity, branch, headVersion, diff, o
                   <input value={branchName} onChange={(e) => setBranchName(e.target.value)} aria-label="New branch name" />
                   <button className="small" disabled={!BRANCH_RE.test(branchName.trim())}>New branch from v{v.number}</button>
                 </form>
+                <ReviewBox pid={pid} role={role} version={v} onReviewed={onReviewed} />
               </div>
             )}
           </li>
@@ -99,6 +115,66 @@ export function VersionsPanel({ versions, activity, branch, headVersion, diff, o
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+/**
+ * A version's review: its history, and the actions your role allows. Editors request a review (again after changes
+ * were requested); reviewers, architects, admins and owners approve or request changes. The server enforces the
+ * rules (e.g. you cannot approve a version you saved) and its message is shown here.
+ */
+function ReviewBox({ pid, role, version, onReviewed }: { pid: string; role: Role | null; version: Version; onReviewed: () => void }) {
+  const [review, setReview] = useState<VersionReview | null>(null);
+  const [comment, setComment] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    api.versionReview(pid, version.number).then(setReview).catch((e) => setError(e.message));
+  }, [pid, version.number, version.review?.status, version.review?.approvals]);
+
+  const run = async (action: "request-review" | "approve" | "request-changes") => {
+    if (action === "request-changes" && !comment.trim()) { setError("Say what needs to change."); return; }
+    setBusy(true); setError("");
+    try { setReview(await api.reviewVersion(pid, version.number, action, comment.trim())); setComment(""); onReviewed(); }
+    catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const r = review;
+  const canRequest = can(role, "edit") && !!r && (r.status === "draft" || r.status === "changes_requested");
+  const canDecide = !!role && APPROVER_ROLES.includes(role) && r?.status === "in_review";
+  return (
+    <div className="review-box">
+      <div className="row between">
+        <b className="small">Review</b>
+        {r && <span className="muted tiny">{r.approvals.length}/{r.required} approval{r.required === 1 ? "" : "s"}
+          {r.approvals.length > 0 && <> · {r.approvals.map((x) => x.name).join(", ")}</>}</span>}
+      </div>
+      {r && r.history.length > 0 && (
+        <ul className="review-history">
+          {r.history.map((h) => (
+            <li key={h.id} className="small">
+              <b>{h.actor_name}</b> {ACTION_LABEL[h.action]} <span className="muted tiny">· {ago(h.created_at)}</span>
+              {h.comment && <div className="review-comment">{h.comment}</div>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {(canRequest || canDecide) && (
+        <>
+          <textarea rows={2} placeholder={canDecide ? "Comment (required to request changes)" : "Note for reviewers (optional)"}
+            value={comment} onChange={(e) => setComment(e.target.value)} aria-label="Review comment" />
+          <div className="row gap wrap">
+            {canRequest && <button className="small primary" disabled={busy} onClick={() => run("request-review")}>Request review</button>}
+            {canDecide && <button className="small primary" disabled={busy} onClick={() => run("approve")}>Approve</button>}
+            {canDecide && <button className="small" disabled={busy} onClick={() => run("request-changes")}>Request changes</button>}
+          </div>
+        </>
+      )}
+      {r && !canRequest && !canDecide && r.status === "in_review" && <p className="muted tiny">Waiting for a reviewer.</p>}
+      {error && <p className="error small">{error}</p>}
     </div>
   );
 }
