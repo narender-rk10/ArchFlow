@@ -19,7 +19,7 @@ import logging
 import re
 from typing import Any
 
-from .models import NODE_TYPES, ProjectState
+from .models import NODE_TYPES, ProjectState, active_requirements
 from .ops import slugify
 
 log = logging.getLogger("archflow.chat")
@@ -396,11 +396,12 @@ def _schema() -> dict[str, Any]:
 
 
 def _project_summary(state: ProjectState) -> str:
-    if not state.nodes and not state.requirements:
+    reqs = active_requirements(state)
+    if not state.nodes and not reqs:
         return "The project is empty."
     return json.dumps({
         "components": [f"{n.name} ({n.type}, {n.technology})" for n in state.nodes.values()],
-        "requirements": [f"{r.id} {r.title}" for r in state.requirements.values()]})
+        "requirements": [f"{r.id} {r.title}" for r in reqs.values()]})
 
 
 def llm_turn(turns: list[dict[str, Any]], state: ProjectState, org_id: str | None = None,
@@ -495,7 +496,7 @@ def architecture_ops(state: ProjectState, option: dict[str, Any], requirements: 
                 if not n.parent_id or n.parent_id not in state.nodes]
 
     # Requirements: skip titles that already exist; pre-assign IDs so components can link to them.
-    existing = {r.title.strip().lower(): r.id for r in state.requirements.values()}
+    existing = {r.title.strip().lower(): r.id for r in active_requirements(state).values()}
     nums = [int(m.group(1)) for rid in state.requirements if (m := re.match(r"REQ-(\d+)$", rid))]
     n = max(nums) if nums else 0
     linked: list[tuple[str, dict]] = []  # (requirement id, requirement) for traceability

@@ -21,7 +21,7 @@ import re
 from typing import Any
 
 from . import agents, cloud_docs, llm
-from .models import LLD_TYPES, Node, ProjectState
+from .models import LLD_TYPES, Node, ProjectState, without_deleted
 from .ops import descendants, resolve_node, slugify
 
 log = logging.getLogger("archflow.lld")
@@ -474,7 +474,8 @@ def build(state: ProjectState, node_ref: str, replace: bool = False,
         raise KeyError(node_ref)
     if children(state, node.id) and not replace:
         raise LLDError(f"'{node.name}' already has a low-level design; pass replace=true to regenerate it")
-    design, engine = generate_design(state, node, org_id)
+    active = without_deleted(state)  # designs never cite soft-deleted requirements
+    design, engine = generate_design(active, active.nodes[node.id], org_id)
     ops = design_ops(state, node, design, replace)
     counts: dict[str, int] = {}
     for e in design["elements"]:
@@ -500,6 +501,7 @@ def _q(text: str) -> str:
 
 
 def api_view(state: ProjectState, node: Node) -> list[dict[str, Any]]:
+    state = without_deleted(state)
     eps = [c for c in children(state, node.id) if c.type == "endpoint"]
     rows = []
     for e in eps:

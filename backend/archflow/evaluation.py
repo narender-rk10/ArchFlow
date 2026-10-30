@@ -36,7 +36,7 @@ from typing import Any
 from . import agents, jev, llm
 from .agents import tracing
 from .analysis import health, validate_architecture
-from .models import ProjectState
+from .models import ProjectState, active_requirements
 
 log = logging.getLogger("archflow.evaluation")
 
@@ -96,7 +96,7 @@ def architecture_summary(state: ProjectState, limit: int = 80) -> dict[str, Any]
 
 def requirements_summary(state: ProjectState) -> list[dict[str, Any]]:
     out = []
-    for r in state.requirements.values():
+    for r in active_requirements(state).values():
         item: dict[str, Any] = {"id": r.id, "title": r.title, "kind": r.kind, "priority": r.priority}
         if r.category:
             item["category"] = r.category
@@ -114,7 +114,7 @@ def merged_requirements(base: ProjectState | None, alternatives: dict[str, Proje
     for st in [base, *alternatives.values()]:
         if st is None:
             continue
-        for rid, r in st.requirements.items():
+        for rid, r in active_requirements(st).items():
             out.requirements.setdefault(rid, r)
     return out
 
@@ -144,7 +144,7 @@ def _num(value: Any) -> float | None:
 
 def criterion_weights(requirements: ProjectState) -> dict[str, float]:
     w = {c: 1.0 for c in CRITERIA}
-    for r in requirements.requirements.values():
+    for r in active_requirements(requirements).values():
         if r.kind != "non_functional":
             continue
         crit = NFR_WEIGHTS.get(r.category.lower().strip())

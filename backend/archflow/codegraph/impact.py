@@ -101,7 +101,7 @@ def impact(graph: dict[str, Any], recon: dict[str, Any], code_state: ProjectStat
     req_ids: list[str] = []
     for did in designed_ids:
         for rid in designed.nodes[did].requirement_ids:
-            if rid in designed.requirements and rid not in req_ids:
+            if rid in designed.requirements and not designed.requirements[rid].deleted and rid not in req_ids:
                 req_ids.append(rid)
     code_names = {n["id"]: n["name"] for n in recon["nodes"]}
     return {

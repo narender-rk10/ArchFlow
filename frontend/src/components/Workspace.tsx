@@ -16,7 +16,7 @@ import { useRealtime } from "../realtime";
 import type {
   Activity, Analysis, ArchNode, Branch, Catalog, CatalogItem, Diff, Issue, Me, MemoryItem, Op, Project, Role, User, Version,
 } from "../types";
-import { can } from "../types";
+import { activeRequirements, can } from "../types";
 import { UserMenu } from "./UserMenu";
 import { ArchNodeComponent, TYPE_META, type ArchFlowNode, type DiffMark } from "./ArchNode";
 import { CodeDialog } from "./CodeDialog";
@@ -297,7 +297,11 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const rt = useRealtime(pid, branch, user, {
     onActivity: () => {
       window.clearTimeout(activityTimer.current);
-      activityTimer.current = window.setTimeout(() => api.activity(pid, branch).then(setActivity).catch(() => {}), 400);
+      activityTimer.current = window.setTimeout(() => {
+        api.activity(pid, branch).then(setActivity).catch(() => {});
+        // server-side changes (e.g. Mark reviewed) may not touch the live document, so refresh the checks too
+        api.analysis(pid, branch).then(setAnalysis).catch(() => {});
+      }, 400);
     },
     onVersions: refreshMeta,
     onConversation: (id) => { assistant.onRemote(id); setDesignRemote({ id, at: Date.now() }); },
@@ -363,6 +367,18 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
     return m;
   }, [analysis]);
 
+  // Stale requirement links per component (a requirement changed after the component did).
+  const staleByNode = useMemo(() => {
+    const m: Record<string, string[]> = {};
+    for (const l of analysis?.stale_links ?? []) (m[l.node_id] ??= []).push(l.requirement_id);
+    return m;
+  }, [analysis]);
+  const markReviewed = useCallback((nodeId: string, requirementId?: string) => {
+    api.ops(pid, branch, [{ op: "mark_reviewed", id: nodeId, ...(requirementId ? { requirement_id: requirementId } : {}) }], user.name)
+      .then(() => api.analysis(pid, branch).then(setAnalysis))
+      .catch((e) => toast(`⚠ ${(e as Error).message}`));
+  }, [pid, branch, user.name, toast]);
+
   // Open comment threads per component (the canvas shows a badge; clicking it opens the newest thread).
   const commentsByNode = useMemo(() => {
     const m: Record<string, string[]> = {};
@@ -411,7 +427,8 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           data: {
             model: m, dimmed: !!highlight && !highlight.has(m.id), highlighted: !!highlight?.has(m.id),
             diff: mark(m.id, d?.nodes), remote: remoteByNode[m.id], issues: issuesByNode[m.id],
-            childCount: childCount[m.id],
+            childCount: childCount[m.id], stale: staleByNode[m.id],
+            requirementIds: m.requirement_ids.filter((r) => !state.requirements[r]?.deleted),
             comments: commentsByNode[m.id]?.length, onComments: commentsByNode[m.id] ? () => openThread(commentsByNode[m.id].at(-1)!) : undefined,
           },
         };
@@ -451,7 +468,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
       }
       return out;
     });
-  }, [state, diff, highlight, remoteByNode, issuesByNode, level, levelOf, childCount, commentsByNode, openThread]);
+  }, [state, diff, highlight, remoteByNode, issuesByNode, level, levelOf, childCount, commentsByNode, openThread, staleByNode]);
 
 
   const selectedNodeIds = useMemo(() => nodes.filter((n) => n.selected && !n.id.startsWith("ghost:")).map((n) => n.id), [nodes]);
@@ -676,7 +693,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         <DesignChat pid={pid} branch={branch} user={user} aiAvailable={ai?.available ?? true} canvasEmpty={canvasEmpty}
           remote={designRemote}
           context={{ name: project?.name ?? "", description: project?.description ?? "", components: Object.keys(state.nodes).length,
-            requirements: Object.values(state.requirements).map((r) => ({ id: r.id, title: r.title })).sort((x, y) => x.id.localeCompare(y.id)) }}
+            requirements: activeRequirements(state).map((r) => ({ id: r.id, title: r.title })).sort((x, y) => x.id.localeCompare(y.id)) }}
           onApplied={(r) => {
             if (r.branch !== branch) { onBranch(r.branch); return; }
             refreshMeta();
@@ -822,7 +839,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           {((dock === "left" ? ["chat"] : []).concat(["requirements", "issues", "comments", "versions", "decisions"]) as Tab[]).map((t) => {
             const meta = TAB_META[t];
             const problems = analysis ? analysis.health.issues.errors + analysis.health.issues.warnings : 0;
-            const count = t === "requirements" && state ? Object.keys(state.requirements).length : t === "issues" ? problems
+            const count = t === "requirements" && state ? activeRequirements(state).length : t === "issues" ? problems
               : t === "comments" ? openThreadsCount : 0;
             return (
               <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)} role="tab" aria-selected={tab === t} title={meta.title}>
@@ -836,7 +853,8 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         {tab === "chat" && dock === "left" && chatPanel}
         {state && tab === "requirements" && (
           <RequirementsPanel state={state} issues={analysis?.requirement_issues ?? []} traced={traced} onTrace={setTraced} readOnly={readOnly}
-            send={send} onPrompt={(rid) => setPromptFor({ nodeIds: [], requirementIds: [rid] })} />
+            send={send} onPrompt={(rid) => setPromptFor({ nodeIds: [], requirementIds: [rid] })}
+            pid={pid} branch={branch} isAdmin={can(role, "admin")} toast={toast} />
         )}
         {tab === "issues" && (
           <IssuesPanel pid={pid} branch={branch} analysis={analysis} aiAvailable={!!ai?.available} onFocus={focusIssue}
@@ -948,6 +966,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         {state && (dock !== "right" || rightTab === "props") && (
           <Inspector catalog={catalog} state={state} nodeIds={selectedNodeIds} edgeIds={selectedEdgeIds} send={send}
             pid={pid} branch={branch} onOpenInternals={openLevel} readOnly={readOnly}
+            stale={analysis?.stale_links} onReviewed={markReviewed}
             onPrompt={() => setPromptFor({ nodeIds: selectedNodeIds, requirementIds: [] })} />
         )}
       </aside>

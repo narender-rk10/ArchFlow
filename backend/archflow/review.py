@@ -18,7 +18,7 @@ from fastapi import Depends, FastAPI, HTTPException
 
 from . import agents, cloud_docs, conversations, llm
 from .analysis import full_analysis
-from .models import ProjectState
+from .models import ProjectState, without_deleted
 
 PROMPT = "review.specialist"
 SEVERITIES = ("critical", "high", "medium", "low")
@@ -84,6 +84,7 @@ def _key(title: str) -> str:
 def review(state: ProjectState, *, memory: str = "", org_id: str | None = None,
            focuses: list[str] | None = None) -> dict[str, Any]:
     """Run the specialists in parallel and merge their findings (most severe first, near-duplicates dropped)."""
+    state = without_deleted(state)
     if not state.nodes:
         raise ValueError("There is nothing to review yet: add components first.")
     chosen = [f for f in (focuses or list(SPECIALISTS)) if f in SPECIALISTS]

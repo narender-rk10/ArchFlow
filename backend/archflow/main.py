@@ -24,7 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from . import (accounts, ai, openspec_service, diagram_export, auth, catalog, chat, collab_sync, comments, conversations, decisions, lld, llm,
-               observability, review, secrets_box, suggestions, usage, users)
+               history, observability, review, secrets_box, suggestions, usage, users)
 from .analysis import full_analysis, trace_requirement
 from .codegraph.service import CodeGraphService
 from .codegraph.service import register_routes as register_codegraph_routes
@@ -223,6 +223,7 @@ def create_app(store: Store | None = None) -> FastAPI:
             if new_state is not state:
                 store.save_state(pid, branch, new_state)
                 store.log_activity(pid, branch, actor, summary, new_state.rev)
+                history.record(store, pid, branch, actor, state, new_state)
         if new_state is not state:
             await sync_to_live_doc(pid, branch, state, new_state, actor)
         if summary or new_state.rev != state.rev:
@@ -306,6 +307,8 @@ def create_app(store: Store | None = None) -> FastAPI:
     # ---- operations ----
     @app.post("/api/projects/{pid}/ops")
     async def post_ops(pid: str, body: OpsIn, branch: str = "main", a: Access = Depends(edit)):
+        if not a.can("admin") and any(op.get("op") == "purge_requirement" for op in body.ops):
+            raise HTTPException(403, "Only admins can remove a requirement permanently.")
         state, summary = await commit_ops(pid, branch, body.ops, a.actor)
         return {"state": state.model_dump(), "summary": summary}
 
@@ -374,6 +377,7 @@ def create_app(store: Store | None = None) -> FastAPI:
                     item.field_revs = {f: restored.rev for f in item.field_revs}
             store.save_state(pid, branch, restored)
             store.log_activity(pid, branch, a.actor, [f"restored v{body.version}"], restored.rev)
+            history.record(store, pid, branch, f"{a.actor} (restored v{body.version})", current, restored)
         await sync_to_live_doc(pid, branch, current, restored, a.actor)
         await hub.broadcast(Hub.key(pid, branch), {"type": "state", "state": restored.model_dump(),
                                                    "actor": a.actor, "summary": [f"restored v{body.version}"]})
@@ -402,7 +406,7 @@ def create_app(store: Store | None = None) -> FastAPI:
     @app.get("/api/projects/{pid}/trace/{req_id}")
     def trace(pid: str, req_id: str, branch: str = "main", a: Access = Depends(read)):
         state = state_or_404(pid, branch)
-        if req_id not in state.requirements:
+        if req_id not in state.requirements or state.requirements[req_id].deleted:
             raise HTTPException(404, "requirement not found")
         return trace_requirement(state, req_id)
 
@@ -616,6 +620,7 @@ def create_app(store: Store | None = None) -> FastAPI:
     comments.register_routes(app, store, authz=authz, broadcast=broadcast_room)
     suggestions.register_routes(app, store, authz=authz, state_or_404=state_or_404)
     review.register_routes(app, store, authz=authz, state_or_404=state_or_404)
+    history.register_routes(app, store, authz=authz, state_or_404=state_or_404, commit_ops=commit_ops)
 
     # ---- OpenSpec: spec-driven changes stored per project (openspec_service.py) ----
     def openspec_context(pid: str, branch: str) -> dict[str, Any]:
@@ -688,6 +693,7 @@ def create_app(store: Store | None = None) -> FastAPI:
                 store.save_state(pid, branch, merged)
                 actor = ", ".join(sorted(set(body.actors))) or "collaborator"
                 store.log_activity(pid, branch, actor, summary[:30], merged.rev)
+                history.record(store, pid, branch, actor, current, merged)
         if summary:
             await hub.broadcast(Hub.key(pid, branch), {"type": "activity", "actor": body.actors})
         return {"changed": bool(summary), "rev": merged.rev, "dropped": dropped}

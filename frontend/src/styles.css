@@ -135,6 +135,17 @@ h4 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spac
 .status.s-approved { background: color-mix(in srgb, var(--ok) 20%, var(--panel)); }
 .status.s-implemented { background: color-mix(in srgb, var(--primary) 22%, var(--panel)); }
 .status.s-review { background: color-mix(in srgb, var(--warn) 22%, var(--panel)); }
+.status.s-deleted { background: color-mix(in srgb, var(--danger) 18%, var(--panel)); }
+.req.deleted .req-title { text-decoration: line-through; opacity: .7; }
+.req-history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.req-history ul { margin: 2px 0 0; padding-left: 16px; overflow-wrap: anywhere; }
+.req-history del { text-decoration: line-through; }
+.who { font-size: 10px; padding: 0 5px; border-radius: 999px; background: var(--panel-2); }
+.who.ai { background: color-mix(in srgb, var(--primary) 22%, var(--panel)); }
+.who.agent { background: color-mix(in srgb, var(--ok) 22%, var(--panel)); }
+.chip.stale { border-color: var(--warn); color: var(--warn); }
+.an-stale { background: color-mix(in srgb, var(--warn) 85%, transparent); color: #fff; border-radius: 999px; padding: 0 6px; font-size: 10px; margin-left: 4px; }
+.stale-links .row { align-items: center; flex-wrap: wrap; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .field { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
 .field > span { color: var(--muted); }

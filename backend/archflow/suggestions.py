@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 from . import agents, conversations, llm
 from .analysis import full_analysis
-from .models import ProjectState
+from .models import ProjectState, without_deleted
 
 log = logging.getLogger("archflow.suggestions")
 
@@ -51,6 +51,7 @@ class SuggestIn(BaseModel):
 def project_summary(state: ProjectState, limit: int = 60) -> dict[str, Any]:
     """What the suggestion agent needs to know, compactly: top-level components, connections, requirements and
     whether each is traced to a component, and the open health issues."""
+    state = without_deleted(state)
     analysis = full_analysis(state)
     top = [n for n in state.nodes.values() if not n.parent_id and n.type != "note"]
     names = {n.id: n.name for n in top}

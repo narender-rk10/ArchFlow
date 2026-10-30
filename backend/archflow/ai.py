@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import agents, cloud_docs, llm
-from .models import NODE_TYPES, ProjectState
+from .models import NODE_TYPES, ProjectState, without_deleted
 from .ops import resolve_node
 
 log = logging.getLogger("archflow.ai")
@@ -172,6 +172,7 @@ def _question(x: Any) -> dict[str, Any] | None:
 
 
 def _state_for_prompt(state: ProjectState) -> str:
+    state = without_deleted(state)  # the model never sees soft-deleted requirements
     compact = {
         "components": [{"id": n.id, "name": n.name, "type": n.type, "technology": n.technology,
                         "x": round(n.position.x), "y": round(n.position.y), "requirement_ids": n.requirement_ids,
@@ -179,7 +180,7 @@ def _state_for_prompt(state: ProjectState) -> str:
                         **({"parent_id": n.parent_id} if n.parent_id else {})} for n in state.nodes.values()],
         "connections": [{"source": e.source, "target": e.target, "protocol": e.protocol, **({"label": e.label} if e.label else {})}
                         for e in state.edges.values()],
-        "requirements": [r.model_dump(exclude={"rev", "field_revs"}) for r in state.requirements.values()],
+        "requirements": [r.model_dump(exclude={"rev", "field_revs", "deleted"}) for r in state.requirements.values()],
     }
     return json.dumps(compact, indent=1)
 

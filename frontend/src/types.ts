@@ -44,6 +44,24 @@ export interface Requirement extends Versioned {
   actors: string[];
   acceptance_criteria: string[];
   status: ReqStatus;
+  /** Provenance: type, ref, url, at. */
+  source?: Record<string, string>;
+  /** Soft-deleted: hidden everywhere except the Deleted filter, where it can be restored. */
+  deleted?: boolean;
+}
+
+/** Requirements that are not soft-deleted. */
+export const activeRequirements = (s: ProjectState): Requirement[] => Object.values(s.requirements).filter((r) => !r.deleted);
+
+/** A component whose linked requirement changed after the component last did (cleared by "Mark reviewed"). */
+export interface StaleLink { node_id: string; requirement_id: string; fields: string[]; component_rev: number; requirement_rev: number }
+
+/** One change to a requirement (newest first from the history API). */
+export interface RequirementRevision {
+  id: number; requirement_id: string; rev: number; created_at: string;
+  action: "added" | "updated" | "deleted" | "restored" | "purged";
+  actor: string; actor_kind: "ai" | "agent" | "human";
+  changes: { field: string; before: unknown; after: unknown }[];
 }
 
 export interface ProjectState {
@@ -135,6 +153,8 @@ export interface Analysis {
   };
   /** Designed-vs-code drift (only when the project has a code analysis). */
   drift_issues?: Issue[];
+  /** Component → requirement links where the requirement changed after the component. */
+  stale_links?: StaleLink[];
 }
 
 interface DiffSection { added: { id: string; name: string }[]; removed: { id: string; name: string }[]; changed: { id: string; name: string; fields: { field: string; from: unknown; to: unknown }[] }[] }

@@ -26,7 +26,7 @@ from typing import Any
 
 from . import agents, llm
 from .lld import api_view, children, er_view
-from .models import ProjectState, Requirement
+from .models import ProjectState, Requirement, without_deleted
 from .vibe import TARGETS, Scope, resolve_scope
 
 log = logging.getLogger("archflow.spec")
@@ -107,7 +107,7 @@ def build_context(state: ProjectState, project_name: str, scope: Scope, *, memor
                          "protocol": e.protocol, **({"label": e.label} if e.label else {})} for e in scope.edges],
         "neighbours_to_stub": [{"name": state.nodes[b].name, "type": state.nodes[b].type,
                                 "technology": state.nodes[b].technology} for b in scope.boundary],
-        "requirements": [state.requirements[r].model_dump(exclude={"rev", "field_revs"}) for r in scope.requirement_ids],
+        "requirements": [state.requirements[r].model_dump(exclude={"rev", "field_revs", "deleted"}) for r in scope.requirement_ids],
         "architecture_decisions": [{k: d.get(k) for k in ("id", "title", "status", "decision", "consequences")}
                                    for d in (decisions or []) if d.get("status") in ("accepted", "proposed")],
     }
@@ -376,6 +376,7 @@ def generate(state: ProjectState, project_name: str, node_ids: list[str], requir
              target: str = "claude-code", extra: str = "", memory: str = "",
              decisions: list[dict[str, Any]] | None = None, org_id: str | None = None,
              use_llm: bool = True) -> ChangeSpec:
+    state = without_deleted(state)
     scope = resolve_scope(state, node_ids, requirement_ids)
     if not scope.node_ids and not scope.requirement_ids:
         raise ValueError("There is nothing to specify yet: add components or requirements first.")

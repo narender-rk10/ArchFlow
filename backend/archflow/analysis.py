@@ -1,6 +1,7 @@
-"""Deterministic requirement linting, architecture validation, traceability and health.
+"""Deterministic requirement linting, architecture validation, traceability, stale links and health.
 
-These checks are fast, free and explainable; the AI review builds on top of them.
+These checks are fast, free and explainable; the AI review builds on top of them. Soft-deleted requirements
+are left out of every check (``full_analysis`` works on ``models.without_deleted``).
 """
 
 from __future__ import annotations
@@ -8,7 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .models import LLD_TYPES, ProjectState
+from .models import LLD_TYPES, ProjectState, without_deleted
+from .ops import REVIEWED
 
 AMBIGUOUS_TERMS = {
     "fast": "Define a measurable latency, e.g. 'p95 response latency < 2 s'.",
@@ -56,6 +58,7 @@ PII_WORDS = re.compile(r"\b(pii|personal data|email|phone|address|gdpr|customer 
 
 
 def lint_requirements(state: ProjectState) -> list[dict[str, Any]]:
+    state = without_deleted(state)
     issues: list[dict[str, Any]] = []
     for req in state.requirements.values():
         text = f"{req.title} {req.description}".lower()
@@ -90,6 +93,7 @@ _MAY_BE_UNCONNECTED = {"note", "table"}
 
 
 def validate_architecture(state: ProjectState) -> list[dict[str, Any]]:
+    state = without_deleted(state)
     issues: list[dict[str, Any]] = []
     all_nodes, edges = state.nodes, state.edges
     # System-level checks (data access, gateways, auth…) only look at the top-level (HLD) diagram.
@@ -157,6 +161,7 @@ def validate_architecture(state: ProjectState) -> list[dict[str, Any]]:
 
 
 def traceability(state: ProjectState) -> dict[str, Any]:
+    state = without_deleted(state)
     req_to_nodes: dict[str, list[str]] = {rid: [] for rid in state.requirements}
     for n in state.nodes.values():
         for rid in n.requirement_ids:
@@ -180,7 +185,31 @@ def trace_requirement(state: ProjectState, req_id: str) -> dict[str, Any]:
             "neighbour_ids": sorted(neighbours - set(linked))}
 
 
+# What a requirement says. A change to these after a linked component last changed makes the link stale; status,
+# provenance and deletion do not.
+REQUIREMENT_CONTENT = ("title", "description", "kind", "category", "priority", "actors", "acceptance_criteria")
+
+
+def stale_links(state: ProjectState) -> list[dict[str, Any]]:
+    """Component → requirement links where the requirement changed after the component last did (or was last
+    reviewed against it, see ``ops`` ``mark_reviewed``). Computed from the revision bookkeeping, nothing stored."""
+    out: list[dict[str, Any]] = []
+    for n in state.nodes.values():
+        changed = max((r for f, r in n.field_revs.items() if f != "position" and not f.startswith(REVIEWED)), default=0)
+        for rid in n.requirement_ids:
+            req = state.requirements.get(rid)
+            if not req or req.deleted:
+                continue
+            seen = max(changed, n.field_revs.get(REVIEWED + rid, 0))
+            fields = [f for f in REQUIREMENT_CONTENT if req.field_revs.get(f, 0) > seen]
+            if fields:
+                out.append({"node_id": n.id, "requirement_id": rid, "fields": fields, "component_rev": seen,
+                            "requirement_rev": max(req.field_revs[f] for f in fields)})
+    return out
+
+
 def health(state: ProjectState) -> dict[str, Any]:
+    state = without_deleted(state)
     lint = lint_requirements(state)
     arch = validate_architecture(state)
     trace = traceability(state)
@@ -212,11 +241,14 @@ def health(state: ProjectState) -> dict[str, Any]:
 def full_analysis(state: ProjectState, code_state: ProjectState | None = None) -> dict[str, Any]:
     """``code_state``: the architecture reconstructed from the project's latest code graph, if any; adds
     ``drift_issues`` and ``health.code_alignment`` (see codegraph/drift.py)."""
+    stale = stale_links(state)
+    state = without_deleted(state)
     out = {
         "requirement_issues": lint_requirements(state),
         "architecture_issues": validate_architecture(state),
         "traceability": traceability(state),
         "health": health(state),
+        "stale_links": stale,
     }
     if code_state is not None:
         from .codegraph.drift import drift
