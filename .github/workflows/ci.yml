@@ -93,7 +93,7 @@ jobs:
         run: uv run archflow-eval --fail-under 0.7 --out evals/reports/ci.json
       - name: Report
         if: always() && env.GEMINI_API_KEY != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: eval-report
           path: backend/evals/reports/ci.json
@@ -155,7 +155,7 @@ jobs:
         working-directory: frontend
       - name: Report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: frontend/playwright-report
