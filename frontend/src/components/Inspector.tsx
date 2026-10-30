@@ -1,4 +1,5 @@
-import { NODE_TYPES, type Catalog, type Op, type ProjectState } from "../types";
+import { NODE_TYPES, type Catalog, type JiraLink, type Op, type ProjectState } from "../types";
+import { JiraBadge } from "./RequirementsPanel";
 import { VENDOR_STYLE } from "./Palette";
 import { Field } from "./Field";
 import { TYPE_META } from "./ArchNode";
@@ -37,9 +38,11 @@ interface Props {
   onOpenInternals?: (nodeId: string) => void;
   /** Viewer/reviewer: fields are shown but disabled, delete actions hidden. */
   readOnly?: boolean;
+  /** Jira issues pushed for this project (epics per component, sub-tasks per low-level element). */
+  jira?: JiraLink[];
 }
 
-export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pid, branch, onOpenInternals, readOnly = false }: Props) {
+export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pid, branch, onOpenInternals, readOnly = false, jira = [] }: Props) {
   if (nodeIds.length === 1 && edgeIds.length === 0) {
     const n = state.nodes[nodeIds[0]];
     if (!n) return null;
@@ -113,6 +116,15 @@ export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pi
         </div>
         </fieldset>
         {n.props && <CodeTrace props={n.props} />}
+        {(() => {
+          const mine = jira.filter((l) => (l.object_kind === "epic" && l.object_id === n.id)
+            || (l.object_kind === "subtask" && l.object_id.endsWith(`:${n.id}`)));
+          return mine.length > 0 && (
+            <div className="field"><span>Jira</span>
+              <div className="req-links">{mine.map((l) => <JiraBadge key={`${l.object_kind}:${l.object_id}`} link={l} />)}</div>
+            </div>
+          );
+        })()}
         <div className="insp-actions">
           {onOpenInternals && n.type !== "note" && (
             <button onClick={() => onOpenInternals(n.id)} title="Open this component's internal (low-level) diagram">

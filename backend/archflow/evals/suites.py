@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .. import ai, chat, evaluation, suggestions
+from .. import ai, chat, evaluation, jira, suggestions
 from ..analysis import full_analysis
 from ..models import ProjectState
 from ..ops import apply_ops
@@ -182,6 +182,31 @@ def run_suggestions(case: dict[str, Any], org_id: str | None) -> Outcome:
                    contexts=[json.dumps(suggestions.project_summary(state))], raw=items)
 
 
+def run_jira(case: dict[str, Any], org_id: str | None) -> Outcome:
+    state = build(case.get("project"))
+    m = jira.Model(state)
+    inputs = [jira.story_input(m, r) for r in m.functional]
+    raw = jira.ai_stories(inputs, "Eval project", org_id=org_id)
+    exp = case.get("expect") or {}
+    checks: list[Check] = [("one story per functional requirement", set(raw) == {i["requirement_id"] for i in inputs},
+                            ", ".join(sorted(raw)))]
+    stories = {rid: jira.clean_story(raw[rid], jira.offline_story(i)) for i in inputs if (rid := i["requirement_id"]) in raw}
+    gwt = all(s["acceptance_criteria"] and len(raw[rid].get("acceptance_criteria") or []) == len(s["acceptance_criteria"])
+              for rid, s in stories.items())
+    checks.append(("acceptance criteria are complete Given/When/Then", gwt, ""))
+    checks.append(("story points are Fibonacci 1-13", all(raw[r].get("story_points") in jira.FIB for r in stories),
+                   ", ".join(f"{r}={raw[r].get('story_points')}" for r in stories)))
+    for rid, low in (exp.get("min_points") or {}).items():
+        checks.append((f"{rid} at least {low} points", stories.get(rid, {}).get("story_points", 0) >= low, ""))
+    for rid, high in (exp.get("max_points") or {}).items():
+        checks.append((f"{rid} at most {high} points", stories.get(rid, {}).get("story_points", 99) <= high, ""))
+    text = "\n".join(f"{rid} {s['summary']} ({s['story_points']} pts: {s['points_basis']})\n{s['user_story']}\n"
+                     + "\n".join(f"- {jira.gwt_text(c)}" for c in s["acceptance_criteria"]) for rid, s in stories.items())
+    checks += _text_checks(text, exp)
+    return Outcome(response=text, checks=checks, question="Write Jira stories for the functional requirements",
+                   contexts=[json.dumps(inputs)], raw=stories)
+
+
 SUITES: dict[str, tuple[Callable[[dict[str, Any], str | None], Outcome], list[str]]] = {
     # suite: (runner, prompt ids it exercises)
     "compare": (run_compare, ["compare.evaluate"]),
@@ -189,4 +214,5 @@ SUITES: dict[str, tuple[Callable[[dict[str, Any], str | None], Outcome], list[st
     "command": (run_command, ["canvas.command"]),
     "design": (run_design, ["design.turn"]),
     "suggestions": (run_suggestions, ["assistant.suggestions"]),
+    "jira": (run_jira, ["jira.stories"]),
 }

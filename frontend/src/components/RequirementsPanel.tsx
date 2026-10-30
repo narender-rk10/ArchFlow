@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { Issue, Op, ProjectState, Requirement } from "../types";
+import type { Issue, JiraLink, Op, ProjectState, Requirement } from "../types";
 import { Field } from "./Field";
 
 interface Props {
@@ -10,6 +10,21 @@ interface Props {
   send: (ops: Op[]) => void;
   onPrompt: (reqId: string) => void;
   readOnly?: boolean;
+  /** Jira stories pushed for requirements, by requirement id. */
+  jira?: Record<string, JiraLink>;
+  /** Open the Jira push dialog (shown when the org has Jira connected and you may push). */
+  onJira?: () => void;
+}
+
+/** A requirement's Jira issue key, linked, with the status last read from Jira. */
+export function JiraBadge({ link }: { link: JiraLink }) {
+  return (
+    <a className={`jira-badge ${link.status_category || "unknown"}`} href={link.external_url || undefined} target="_blank" rel="noreferrer"
+      title={link.status ? `Jira status: ${link.status}` : "Pushed to Jira (refresh status from the Jira dialog)"}
+      onClick={(e) => e.stopPropagation()}>
+      {link.external_key}{link.status && <span className="muted"> · {link.status}</span>}
+    </a>
+  );
 }
 
 const splitList = (s: string, sep: string | RegExp) => s.split(sep).map((x) => x.trim()).filter(Boolean);
@@ -17,7 +32,7 @@ const STATUS = ["draft", "review", "approved", "implemented"] as const;
 const PRIORITY = ["low", "medium", "high", "critical"] as const;
 type View = "all" | "untraced" | "issues" | "nfr";
 
-export function RequirementsPanel({ state, issues, traced, onTrace, send, onPrompt, readOnly = false }: Props) {
+export function RequirementsPanel({ state, issues, traced, onTrace, send, onPrompt, readOnly = false, jira = {}, onJira }: Props) {
   const [open, setOpen] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [view, setView] = useState<View>("all");
@@ -53,6 +68,7 @@ export function RequirementsPanel({ state, issues, traced, onTrace, send, onProm
           <div className="row gap">
             <button className="small primary" onClick={() => add("functional")} title="A feature the system must provide">+ Functional</button>
             <button className="small" onClick={() => add("non_functional")} title="A quality target: performance, security, cost…">+ Non-functional</button>
+            {onJira && all.length > 0 && <button className="small" onClick={onJira} title="Preview, then push requirements to Jira as epics and stories">Jira ↗</button>}
           </div>
         )}
       </div>
@@ -94,6 +110,7 @@ export function RequirementsPanel({ state, issues, traced, onTrace, send, onProm
                 <span className="mono">{r.id}</span> · {r.kind === "non_functional" ? `NFR${r.category ? ` · ${r.category}` : ""}` : "Functional"} · {r.priority}
                 {" · "}{nodes.length ? `${nodes.length} component${nodes.length > 1 ? "s" : ""}` : <span className="warn">not traced</span>}
                 {mine.length > 0 && <span className="warn"> · {mine.length} issue{mine.length > 1 ? "s" : ""}</span>}
+                {jira[r.id] && <> · <JiraBadge link={jira[r.id]} /></>}
               </div>
               {isOpen && (
                 <div className="req-edit">

@@ -1,0 +1,34 @@
+suite: jira
+description: Jira stories (jira.stories) cover every functional requirement with Given/When/Then criteria grounded in the architecture and sensible story points.
+cases:
+  - id: support-platform-stories
+    project: {template: ai-customer-support}
+    expect:
+      mentions_any: [Order Service, Support Agent, Auth Service, Helpdesk]
+      not_mentions: [Kubernetes]
+    ragas: [grounded_in_project, technically_sound]
+
+  - id: payments-with-lld-and-nfr
+    project:
+      ops:
+        - {op: add_requirement, requirement: {id: REQ-001, title: Pay for an order, description: Customers pay for their basket by card., priority: critical, actors: [customer], acceptance_criteria: [A successful payment marks the order paid]}}
+        - {op: add_requirement, requirement: {id: REQ-002, title: Payment latency, description: Card payments complete within 2 seconds at p95., kind: non_functional, category: performance}}
+        - {op: add_node, node: {id: checkout, name: Checkout Service, type: service, technology: FastAPI, requirement_ids: [REQ-001, REQ-002]}}
+        - {op: add_node, node: {id: psp, name: Stripe, type: external, technology: Stripe API}}
+        - {op: add_node, node: {id: pay-ep, name: POST /payments, type: endpoint, parent_id: checkout, props: {method: POST, path: /payments}}}
+        - {op: add_node, node: {id: pay-table, name: payments, type: table, parent_id: checkout, props: {columns: "id uuid pk, order_id uuid fk, status text"}}}
+        - {op: add_edge, edge: {source: checkout, target: psp, protocol: HTTPS}}
+    expect:
+      mentions_all: [Stripe]
+      mentions_any: ["2 seconds", "p95", REQ-002]
+      min_points: {REQ-001: 3}
+    ragas: [grounded_in_project, technically_sound]
+
+  - id: untraced-requirement-stays-honest
+    project:
+      ops:
+        - {op: add_requirement, requirement: {id: REQ-001, title: Export reports as CSV, description: Analysts download monthly reports as CSV files., actors: [analyst]}}
+    expect:
+      mentions_any: [CSV]
+      not_mentions: [Kafka, Redis, microservice]
+      max_points: {REQ-001: 5}

@@ -114,6 +114,19 @@ class OrgAIConfig(Base):
     updated_at: Mapped[str] = mapped_column(UTCDateTime, nullable=False, default=now, onupdate=now)
 
 
+class OrgJiraConnection(Base):
+    """An org's Jira Cloud site: the API token is encrypted like the AI keys (secrets_box.py)."""
+    __tablename__ = "org_jira_connections"
+    org_id: Mapped[str] = mapped_column(Text, _fk("orgs.id"), primary_key=True)
+    site_url: Mapped[str] = mapped_column(Text, nullable=False)  # https://<site>.atlassian.net
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    ciphertext: Mapped[str] = mapped_column(Text, nullable=False)  # AES-256-GCM API token
+    last4: Mapped[str] = mapped_column(Text, nullable=False)
+    project_key: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    updated_by: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[str] = mapped_column(UTCDateTime, nullable=False, default=now, onupdate=now)
+
+
 # --------------------------------------------------------------------------- projects, branches, versions
 class Project(Base):
     __tablename__ = "projects"
@@ -356,6 +369,27 @@ class OpenSpecChange(Base):
     created_by: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[str] = created()
     updated_at: Mapped[str] = mapped_column(UTCDateTime, nullable=False, default=now)
+
+
+# --------------------------------------------------------------------------- external trackers (Jira)
+class ExternalLink(Base):
+    """One ArchFlow object pushed to an external tracker: the issue it became, and a hash of what was pushed, so
+    re-pushes update or skip instead of creating duplicates."""
+    __tablename__ = "external_links"
+    __table_args__ = (UniqueConstraint("project_id", "system", "object_kind", "object_id", name="uq_external_links_object"),
+                      Index("idx_external_links_key", "system", "external_key"))
+    id: Mapped[int] = mapped_column(BigId, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(Text, _fk("projects.id"), nullable=False)
+    system: Mapped[str] = mapped_column(Text, nullable=False, default="jira", server_default="jira")
+    object_kind: Mapped[str] = mapped_column(Text, nullable=False)  # epic | requirement | subtask | link
+    object_id: Mapped[str] = mapped_column(Text, nullable=False)  # node id, requirement id, "REQ-001:node-id", ...
+    external_key: Mapped[str] = mapped_column(Text, nullable=False)  # e.g. SHOP-42 (an issue-link id for links)
+    external_url: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    content_hash: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")  # pulled from Jira
+    status_category: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")  # new | indeterminate | done
+    status_checked_at: Mapped[str | None] = mapped_column(UTCDateTime)
+    updated_at: Mapped[str] = mapped_column(UTCDateTime, nullable=False, default=now, onupdate=now)
 
 
 # --------------------------------------------------------------------------- AI usage and traces
