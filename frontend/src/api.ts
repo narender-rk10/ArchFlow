@@ -1,7 +1,7 @@
 import type { Activity, Analysis, ArchOption, Branch, ChatCard, ChatTurn, ApiToken, Catalog, Diff, Op, Org, Project, ProjectState, Version } from "./types";
 import type { AppNotification, Comment, CommentTarget, Decision, Evaluation } from "./types";
 import type { AIConfig, AIGroup, AIProvider, AISettings, AITestResult, Invite, InviteInfo, Me, Member, Role } from "./types";
-import type { ComponentViews, LldResult, RequirementRevision } from "./types";
+import type { ComponentViews, IntakeNote, IntakeResult, LldResult, RequirementRevision } from "./types";
 import type { MergePreview, MergeResolution, MergeResult, MergeSuggestion } from "./types";
 import type { CodeGraphRecord, CodeJob, CodeOverview, DriftResult, ImpactResult, ReconstructResult } from "./types";
 import type { Conversation, ConversationKind, ConversationMessage, MemoryCategory, MemoryItem } from "./types";
@@ -19,10 +19,10 @@ export class ApiError extends Error {
 export const UNAUTHORIZED_EVENT = "archflow:unauthorized";
 
 /** Upload a file as the raw request body (the code-graph JSON can be large; no parsing in the browser). */
-async function upload<T>(path: string, file: Blob, params?: Record<string, string>): Promise<T> {
+async function upload<T>(path: string, file: Blob, params?: Record<string, string>, type = "application/json"): Promise<T> {
   const qs = params && Object.keys(params).length ? "?" + new URLSearchParams(params).toString() : "";
   const res = await fetch(`/api${path}${qs}`, {
-    method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: file,
+    method: "POST", credentials: "include", headers: { "Content-Type": type }, body: file,
   });
   const data = await res.json().catch(() => null);
   if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
@@ -297,6 +297,14 @@ export const api = {
       Object.fromEntries(Object.entries({ repo_url, commit_sha }).filter(([, v]) => v)) as Record<string, string>),
   codeReconstruct: (pid: string, id: string) =>
     call<ReconstructResult>("POST", `/projects/${pid}/codegraph/${id}/reconstruct`, { refine: true }),
+  /** Read a document into proposed requirements (nothing is applied yet). */
+  importRequirements: (pid: string, branch: string, file: File) =>
+    upload<IntakeResult>(`/projects/${pid}/requirements/import`, file, { filename: file.name, branch }, "application/octet-stream"),
+  /** Add the accepted (possibly edited) proposals with their source; optionally save notes to project memory. */
+  acceptImport: (pid: string, branch: string, file: IntakeResult["file"], requirements: Record<string, unknown>[],
+    memory: (IntakeNote & { category: MemoryCategory })[]) =>
+    call<{ added: string[]; summary: string[]; memory: MemoryItem[] }>(
+      "POST", `/projects/${pid}/requirements/import/accept`, { file, requirements, memory }, b(branch)),
   codeDrift: (pid: string, branch: string) => call<DriftResult>("GET", `/projects/${pid}/codegraph/drift`, undefined, b(branch)),
   codeImpact: (pid: string, branch: string, files: string[]) =>
     call<ImpactResult>("POST", `/projects/${pid}/codegraph/impact`, { files, branch }),

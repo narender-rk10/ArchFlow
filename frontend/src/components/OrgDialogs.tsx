@@ -352,7 +352,7 @@ export function AISettingsDialog({ orgId, orgName, onClose }: Base) {
 export const FEATURE_LABEL: Record<string, string> = {
   assistant: "Assistant (Ask)", "canvas-edit": "Canvas edits", "design-chat": "Design chat", openspec: "Vibe code (OpenSpec)",
   "low-level-design": "Low-level design", decisions: "Decisions", "code-analysis": "Code analysis", memory: "Memory & summaries",
-  mcp: "MCP agents", suggestions: "Suggestions & follow-ups", review: "AI review", eval: "Evals", other: "Other",
+  mcp: "MCP agents", suggestions: "Suggestions & follow-ups", review: "AI review", intake: "Document import", eval: "Evals", other: "Other",
 };
 export const usd = (n: number) => (n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`);
 export const tokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));

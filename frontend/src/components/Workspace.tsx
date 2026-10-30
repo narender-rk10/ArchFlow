@@ -860,7 +860,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         {state && tab === "requirements" && (
           <RequirementsPanel state={state} issues={analysis?.requirement_issues ?? []} traced={traced} onTrace={setTraced} readOnly={readOnly}
             send={send} onPrompt={(rid) => setPromptFor({ nodeIds: [], requirementIds: [rid] })}
-            pid={pid} branch={branch} isAdmin={can(role, "admin")} toast={toast} />
+            pid={pid} branch={branch} isAdmin={can(role, "admin")} toast={toast} onMemoryChanged={loadMemory} />
         )}
         {tab === "issues" && (
           <IssuesPanel pid={pid} branch={branch} analysis={analysis} aiAvailable={!!ai?.available} onFocus={focusIssue}

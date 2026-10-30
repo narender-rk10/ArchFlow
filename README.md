@@ -140,6 +140,7 @@ One assistant panel with three modes, docked **left**, **right** or **floating**
 - **History** — every change to a requirement is recorded with who made it (a person, the AI, or an agent via MCP), when, and each field's value before → after; open a requirement and choose **History** (`GET /api/projects/{id}/requirements/{req}/history`)
 - **Soft delete** — deleting a requirement moves it to the **Deleted** filter with its component links kept, so **Restore** brings it back intact; deleted requirements are left out of health, traceability, AI context, coding briefs, OpenSpec changes and MCP tools. Admins can **Delete permanently** (the history is kept)
 - **Stale links** — when a requirement changes after a component linked to it last changed, the component gets a ⟳ badge on the canvas and the Inspector lists what changed; **Mark reviewed** confirms the component still fits. Staleness is computed from revision numbers (`stale_links` in the analysis), nothing extra is stored
+- **Import from a document** — upload a PRD, RFP or spec (PDF, Word `.docx`, Markdown, text; up to `ARCHFLOW_INTAKE_MAX_MB`, default 20 MB). The `intake.extract` agent reads long documents in parallel chunks and proposes FRs and NFRs with the section and page they came from, plus assumptions, constraints, open questions and stakeholders; likely duplicates and conflicts with existing requirements (or elsewhere in the document) are flagged with both sources. Review, edit and tick what to keep — nothing is added until you accept. Accepted requirements keep their provenance (file, section, page, import time) and assumptions/constraints/questions can be saved to project memory. Without an AI model, "shall / must / should" sentences and bullets under requirement headings are read instead. Document text is treated as untrusted input, never as instructions
 
 ---
 
@@ -553,6 +554,7 @@ claude mcp add --transport http archflow http://localhost:8000/mcp --header "Aut
 | `ARCHFLOW_DOCS_AZURE` | `https://learn.microsoft.com/api/mcp` | Azure documentation MCP server (URL, `stdio:<command>` or `off`) |
 | `ARCHFLOW_DOCS_AWS` | `https://knowledge-mcp.global.api.aws` | AWS documentation MCP server, e.g. `stdio:uvx awslabs.aws-documentation-mcp-server@latest` for the local one |
 | `ARCHFLOW_REDACT` | `on` | What is removed from every model request: `on` (emails, phone, card and IBAN numbers, put back into the answer; and secrets — cloud/API keys, tokens, JWTs, private keys, `password=…` — never sent nor returned), `secrets` (secrets only) or `off`. Secrets in answers are masked; counts per category and prompt-injection signals in untrusted content are recorded in the run's trace |
+| `ARCHFLOW_INTAKE_MAX_MB` | `20` | Largest document accepted by **Requirements → Import** |
 | `ARCHFLOW_PROMPTS` | — | Pin prompt versions, e.g. `compare.evaluate=v1,design.turn=v2` (default: each prompt's `active` version) |
 | `ARCHFLOW_TRACES` | `full` | Agent traces: `full` (with prompt and response text), `metadata` (tokens, cost, timings only) or `off` |
 | `ARCHFLOW_TRACE_RETENTION_DAYS` | `30` | How long traces are kept |
@@ -743,11 +745,11 @@ An end-to-end AI evaluation on a complex spec (a multi-region telehealth platfor
 
 The full production plan is in [docs/production-plan.md](docs/production-plan.md). In rough order of leverage:
 
-1. **Comments, @mentions and approval workflows** on any object; per-project role overrides, SSO
+1. **Per-project role overrides, SSO** and approvals on more objects than versions
 2. **Repository analysis**: GitHub App, drift on every push/PR, PR review comments
 3. **Jira sync** — epics/stories from requirements, with status reflected on the canvas
 4. **More diagrams** from the same model: sequence, C4, ER, deployment, agent graph, MCP topology
-5. **Document intake** — SRS/PDF → requirements; meeting transcripts → live canvas
+5. **Document intake** — ~~SRS/PDF/Word/Markdown → requirements~~ (done); meeting transcripts → live canvas
 6. **Generation** of tests, infrastructure as code and documentation (SRS/BRD/runbooks)
 7. **Scale-out** — shared Redis for rate limits, jobs and real-time fan-out across API instances
 

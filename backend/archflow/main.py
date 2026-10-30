@@ -24,7 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from . import (accounts, ai, approvals, openspec_service, diagram_export, auth, catalog, chat, collab_sync, comments, conversations, decisions, lld, llm,
-               history, observability, review, secrets_box, suggestions, usage, users)
+               history, intake, observability, review, secrets_box, suggestions, usage, users)
 from .analysis import full_analysis, trace_requirement
 from .codegraph.service import CodeGraphService
 from .codegraph.service import register_routes as register_codegraph_routes
@@ -625,6 +625,8 @@ def create_app(store: Store | None = None) -> FastAPI:
     # branch merge: three-way diff, conflict resolution (optionally AI-assisted), applied as ops (merge.py)
     register_merge_routes(app, store, authz=authz, commit_ops=commit_ops, broadcast=broadcast_room)
     history.register_routes(app, store, authz=authz, state_or_404=state_or_404, commit_ops=commit_ops)
+    intake.register_routes(app, store, authz=authz, state_or_404=state_or_404, commit_ops=commit_ops,
+                           broadcast=broadcast_room)
 
     # ---- OpenSpec: spec-driven changes stored per project (openspec_service.py) ----
     def openspec_context(pid: str, branch: str) -> dict[str, Any]:

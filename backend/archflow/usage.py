@@ -38,6 +38,7 @@ FEATURES: list[tuple[str, str]] = [  # (path pattern after /api/projects/{pid}, 
     (r"/(evaluate|decisions)", "decisions"),
     (r"/merge", "merge"),
     (r"/codegraph", "code-analysis"),
+    (r"/requirements/import", "intake"),
 ]
 _PROJECT = re.compile(r"^/api/projects/([^/]+)(/.*)?$")
 

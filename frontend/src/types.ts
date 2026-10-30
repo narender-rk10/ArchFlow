@@ -44,7 +44,7 @@ export interface Requirement extends Versioned {
   actors: string[];
   acceptance_criteria: string[];
   status: ReqStatus;
-  /** Provenance: type, ref, url, at. */
+  /** Provenance: where it came from, e.g. {type: "pdf", ref: "prd.pdf", section, page, at}. */
   source?: Record<string, string>;
   /** Soft-deleted: hidden everywhere except the Deleted filter, where it can be restored. */
   deleted?: boolean;
@@ -355,7 +355,7 @@ export const MEMORY_CATEGORIES = ["constraint", "preference", "decision", "requi
 export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number];
 export interface MemoryItem {
   id: string; text: string; category: MemoryCategory; pinned: boolean;
-  source: "user" | "ai" | "design-chat" | "mcp"; conversation_id: string | null;
+  source: "user" | "ai" | "design-chat" | "mcp" | "import"; conversation_id: string | null;
   created_by: string; created_at: string; updated_at: string;
 }
 
@@ -446,4 +446,22 @@ export interface AppNotification {
   version: number | null;
   kind: "mention" | "reply" | "review_requested" | "approved" | "changes_requested"; actor_name: string; preview: string;
   read: boolean; created_at: string;
+}
+
+// ---- document intake (requirements imported from a PDF, Word, Markdown or text file) ----
+export interface IntakeMatch {
+  id: string; title: string; where: "project" | "document"; reason: string; source: Record<string, string>;
+  proposed_source?: Record<string, string>;
+}
+export interface IntakeProposal {
+  id: string; title: string; description: string; kind: Requirement["kind"]; category: string; priority: Priority;
+  actors: string[]; acceptance_criteria: string[]; section: string; page: number | null;
+  source: Record<string, string>; duplicates: IntakeMatch[]; conflicts: IntakeMatch[]; selected: boolean;
+}
+export interface IntakeNote { text: string; section?: string; page?: number }
+export interface IntakeResult {
+  engine: "llm" | "offline" | "mixed"; notes: string[];
+  file: { name: string; type: string; pages: number | null; sections: number; chars: number; chunks: number };
+  requirements: IntakeProposal[]; assumptions: IntakeNote[]; constraints: IntakeNote[]; open_questions: IntakeNote[];
+  stakeholders: string[];
 }

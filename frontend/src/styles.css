@@ -1063,3 +1063,18 @@ button.danger.ghost { color: var(--danger); }
 .notif-item.unread { background: color-mix(in srgb, var(--primary) 8%, var(--panel)); }
 .notif-item:hover { background: var(--panel-2); }
 .notif-preview { color: var(--text); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+/* ---- import requirements from a document ---- */
+.intake-pick { display: flex; flex-direction: column; gap: 8px; padding: 8px 0; }
+.intake-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.intake-list li { border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }
+.intake-list li.off { opacity: 0.6; }
+.intake-title { flex: 1; min-width: 0; }
+.intake-meta { margin: 2px 0 0 24px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.intake-edit { margin: 6px 0 0 24px; display: flex; flex-direction: column; gap: 6px; }
+.intake-edit label { display: flex; flex-direction: column; gap: 2px; }
+.intake-badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; font-weight: 600; cursor: help; }
+.intake-badge.dup { background: color-mix(in srgb, var(--warn) 18%, var(--panel)); color: var(--warn); }
+.intake-badge.conflict { background: color-mix(in srgb, var(--danger) 18%, var(--panel)); color: var(--danger); }
+.intake-notes { border-top: 1px solid var(--border); padding-top: 6px; display: flex; flex-direction: column; gap: 6px; }
+.intake-notes h4 { margin: 0; }
