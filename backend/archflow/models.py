@@ -86,6 +86,7 @@ class Requirement(Versioned):
     actors: list[str] = Field(default_factory=list)
     acceptance_criteria: list[str] = Field(default_factory=list)
     status: ReqStatus = "draft"
+    source: dict[str, str] = Field(default_factory=dict)  # provenance: type, ref, url, at
 
 
 class ProjectState(BaseModel):

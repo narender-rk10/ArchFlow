@@ -1,8 +1,13 @@
 import { useState } from "react";
 import type { Issue, Op, ProjectState, Requirement } from "../types";
 import { Field } from "./Field";
+import { ImportRequirementsDialog, sourceLabel } from "./ImportRequirementsDialog";
 
 interface Props {
+  pid: string;
+  branch: string;
+  toast: (text: string) => void;
+  onMemoryChanged: () => void;
   state: ProjectState;
   issues: Issue[];
   traced: string | null;
@@ -17,8 +22,10 @@ const STATUS = ["draft", "review", "approved", "implemented"] as const;
 const PRIORITY = ["low", "medium", "high", "critical"] as const;
 type View = "all" | "untraced" | "issues" | "nfr";
 
-export function RequirementsPanel({ state, issues, traced, onTrace, send, onPrompt, readOnly = false }: Props) {
+export function RequirementsPanel({ pid, branch, toast, onMemoryChanged, state, issues, traced, onTrace, send, onPrompt,
+  readOnly = false }: Props) {
   const [open, setOpen] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
   const [filter, setFilter] = useState("");
   const [view, setView] = useState<View>("all");
   const all = Object.values(state.requirements);
@@ -53,9 +60,14 @@ export function RequirementsPanel({ state, issues, traced, onTrace, send, onProm
           <div className="row gap">
             <button className="small primary" onClick={() => add("functional")} title="A feature the system must provide">+ Functional</button>
             <button className="small" onClick={() => add("non_functional")} title="A quality target: performance, security, cost…">+ Non-functional</button>
+            <button className="small" onClick={() => setImporting(true)} title="Import requirements from a document (PDF, Word, Markdown, text)">⇪ Import</button>
           </div>
         )}
       </div>
+      {importing && (
+        <ImportRequirementsDialog pid={pid} branch={branch} onClose={() => setImporting(false)}
+          onDone={(message, savedMemory) => { setImporting(false); toast(message); if (savedMemory) onMemoryChanged(); }} />
+      )}
       {all.length > 0 && (
         <div className="panel-filters">
           <div className="seg-chips" role="tablist" aria-label="Show">
@@ -94,6 +106,9 @@ export function RequirementsPanel({ state, issues, traced, onTrace, send, onProm
                 <span className="mono">{r.id}</span> · {r.kind === "non_functional" ? `NFR${r.category ? ` · ${r.category}` : ""}` : "Functional"} · {r.priority}
                 {" · "}{nodes.length ? `${nodes.length} component${nodes.length > 1 ? "s" : ""}` : <span className="warn">not traced</span>}
                 {mine.length > 0 && <span className="warn"> · {mine.length} issue{mine.length > 1 ? "s" : ""}</span>}
+                {sourceLabel(r.source) && (
+                  <span title={`Imported${r.source?.at ? ` on ${new Date(r.source.at).toLocaleString()}` : ""}`}> · from {sourceLabel(r.source)}</span>
+                )}
               </div>
               {isOpen && (
                 <div className="req-edit">

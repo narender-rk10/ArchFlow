@@ -14,6 +14,7 @@ interface Props {
 
 const SOURCE: Record<MemoryItem["source"], string> = {
   user: "added by", ai: "learned by AI from a conversation", "design-chat": "answered in the design chat by", mcp: "added over MCP by",
+  import: "imported from a document by",
 };
 
 /** Project memory: facts every AI answer, edit and design takes into account. */

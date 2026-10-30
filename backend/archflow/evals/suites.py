@@ -5,6 +5,7 @@ A case is a dict from a dataset YAML. Shared keys:
     project: {template: <name>, ops: [...]}   the project state (ops as in ops.apply_ops)
     expect: {...}                              suite-specific checks, below
     ragas: [faithfulness | answer_accuracy | technically_sound | grounded_in_project, ...]   optional
+The intake suite also takes ``document: {filename, text}``: the uploaded file's name and (text) content.
 
 Each runner returns ``Outcome(response, checks, contexts, question, reference)``; ``checks`` are
 ``(name, passed, detail)`` and the case score is the share that passed.
@@ -17,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .. import ai, chat, evaluation, suggestions
+from .. import ai, chat, evaluation, intake, suggestions
 from ..analysis import full_analysis
 from ..models import ProjectState
 from ..ops import apply_ops
@@ -182,6 +183,38 @@ def run_suggestions(case: dict[str, Any], org_id: str | None) -> Outcome:
                    contexts=[json.dumps(suggestions.project_summary(state))], raw=items)
 
 
+def run_intake(case: dict[str, Any], org_id: str | None) -> Outcome:
+    state = build(case.get("project"))
+    d = case["document"]
+    doc = intake.read_document(d.get("filename", "spec.md"), d["text"].encode("utf-8"))
+    out = intake.propose(doc, state, org_id, use_ai=True)
+    reqs = out["requirements"]
+    exp = case.get("expect") or {}
+    checks: list[Check] = [("engine is llm", out["engine"] == "llm", out["engine"] + "; " + "; ".join(out["notes"]))]
+    if "min_requirements" in exp:
+        checks.append((f"at least {exp['min_requirements']} requirements", len(reqs) >= exp["min_requirements"],
+                       str(len(reqs))))
+    if "max_requirements" in exp:
+        checks.append((f"at most {exp['max_requirements']} requirements", len(reqs) <= exp["max_requirements"],
+                       str(len(reqs))))
+    nfr = {r["category"] for r in reqs if r["kind"] == "non_functional"}
+    for cat in exp.get("nfr_categories") or []:
+        checks.append((f"has a {cat} NFR", cat in nfr, ", ".join(sorted(nfr))))
+    for rid in exp.get("duplicates") or []:
+        checks.append((f"flags a duplicate of {rid}", any(d["id"] == rid for r in reqs for d in r["duplicates"]), ""))
+    for rid in exp.get("conflicts") or []:
+        checks.append((f"flags a conflict with {rid}", any(c["id"] == rid for r in reqs for c in r["conflicts"]), ""))
+    for key in ("assumptions", "constraints", "open_questions"):
+        if exp.get(f"has_{key}"):
+            checks.append((f"has {key.replace('_', ' ')}", bool(out[key]), str(len(out[key]))))
+    if exp.get("sections"):
+        checks.append(("every requirement names its section", all(r["section"] for r in reqs), ""))
+    text = "\n".join(f"- [{r['kind']}/{r['priority']}] {r['title']}: {r['description']}" for r in reqs)
+    checks += _text_checks(text, exp)
+    return Outcome(response=text, checks=checks, question=f"Extract the requirements from {doc.name}",
+                   contexts=[d["text"]], raw=out)
+
+
 SUITES: dict[str, tuple[Callable[[dict[str, Any], str | None], Outcome], list[str]]] = {
     # suite: (runner, prompt ids it exercises)
     "compare": (run_compare, ["compare.evaluate"]),
@@ -189,4 +222,5 @@ SUITES: dict[str, tuple[Callable[[dict[str, Any], str | None], Outcome], list[st
     "command": (run_command, ["canvas.command"]),
     "design": (run_design, ["design.turn"]),
     "suggestions": (run_suggestions, ["assistant.suggestions"]),
+    "intake": (run_intake, ["intake.extract"]),
 }
