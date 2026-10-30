@@ -1,8 +1,7 @@
 import type { Activity, Analysis, ArchOption, Branch, ChatCard, ChatTurn, ApiToken, Catalog, Diff, Op, Org, Project, ProjectState, Version } from "./types";
 import type { AppNotification, Comment, CommentTarget, Decision, Evaluation } from "./types";
 import type { AIConfig, AIGroup, AIProvider, AISettings, AITestResult, Invite, InviteInfo, Me, Member, Role } from "./types";
-import type { ComponentViews, IntakeNote, IntakeResult, LldResult, RequirementRevision } from "./types";
-import type { MergePreview, MergeResolution, MergeResult, MergeSuggestion } from "./types";
+import type { ComponentViews, IntakeNote, IntakeResult, LldResult, RequirementRevision, MergePreview, MergeResolution, MergeResult, MergeSuggestion, Diagram, DiagramInfo } from "./types";
 import type { CodeGraphRecord, CodeJob, CodeOverview, DriftResult, ImpactResult, ReconstructResult } from "./types";
 import type { Conversation, ConversationKind, ConversationMessage, MemoryCategory, MemoryItem } from "./types";
 import type { OpenSpecChange, OpenSpecJob, OpenSpecOverview } from "./types";
@@ -305,6 +304,11 @@ export const api = {
     download(`/projects/${pid}/nodes/${encodeURIComponent(nodeId)}/export/sequence`, { branch }, "request-flow.html"),
   views: (pid: string, branch: string, nodeId: string) =>
     call<ComponentViews>("GET", `/projects/${pid}/nodes/${encodeURIComponent(nodeId)}/views`, undefined, b(branch)),
+  /** Diagrams derived from the model (C4, sequence per flow, ER, deployment, data flow) with alt text; ai = let the AI name the flows. */
+  diagrams: (pid: string, branch: string, ai = false) =>
+    call<{ branch: string; diagrams: DiagramInfo[] }>("GET", `/projects/${pid}/diagrams`, undefined, { branch, ai: String(ai) }),
+  diagram: (pid: string, branch: string, id: string, ai = false) =>
+    call<Diagram>("GET", `/projects/${pid}/diagrams/${encodeURIComponent(id)}`, undefined, { branch, ai: String(ai) }),
   // ---- repository analysis (code graph) ----
   codeOverview: (pid: string) => call<CodeOverview>("GET", `/projects/${pid}/codegraph`),
   codeAnalyze: (pid: string, repo_url: string) => call<CodeJob>("POST", `/projects/${pid}/codegraph/analyze`, { repo_url }),

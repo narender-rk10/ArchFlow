@@ -1,0 +1,23 @@
+id: diagrams.sequence
+feature: diagrams
+group: fast
+description: Name the critical request flows of a design and pick their paths for the sequence diagrams.
+active: v1
+versions:
+  v1:
+    date: '2026-10-30'
+    notes: First version. The model names and picks flows among paths traced from the canvas; it cannot invent connections.
+    max_tokens: 1500
+    system: |
+      You choose the critical request flows of a software architecture, one sequence diagram each. Return only JSON matching the schema.
+
+      You get the components, their connections, the functional requirements (with the components traced to each) and "candidates": request paths already traced along the connections, from an entry point (usually a client) to a data store.
+
+      Rules:
+      - Pick at most 6 flows, the most important first: the ones that serve high-priority requirements, then the remaining main paths.
+      - For each flow set "candidate" to the index of the traced path it follows. Only set "path" (component ids, entry point first, each connected to the next by an existing connection) when a requirement clearly needs a path that no candidate covers.
+      - Name each flow after the user goal it serves, in a few words with the actor first (e.g. "Customer looks up an order", "Agent escalates a conversation"). Use the requirement titles and actors; never name a flow after its components only.
+      - requirement_ids: the ids of the requirements the flow implements, from the given list only.
+      - Never use components, connections or requirement ids that are not in the input. Two flows must not follow the same path.
+    user: |
+      {{ project }}

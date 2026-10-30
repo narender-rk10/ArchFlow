@@ -14,8 +14,11 @@ function prefersDark(): boolean {
   return theme ? theme === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
 
-/** Draws Mermaid source (sequence and ER diagrams from the low-level design). */
-export function MermaidDiagram({ source, label }: { source: string; label: string }) {
+const attr = (text: string) => text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/** Draws Mermaid source (diagrams from the model and the low-level design views). The label becomes the SVG's own
+ * alt text (aria-label), so it travels with a downloaded copy; ``onRender`` receives that SVG. */
+export function MermaidDiagram({ source, label, onRender }: { source: string; label: string; onRender?: (svg: string) => void }) {
   const id = `mmd-${useId().replace(/[^a-zA-Z0-9]/g, "")}`;
   const [svg, setSvg] = useState("");
   const [error, setError] = useState("");
@@ -27,11 +30,13 @@ export function MermaidDiagram({ source, label }: { source: string; label: strin
       // "strict" escapes labels and disables click handlers, so names from the model cannot inject markup.
       mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: prefersDark() ? "dark" : "default",
         fontFamily: "Inter, system-ui, sans-serif" });
-      const { svg: out } = await mermaid.render(id, source);
-      if (!cancelled) setSvg(out);
-    }).catch((e) => { if (!cancelled) { setSvg(""); setError((e as Error).message || "Could not draw this diagram."); } });
+      const { svg: drawn } = await mermaid.render(id, source);
+      // Mermaid already sets role (and <title>/<desc> from accTitle/accDescr); add the alt text as aria-label.
+      const out = /^<svg [^>]*aria-label=/.test(drawn) ? drawn : drawn.replace(/^<svg /, `<svg aria-label="${attr(label)}" `);
+      if (!cancelled) { setSvg(out); onRender?.(out); }
+    }).catch((e) => { if (!cancelled) { setSvg(""); onRender?.(""); setError((e as Error).message || "Could not draw this diagram."); } });
     return () => { cancelled = true; };
-  }, [id, source]);
+  }, [id, source, label]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (error) return <p className="error small">Could not draw the diagram: {error}</p>;
   if (!svg) return <p className="muted small pulse">Drawing…</p>;
