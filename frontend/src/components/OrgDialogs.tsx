@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ApiError, api } from "../api";
 import { useEscape } from "../useEscape";
-import { ROLES, ROLE_HELP, can, type AIConfig, type AIGroup, type AISettings, type AITestResult, type AIUsageReport, type AIUsageRow, type Invite, type Member, type Role } from "../types";
+import { ROLES, ROLE_HELP, can, type AIConfig, type ApprovalPolicy, type AIGroup, type AISettings, type AITestResult, type AIUsageReport, type AIUsageRow, type Invite, type Member, type Role } from "../types";
 import { Copy } from "./ConnectDialog";
 
 interface Base { orgId: string; orgName: string; role: Role; selfId: string; onClose: () => void; onChanged?: () => void }
@@ -123,12 +123,56 @@ export function MembersDialog({ orgId, orgName, role, selfId, onClose, onChanged
           )}
         </>
       ) : <p className="muted small">Only admins and owners can invite people or change roles.</p>}
+      <ApprovalPolicySection orgId={orgId} manage={manage} />
       <details className="small muted roles-help">
         <summary>What each role can do</summary>
         <ul>{ROLES.map((r) => <li key={r}><b>{r}</b>: {ROLE_HELP[r]}</li>)}</ul>
       </details>
       {error && <p className="error small">{error}</p>}
     </Modal>
+  );
+}
+
+/** Version approvals: how many approvals a version needs, and whether adopting a draft requires one. Admins edit. */
+function ApprovalPolicySection({ orgId, manage }: { orgId: string; manage: boolean }) {
+  const [policy, setPolicy] = useState<ApprovalPolicy | null>(null);
+  const [required, setRequired] = useState(1);
+  const [forAdopt, setForAdopt] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  const show = (p: ApprovalPolicy) => { setPolicy(p); setRequired(p.required_approvals); setForAdopt(p.require_for_adopt); };
+  useEffect(() => { api.approvalPolicy(orgId).then(show).catch((e) => setError(e.message)); }, [orgId]);
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(""); setSaved(false);
+    try { show(await api.setApprovalPolicy(orgId, required, forAdopt)); setSaved(true); }
+    catch (err) { setError((err as Error).message); }
+  };
+
+  if (!policy) return error ? <p className="error small">{error}</p> : null;
+  return (
+    <form className="approval-policy" onSubmit={save}>
+      <h4>Version approvals</h4>
+      <p className="muted small">Reviewers, architects, admins and owners approve saved versions. Authors cannot approve
+        their own version unless they are the only owner.</p>
+      <label className="field"><span>Approvals required per version</span>
+        <input type="number" min={1} max={10} value={required} disabled={!manage}
+          onChange={(e) => setRequired(Math.max(1, Math.min(10, Number(e.target.value) || 1)))} />
+      </label>
+      <label className="small row gap">
+        <input type="checkbox" checked={forAdopt} disabled={!manage} onChange={(e) => setForAdopt(e.target.checked)} />
+        Require an approved version before a draft is adopted into main
+      </label>
+      {manage && (
+        <div className="row gap">
+          <button className="primary small">Save approval settings</button>
+          {saved && <span className="small ok">Saved</span>}
+        </div>
+      )}
+      {error && <p className="error small">{error}</p>}
+    </form>
   );
 }
 

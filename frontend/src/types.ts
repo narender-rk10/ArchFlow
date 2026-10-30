@@ -71,9 +71,9 @@ export function can(role: Role | null | undefined, action: "read" | "review" | "
 }
 export const ROLE_HELP: Record<Role, string> = {
   viewer: "Read only",
-  reviewer: "Read, and accept or reject decisions",
+  reviewer: "Read, accept or reject decisions, and approve versions",
   developer: "Edit the canvas, requirements, versions and decisions; run AI",
-  architect: "Same as developer",
+  architect: "Same as developer, and approve versions",
   admin: "Also manage members, invites, API tokens and AI keys",
   owner: "Everything, including organization settings and owners",
 };
@@ -106,7 +106,23 @@ export interface ApiToken {
   client_name: string; created_at: string; expires_at: number | null; last_used_at: string | null;
 }
 export interface Branch { name: string; base_version: number | null; created_at: string }
-export interface Version { number: number; branch: string; message: string; author: string; parent: number | null; created_at: string }
+export interface Version {
+  number: number; branch: string; message: string; author: string; parent: number | null; created_at: string;
+  review?: { status: ReviewStatus; approvals: number; required: number };
+}
+// ---- version approvals ----
+export type ReviewStatus = "draft" | "in_review" | "approved" | "changes_requested";
+export type ReviewAction = "request" | "approve" | "request_changes";
+export interface ReviewEntry {
+  id: number; version: number; branch: string; action: ReviewAction; actor_id: string; actor_name: string; comment: string; created_at: string;
+}
+export interface VersionReview {
+  version: number; status: ReviewStatus; required: number; approvals: { id: string; name: string; at: string }[];
+  requested_by: { id: string; name: string } | null; history: ReviewEntry[];
+}
+export interface ApprovalPolicy { required_approvals: number; require_for_adopt: boolean; updated_by: string | null; updated_at: string | null }
+/** Roles that may approve a version or request changes (developers request reviews but do not approve). */
+export const APPROVER_ROLES: Role[] = ["reviewer", "architect", "admin", "owner"];
 export interface Activity { actor: string; summary: string[]; rev: number; created_at: string }
 
 export type Op = Record<string, unknown> & { op: string };
@@ -380,6 +396,9 @@ export interface Comment {
   created_at: string; edited_at: string | null;
 }
 export interface AppNotification {
-  id: number; project_id: string; project_name: string; branch: string; comment_id: string; thread_id: string;
-  kind: "mention" | "reply"; actor_name: string; preview: string; read: boolean; created_at: string;
+  id: number; project_id: string; project_name: string; branch: string; comment_id: string | null; thread_id: string;
+  /** Set for version review notifications (review requested, approved, changes requested). */
+  version: number | null;
+  kind: "mention" | "reply" | "review_requested" | "approved" | "changes_requested"; actor_name: string; preview: string;
+  read: boolean; created_at: string;
 }

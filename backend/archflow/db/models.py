@@ -312,21 +312,52 @@ class Comment(Base):
 
 
 class Notification(Base):
-    """Someone mentioned you, or replied in a thread you are part of."""
+    """Someone mentioned you or replied in a thread you are part of (``comment_id`` set), or acted on a version
+    review: asked you to review it, approved it or requested changes (``version`` set, see approvals.py)."""
     __tablename__ = "notifications"
-    __table_args__ = (CheckConstraint("kind IN ('mention', 'reply')", name="ck_notifications_kind"),
+    __table_args__ = (CheckConstraint("kind IN ('mention', 'reply', 'review_requested', 'approved', "
+                                      "'changes_requested')", name="ck_notifications_kind"),
                       Index("idx_notifications_user", "user_id", text("created_at DESC")))
     id: Mapped[int] = mapped_column(BigId, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(Text, _fk("users.id"), nullable=False)
     project_id: Mapped[str] = mapped_column(Text, _fk("projects.id"), nullable=False)
     branch: Mapped[str] = mapped_column(Text, nullable=False)
-    comment_id: Mapped[str] = mapped_column(Text, _fk("comments.id"), nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    comment_id: Mapped[str | None] = mapped_column(Text, _fk("comments.id"))
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)  # comment thread; empty for a version review
+    version: Mapped[int | None] = mapped_column(Integer)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     actor_name: Mapped[str] = mapped_column(Text, nullable=False)
     preview: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     created_at: Mapped[str] = created()
+
+
+# --------------------------------------------------------------------------- version approvals
+class Approval(Base):
+    """One review action on a saved version: review requested, approved, or changes requested. A version's review
+    status (draft, in review, approved, changes requested) is derived from its rows in order (see approvals.py)."""
+    __tablename__ = "approvals"
+    __table_args__ = (CheckConstraint("action IN ('request', 'approve', 'request_changes')", name="ck_approvals_action"),
+                      Index("idx_approvals_version", "project_id", "version"))
+    id: Mapped[int] = mapped_column(BigId, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(Text, _fk("projects.id"), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    branch: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_name: Mapped[str] = mapped_column(Text, nullable=False)
+    comment: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    created_at: Mapped[str] = created()
+
+
+class OrgApprovalPolicy(Base):
+    """How many approvals a version needs, and whether a draft must be approved before it is adopted."""
+    __tablename__ = "org_approval_policy"
+    org_id: Mapped[str] = mapped_column(Text, _fk("orgs.id"), primary_key=True)
+    required_approvals: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    require_for_adopt: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    updated_by: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[str] = mapped_column(UTCDateTime, nullable=False, default=now, onupdate=now)
 
 
 # --------------------------------------------------------------------------- OpenSpec

@@ -24,7 +24,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import auth, authz, catalog, lld
+from . import approvals, auth, authz, catalog, lld
 from . import openspec_service as openspec_mod
 from . import conversations as conversations_mod
 from . import decisions as decisions_mod
@@ -178,9 +178,22 @@ def build_remote_mcp(services: Services) -> MCPServer:
 
     @mcp.tool()
     def list_versions(project_id: str) -> list[dict[str, Any]]:
-        """Committed versions of the project (all branches), newest first."""
-        project_for(Principal(store), project_id)
-        return store.list_versions(project_id)
+        """Committed versions of the project (all branches), newest first, with each one's review status."""
+        p = Principal(store)
+        project_for(p, project_id)
+        return approvals.with_status(store, p.org_id, project_id, store.list_versions(project_id))
+
+    @mcp.tool()
+    def get_approval_status(project_id: str, version: int | None = None, branch: str = "main") -> dict[str, Any]:
+        """Review status of a saved version (draft, in_review, approved, changes_requested) with who approved it
+        and the review history; without a version, the status of the branch's latest version."""
+        p = Principal(store)
+        project_for(p, project_id, branch)
+        if version is None:
+            return approvals.branch_status(store, p.org_id, project_id, branch)
+        if not store.get_version(project_id, version, with_state=False):
+            raise ToolError(f"version {version} not found")
+        return approvals.version_status(store, p.org_id, project_id, version)
 
     @mcp.tool()
     def get_architecture_diff(project_id: str, from_version: int, to_version: int | None = None,

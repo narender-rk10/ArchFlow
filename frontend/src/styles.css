@@ -157,6 +157,15 @@ h4 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spac
 .version-list li { padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 3px; }
 .version-list li.active { background: color-mix(in srgb, var(--primary) 8%, var(--panel)); }
 .version-list input { flex: 1; }
+.status.rv-draft { color: var(--muted); }
+.status.rv-in_review { background: color-mix(in srgb, var(--warn) 22%, var(--panel)); }
+.status.rv-approved { background: color-mix(in srgb, var(--ok) 22%, var(--panel)); }
+.status.rv-changes_requested { background: color-mix(in srgb, var(--danger) 18%, var(--panel)); }
+.review-box { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 6px; }
+.review-box textarea { width: 100%; resize: vertical; }
+.review-history { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.version-list .review-history li { padding: 0; border: 0; }
+.review-comment { white-space: pre-wrap; color: var(--muted); padding-left: 8px; border-left: 2px solid var(--border); margin-top: 1px; }
 .activity-list li { padding: 4px 12px; }
 .diff-box { margin: 0 12px 8px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); }
 .diff-text { font-size: 11.5px; white-space: pre-wrap; margin: 6px 0 0; max-height: 240px; overflow: auto; }
@@ -418,6 +427,8 @@ fieldset.bare { border: 0; margin: 0; padding: 0; min-width: 0; display: content
 fieldset.bare:disabled input, fieldset.bare:disabled textarea, fieldset.bare:disabled select { opacity: .75; }
 .members select { min-width: 110px; }
 .roles-help { margin-top: 10px; }
+.approval-policy { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.approval-policy .field input { max-width: 120px; }
 .ok { color: var(--ok); }
 
 /* five sidebar tabs: shrink to fit instead of overflowing */

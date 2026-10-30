@@ -3,6 +3,10 @@ import { api } from "../api";
 import type { AppNotification } from "../types";
 
 const POLL_MS = 20_000;
+const VERB: Record<AppNotification["kind"], string> = {
+  mention: "mentioned you", reply: "replied", review_requested: "asked you to review", approved: "approved",
+  changes_requested: "requested changes to",
+};
 
 /** Your mentions and replies across projects. Refreshes on a timer and whenever ``refreshKey`` changes. */
 export function NotificationBell({ refreshKey, onOpen }: { refreshKey: number; onOpen: (n: AppNotification) => void }) {
@@ -37,7 +41,7 @@ export function NotificationBell({ refreshKey, onOpen }: { refreshKey: number; o
   return (
     <div className="notif" ref={ref}>
       <button className="ghost notif-btn" onClick={() => { setOpen(!open); if (!open) load(); }} aria-haspopup="menu" aria-expanded={open}
-        aria-label={unread ? `Notifications, ${unread} unread` : "Notifications"} title="Mentions and replies">
+        aria-label={unread ? `Notifications, ${unread} unread` : "Notifications"} title="Mentions, replies and reviews">
         <span aria-hidden>🔔</span>
         {unread > 0 && <span className="notif-count">{unread > 99 ? "99+" : unread}</span>}
       </button>
@@ -52,7 +56,7 @@ export function NotificationBell({ refreshKey, onOpen }: { refreshKey: number; o
             {items.map((n) => (
               <li key={n.id}>
                 <button role="menuitem" className={`notif-item ${n.read ? "" : "unread"}`} onClick={() => choose(n)}>
-                  <span className="small"><b>{n.actor_name}</b> {n.kind === "mention" ? "mentioned you" : "replied"} in <b>{n.project_name}</b></span>
+                  <span className="small"><b>{n.actor_name}</b> {VERB[n.kind] ?? n.kind}{n.version != null ? ` v${n.version}` : ""} in <b>{n.project_name}</b></span>
                   <span className="notif-preview small">{n.preview}</span>
                   <span className="muted small">{new Date(n.created_at).toLocaleString()}</span>
                 </button>

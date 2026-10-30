@@ -13,6 +13,9 @@ admin      admin      — members, invites, API tokens, AI provider keys, delete
 owner      owner      — org settings (rename); granting or removing the owner role
 =========  =======================================================================================
 
+Approving a saved version (or requesting changes to it) is for reviewers, architects, admins and owners
+(``can_approve``); developers request reviews but do not approve. See approvals.py for the self-approval rule.
+
 Errors: 401 when not signed in, 404 when the project/org is not in one of your orgs (no existence leak),
 403 when you are a member but your role is insufficient.
 """
@@ -31,12 +34,18 @@ from . import auth, llm, users
 ROLES = ("viewer", "reviewer", "developer", "architect", "admin", "owner")
 RANK = {r: i for i, r in enumerate(ROLES)}
 ACTIONS = {"read": "viewer", "review": "reviewer", "edit": "developer", "admin": "admin", "owner": "owner"}
+APPROVER_ROLES = ("reviewer", "architect", "admin", "owner")
 
 
 def can(role: str | None, action: str) -> bool:
     if role not in RANK:
         return False
     return RANK[role] >= RANK[ACTIONS[action]]
+
+
+def can_approve(role: str | None) -> bool:
+    """Whether a role may approve a version or request changes to it (not by rank: developers cannot)."""
+    return role in APPROVER_ROLES
 
 
 def role_scopes(role: str | None) -> list[str]:

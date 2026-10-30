@@ -29,9 +29,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from .db import migrate
-from .db.models import (Activity, AITrace, AIUsage, ApiToken, Base, Branch, CodeGraph, Comment, Conversation,
+from .db.models import (Activity, AITrace, AIUsage, ApiToken, Approval, Base, Branch, CodeGraph, Comment, Conversation,
                         ConversationMessage, Decision, Invite, Membership, Notification, OAuthClient, OAuthCode,
-                        OpenSpecChange, OpenSpecFile, Org, OrgAIBudget, OrgAIConfig, OrgAIKey, Project, ProjectMemory,
+                        OpenSpecChange, OpenSpecFile, Org, OrgAIBudget, OrgApprovalPolicy, OrgAIConfig, OrgAIKey, Project, ProjectMemory,
                         User, UserSession, Version, YDoc)
 from .db.types import now
 from .models import ProjectState
@@ -73,8 +73,10 @@ AI_TRACE_LIST_COLS = ("id", "org_id", "project_id", "parent_id", "user_id", "use
 COMMENT_TARGETS = ("project", "node", "decision")
 COMMENT_COLS = ("id", "project_id", "branch", "target_type", "target_id", "parent_id", "author_id", "author_name",
                 "body", "mentions", "resolved", "resolved_by", "created_at", "edited_at")
-NOTIFICATION_COLS = ("id", "project_id", "branch", "comment_id", "thread_id", "kind", "actor_name", "preview", "read",
-                     "created_at")
+NOTIFICATION_COLS = ("id", "project_id", "branch", "comment_id", "thread_id", "version", "kind", "actor_name", "preview",
+                     "read", "created_at")
+APPROVAL_ACTIONS = ("request", "approve", "request_changes")
+APPROVAL_COLS = ("id", "version", "branch", "action", "actor_id", "actor_name", "comment", "created_at")
 USER_COLS = ("id", "email", "name", "created_at", "last_login_at")
 INVITE_COLS = ("id", "org_id", "email", "role", "created_by", "created_at", "expires_at", "accepted_at",
                "accepted_by", "revoked")
@@ -805,6 +807,15 @@ class Store:
                                    comment_id=comment["id"], thread_id=thread, kind=kind, actor_name=actor_name,
                                    preview=preview, created_at=now()))
 
+    def add_review_notifications(self, user_ids: list[str], *, pid: str, branch: str, version: int, kind: str,
+                                 actor_name: str, preview: str = "") -> None:
+        """Notify people about a version review (requested, approved, changes requested); see approvals.py."""
+        with self._s() as s:
+            for uid in dict.fromkeys(user_ids):
+                s.add(Notification(user_id=uid, project_id=pid, branch=branch, comment_id=None, thread_id="",
+                                   version=version, kind=kind, actor_name=actor_name, preview=preview[:200],
+                                   created_at=now()))
+
     def list_notifications(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
         with self._s() as s:
             rows = s.execute(select(Notification, Project.name).join(Project, Project.id == Notification.project_id)
@@ -824,6 +835,41 @@ class Store:
             if ids is not None:
                 q = q.where(Notification.id.in_(ids))
             return s.execute(q.values(read=True)).rowcount
+
+    # ---- version approvals ---------------------------------------------------
+    def add_approval(self, pid: str, version: int, branch: str, action: str, *, actor_id: str, actor_name: str,
+                     comment: str = "") -> dict[str, Any]:
+        if action not in APPROVAL_ACTIONS:
+            raise ValueError(f"action must be one of {', '.join(APPROVAL_ACTIONS)}")
+        with self._s() as s:
+            row = Approval(project_id=pid, version=version, branch=branch, action=action, actor_id=actor_id,
+                           actor_name=actor_name, comment=comment, created_at=now())
+            s.add(row)
+            s.flush()
+            return row.to_dict(*APPROVAL_COLS)
+
+    def list_approvals(self, pid: str, version: int | None = None) -> list[dict[str, Any]]:
+        """Review actions of a project (or of one version), oldest first."""
+        with self._s() as s:
+            q = select(Approval).where(Approval.project_id == pid)
+            if version is not None:
+                q = q.where(Approval.version == version)
+            return [a.to_dict(*APPROVAL_COLS) for a in s.scalars(q.order_by(Approval.id))]
+
+    def get_approval_policy(self, org_id: str) -> dict[str, Any]:
+        with self._s() as s:
+            p = s.get(OrgApprovalPolicy, org_id)
+            if p is None:
+                return {"required_approvals": 1, "require_for_adopt": False, "updated_by": None, "updated_at": None}
+            return p.to_dict("required_approvals", "require_for_adopt", "updated_by", "updated_at")
+
+    def set_approval_policy(self, org_id: str, required_approvals: int, require_for_adopt: bool,
+                            user: str) -> dict[str, Any]:
+        with self._s() as s:
+            self._upsert(s, OrgApprovalPolicy, {"org_id": org_id, "required_approvals": required_approvals,
+                                                "require_for_adopt": require_for_adopt, "updated_by": user,
+                                                "updated_at": now()}, ["org_id"])
+        return self.get_approval_policy(org_id)
 
     # ---- OpenSpec files and changes ---------------------------------------
     def list_openspec_files(self, pid: str, prefix: str = "", with_content: bool = True) -> list[dict[str, Any]]:
