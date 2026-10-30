@@ -416,7 +416,7 @@ SUITES: dict[str, tuple[Callable[[dict[str, Any], str | None], Outcome], list[st
     "compare": (run_compare, ["compare.evaluate"]),
     "ask": (run_ask, ["assistant.ask"]),
     "command": (run_command, ["canvas.command"]),
-    "design": (run_design, ["design.turn"]),
+    "design": (run_design, ["design.turn", "design.repair"]),
     "suggestions": (run_suggestions, ["assistant.suggestions"]),
     "review": (run_review, ["review.specialist"]),
     "lld": (run_lld, ["lld.design"]),

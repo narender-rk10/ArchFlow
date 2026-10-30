@@ -134,8 +134,10 @@ export function IssuesPanel({ pid, branch, analysis, aiAvailable, onFocus, onSho
       {shown.length === 0 && <p className="muted small pad">{all.length ? "Only tips left." : "Every check passes."}</p>}
       <ul className="issue-list">
         {shown.map((i, k) => (
-          <li key={k} className={`issue ${i.severity}`} onClick={() => onFocus(i)} title="Show on the canvas">
-            <div><span className="sev">{i.code.startsWith("drift_") ? `code · ${i.severity}` : i.severity}</span> {i.message}</div>
+          <li key={k} className={`issue ${i.severity}`} onClick={() => onFocus(i)}
+            title={i.node_ids.length || i.requirement_ids.length ? "Show on the canvas" : undefined}>
+            <div><span className="sev">{i.code.startsWith("drift_") ? `code · ${i.severity}`
+              : i.code === "completeness" ? `missing · ${i.severity}` : i.severity}</span> {i.message}</div>
             {i.suggestion && <div className="small muted">{i.suggestion}</div>}
           </li>
         ))}

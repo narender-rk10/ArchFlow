@@ -154,6 +154,7 @@ export interface Issue {
   severity: "error" | "warning" | "info";
   code: string; message: string; suggestion: string;
   node_ids: string[]; requirement_ids: string[];
+  capability?: string;  // for "completeness" issues: the checklist capability that is missing
 }
 
 export interface Analysis {
@@ -218,6 +219,15 @@ export interface ArchOption {
   id: string; name: string; summary: string; pros: string[]; cons: string[]; best_for?: string;
   cost: "low" | "medium" | "high"; complexity: "low" | "medium" | "high"; recommended?: boolean;
   components: ArchComponent[]; connections: { from: string; to: string; protocol?: string }[];
+  review?: ArchReview;
+}
+/** What ArchFlow's review changed in a proposed option (deterministic checks + optional AI repair). */
+export interface ArchReview {
+  engine: "rules" | "llm+rules";
+  issues_before: { severity: "error" | "warning" | "info"; code: string; message: string }[];
+  issues_after: { severity: "error" | "warning" | "info"; code: string; message: string }[];
+  fixes: string[];
+  score?: number;
 }
 export interface ArchitecturesCard { type: "architectures"; id: string; title: string; options: ArchOption[]; requirements: Record<string, unknown>[] }
 export type ChatCard = QuestionCard | ArchitecturesCard;

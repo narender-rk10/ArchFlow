@@ -56,9 +56,28 @@ class ConflictError(Exception):
         self.conflicts = conflicts
 
 
-def slugify(text: str) -> str:
+def slugify(text: str, max_len: int = 40) -> str:
+    """Lower-case, hyphen-separated slug of at most ``max_len`` characters, cut at a word boundary."""
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return slug[:40] or "item"
+    if len(slug) > max_len:
+        cut = slug[:max_len + 1]
+        # Prefer the last hyphen (a word boundary); a single over-long word is cut hard.
+        slug = cut[:cut.rfind("-")] if cut.rfind("-") > 0 else slug[:max_len]
+        slug = slug.strip("-")
+    return slug or "item"
+
+
+def unique_slug(text: str, taken, max_len: int = 40, prefix: str = "") -> str:
+    """``prefix + slugify(text)``, made unique against ``taken`` (a container or a predicate) by appending -2, -3…
+
+    The suffix never pushes the slug past ``max_len``: the base is re-cut at a word boundary to make room."""
+    exists = taken if callable(taken) else (lambda name: name in taken)
+    base = slugify(text, max_len)
+    candidate, i = f"{prefix}{base}", 2
+    while exists(candidate):
+        suffix = f"-{i}"
+        candidate, i = f"{prefix}{slugify(base, max_len - len(suffix))}{suffix}", i + 1
+    return candidate
 
 
 def new_node_id(state: ProjectState, name: str) -> str:

@@ -153,7 +153,8 @@ One assistant panel with three modes, docked **left**, **right** or **floating**
 
 ### 🩺 Health & Validation
 
-- **Architecture checks** — orphans, client → database access, shared databases, unguarded LLMs, missing auth or PII controls, missing gateway
+- **Architecture checks** — orphans, client → database access, shared databases, unguarded LLMs, missing auth or PII controls, missing gateway; **data-flow checks** (unauthenticated entry points, queues without producers or consumers, realtime channels without a return path, stores nobody writes) and **domain completeness checklists** (capabilities and requirement areas a food-delivery, fintech, healthcare… product usually needs)
+- **Option review in the design chat** — every proposed architecture is checked before you see it: technologies normalized to one per component, structural and data-flow problems repaired deterministically (auth on entry points, realtime return paths, key management, cache), missing functional areas added as requirement stubs; with an LLM, flawed options get one repair pass (`design.repair` agent) and each card shows its review
 - **Health dashboard** — requirements completeness and approval, traceability %, architecture score, issue counts, and how well the design matches the code
 - **AI review** — four specialist agents (security & privacy, reliability, performance & scale, cost & operations) review the design **in parallel**; findings are ranked by severity, name the components and requirements at risk, and come with **Fix with AI**, an instruction the Edit mode applies after you check it
 

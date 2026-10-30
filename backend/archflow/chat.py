@@ -17,10 +17,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+from . import checklists, option_review
 from .models import NODE_TYPES, ProjectState, active_requirements
-from .ops import slugify
+from .ops import slugify, unique_slug
 
 log = logging.getLogger("archflow.chat")
 
@@ -154,9 +156,9 @@ def offline_turn(turns: list[dict[str, Any]], state: ProjectState) -> dict[str, 
 # --------------------------------------------------------------------------- offline architecture composer
 TECH = {
     "aws": {"gateway": "Amazon API Gateway", "auth": "Amazon Cognito", "db": "Amazon RDS PostgreSQL", "docdb": "Amazon DynamoDB",
-            "cache": "ElastiCache Redis", "queue": "Amazon SQS / EventBridge", "stream": "Amazon MSK (Kafka)", "storage": "Amazon S3",
+            "cache": "ElastiCache Redis", "queue": "Amazon SQS", "stream": "Amazon MSK (Kafka)", "storage": "Amazon S3",
             "fn": "AWS Lambda", "container": "Amazon ECS Fargate", "warehouse": "Amazon Redshift", "llm": "Amazon Bedrock (Claude)",
-            "vector": "OpenSearch / pgvector", "cdn": "CloudFront"},
+            "vector": "Amazon OpenSearch Service", "cdn": "CloudFront"},
     "azure": {"gateway": "Azure API Management", "auth": "Microsoft Entra ID", "db": "Azure Database for PostgreSQL", "docdb": "Azure Cosmos DB",
               "cache": "Azure Cache for Redis", "queue": "Azure Service Bus", "stream": "Azure Event Hubs", "storage": "Azure Blob Storage",
               "fn": "Azure Functions", "container": "Azure Container Apps", "warehouse": "Azure Synapse", "llm": "Azure OpenAI",
@@ -165,7 +167,7 @@ TECH = {
             "cache": "Memorystore Redis", "queue": "Cloud Pub/Sub", "stream": "Cloud Pub/Sub", "storage": "Cloud Storage",
             "fn": "Cloud Run functions", "container": "Cloud Run", "warehouse": "BigQuery", "llm": "Vertex AI Gemini",
             "vector": "AlloyDB pgvector", "cdn": "Cloud CDN"},
-    "agnostic": {"gateway": "Kong / NGINX Ingress", "auth": "Keycloak", "db": "PostgreSQL", "docdb": "MongoDB",
+    "agnostic": {"gateway": "Kong", "auth": "Keycloak", "db": "PostgreSQL", "docdb": "MongoDB",
                  "cache": "Redis", "queue": "RabbitMQ", "stream": "Apache Kafka", "storage": "MinIO (S3 API)",
                  "fn": "Knative", "container": "Kubernetes Deployment", "warehouse": "ClickHouse", "llm": "LLM via LiteLLM (Gemini/Claude)",
                  "vector": "pgvector", "cdn": "Cloudflare"},
@@ -276,8 +278,9 @@ def _components(style: str, answers: dict, t: dict[str, str]) -> tuple[list[dict
     # Messaging layer
     if style == "event_driven":
         add("bus", "Event Stream", "queue", t["stream"], 3, "Domain events between services")
-        for s in services:
-            link(s, "bus", "events")
+        for s in services[:-1]:
+            link(s, "bus", "publish events")
+        link("bus", services[-1], "consume")  # the notification service reacts to domain events
     elif style in ("microservices", "serverless") or _has(answers, "channels", "messaging"):
         add("queue", "Job Queue", "queue", t["queue"], 3, "Async jobs and retries")
         link(services[0], "queue", "enqueue")
@@ -293,7 +296,7 @@ def _components(style: str, answers: dict, t: dict[str, str]) -> tuple[list[dict
         link("users-svc", "users-db", "SQL")
         link("core-svc", "core-db", "SQL")
     scale = (answers.get("scale", {}).get("option_ids") or ["m"])[0]
-    if scale in ("l", "xl") or style == "microservices":
+    if scale != "s" or style == "microservices":  # anything beyond a pilot needs a cache to absorb peaks
         add("cache", "Cache", "cache", t["cache"], 3)
         link(services[0] if style == "monolith" else "core-svc", "cache", "RESP")
     if _has(answers, "data", "files"):
@@ -333,6 +336,11 @@ def _requirements_from_answers(idea: str, answers: dict) -> list[dict[str, Any]]
         reqs.append({"title": f"AI: {', '.join(ai)}", "description": f"Provide {', '.join(ai).lower()}.", "kind": "functional",
                      "priority": "medium", "actors": users,
                      "acceptance_criteria": ["Answers cite their sources", "Agent tool calls are permission-checked and logged"]})
+    if _has(answers, "priority", "compliance"):
+        reqs.append({"title": "Personal data protection", "kind": "non_functional", "category": "privacy", "priority": "high",
+                     "description": "Personal data is encrypted at rest and in transit, access is audit-logged and data "
+                                    "subjects can have their data deleted.",
+                     "acceptance_criteria": ["All PII is encrypted with managed keys", "Deletion requests are completed within 30 days"]})
     pr = answers.get("priority", {}).get("labels")
     if pr:
         reqs.append({"title": f"Priority: {pr[0]}", "description": f"Architecture decisions optimize for {pr[0].lower()}.",
@@ -341,29 +349,39 @@ def _requirements_from_answers(idea: str, answers: dict) -> list[dict[str, Any]]
     return reqs
 
 
-def compose_architectures(idea: str, answers: dict) -> dict[str, Any]:
+def _context(idea: str, answers: dict) -> str:
+    """Text used to detect the domain: the idea plus the chosen answers (not the options that were not chosen)."""
+    return " ".join([idea] + [" ".join(a.get("labels") or []) for a in answers.values()])
+
+
+def compose_architectures(idea: str, answers: dict, styles: list[str] | None = None) -> dict[str, Any]:
+    """Offline composer: up to three styles ranked by the answers, each completed for the detected domain
+    (checklist capabilities) and checked/repaired by the deterministic review."""
     cloud = _cloud(answers)
     t = TECH[cloud]
-    ranked = _rank(answers)[:3]
+    ranked = styles or _rank(answers)[:3]
+    context = _context(idea, answers)
+    requirements = _requirements_from_answers(idea, answers)
+    requirements += option_review.requirement_additions(context, requirements)
     options = []
     for i, style in enumerate(ranked):
         name, summary, pros, cons, best_for, cost, complexity = STYLES[style]
         comps, conns = _components(style, answers, t)
-        options.append({"id": style, "name": name, "style": style, "summary": summary, "pros": pros, "cons": cons,
-                        "best_for": best_for, "cost": cost, "complexity": complexity, "recommended": i == 0,
-                        "components": comps, "connections": conns})
+        option = {"id": style, "name": name, "style": style, "summary": summary, "pros": pros, "cons": cons,
+                  "best_for": best_for, "cost": cost, "complexity": complexity, "recommended": i == 0,
+                  "components": comps, "connections": conns}
+        option_review.review_option(option, requirements, context, cloud=cloud)
+        options.append(option)
     return {"type": "architectures", "id": "architectures", "title": f"Architecture options ({cloud.upper() if cloud != 'agnostic' else 'cloud-agnostic'})",
-            "options": options, "requirements": _requirements_from_answers(idea, answers)}
+            "options": options, "requirements": requirements}
 
 
 # --------------------------------------------------------------------------- LLM interviewer
 CHAT_PROMPT = "design.turn"  # prompts/design.turn.yaml (versioned; see agents.prompts)
+REPAIR_PROMPT = "design.repair"  # prompts/design.repair.yaml: fix one option's problems found by option_review
 
 
-def _schema() -> dict[str, Any]:
-    opt = {"type": "object", "properties": {
-        "id": {"type": "string"}, "label": {"type": "string"}, "description": {"type": "string"},
-        "recommended": {"type": "boolean"}}, "required": ["id", "label", "description", "recommended"]}
+def _arch_schema() -> dict[str, Any]:
     comp = {"type": "object", "properties": {
         "key": {"type": "string"}, "name": {"type": "string"}, "type": {"type": "string", "enum": list(NODE_TYPES)},
         "technology": {"type": "string"}, "description": {"type": "string"}, "layer": {"type": "integer"}},
@@ -377,12 +395,31 @@ def _schema() -> dict[str, Any]:
         "complexity": {"type": "string", "enum": ["low", "medium", "high"]},
         "components": {"type": "array", "items": comp}, "connections": {"type": "array", "items": conn}},
         "required": ["id", "name", "summary", "pros", "cons", "cost", "complexity", "components", "connections"]}
-    req = {"type": "object", "properties": {
+    return arch
+
+
+def _req_schema() -> dict[str, Any]:
+    return {"type": "object", "properties": {
         "title": {"type": "string"}, "description": {"type": "string"},
         "kind": {"type": "string", "enum": ["functional", "non_functional"]}, "category": {"type": "string"},
         "priority": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
         "actors": {"type": "array", "items": {"type": "string"}},
         "acceptance_criteria": {"type": "array", "items": {"type": "string"}}}, "required": ["title", "kind"]}
+
+
+def _repair_schema() -> dict[str, Any]:
+    return {"type": "object", "properties": {
+        "option": _arch_schema(), "fixes": {"type": "array", "items": {"type": "string"}},
+        "additional_architectures": {"type": "array", "items": _arch_schema()},
+        "requirements": {"type": "array", "items": _req_schema()}},
+        "required": ["option", "fixes"]}
+
+
+def _schema() -> dict[str, Any]:
+    opt = {"type": "object", "properties": {
+        "id": {"type": "string"}, "label": {"type": "string"}, "description": {"type": "string"},
+        "recommended": {"type": "boolean"}}, "required": ["id", "label", "description", "recommended"]}
+    arch, req = _arch_schema(), _req_schema()
     return {"type": "object", "properties": {
         "message": {"type": "string"},
         "action": {"type": "string", "enum": ["ask", "propose"]},
@@ -411,11 +448,12 @@ def llm_turn(turns: list[dict[str, Any]], state: ProjectState, org_id: str | Non
 
     asked = sum(1 for t in turns if t.get("role") == "assistant" and (t.get("card") or {}).get("type") == "question")
     project, transcript = _project_summary(state), transcript_text(turns)
+    context = _context(_idea(turns), _answers(turns))
     # The idea stays the same for the whole interview, so later turns reuse the cached lookup.
     docs = DocsRequest(query=f"reference architecture {_idea(turns)[:200]}", about=f"{transcript}\n{project}")
-    data = agents.run_json(CHAT_PROMPT, _schema(), org_id=org_id, docs=docs, variables={
+    data = agents.run_json(CHAT_PROMPT, _schema(), org_id=org_id, docs=docs, max_tokens=PROPOSAL_MAX_TOKENS, variables={
         "max_q": MAX_QUESTIONS, "types": ", ".join(NODE_TYPES), "project": project,
-        "memory": memory, "transcript": transcript, "asked": asked,
+        "memory": memory, "transcript": transcript, "asked": asked, "checklist": _checklist_hint(context).strip(),
         "must_propose": asked >= MAX_QUESTIONS})
 
     if data.get("action") == "ask" and data.get("question") and asked < MAX_QUESTIONS:
@@ -423,17 +461,211 @@ def llm_turn(turns: list[dict[str, Any]], state: ProjectState, org_id: str | Non
         options = _clean_options(q.get("options") or [])
         if len(options) >= 2:
             return {"message": data.get("message", ""), "card": {
-                "type": "question", "id": slugify(q.get("id") or q["question"])[:40] + f"-{asked + 1}",
+                "type": "question", "id": slugify(q.get("id") or q["question"]) + f"-{asked + 1}",
                 "question": q["question"], "why": q.get("why", ""), "multi": bool(q.get("multi")),
                 "options": options, "step": asked + 1, "total": None}}
     archs = [_clean_arch(a, i) for i, a in enumerate(data.get("architectures") or [])]
-    archs = [a for a in archs if a["components"]]
+    archs = [a for a in archs if a["components"]][:MAX_OPTIONS]
     if not archs:  # model did not produce usable options — fall back to the composer
         return {"message": data.get("message") or "Here are architecture options.",
                 "card": compose_architectures(_idea(turns), _answers(turns))}
-    return {"message": data.get("message") or "Here are architecture options.", "card": {
-        "type": "architectures", "id": "architectures", "title": "Architecture options",
-        "options": archs, "requirements": data.get("requirements") or []}}
+    card = {"type": "architectures", "id": "architectures", "title": "Architecture options",
+            "options": archs, "requirements": _clean_requirements(data.get("requirements") or [])}
+    return {"message": data.get("message") or "Here are architecture options.",
+            "card": review_and_repair(card, context, org_id, idea=_idea(turns), answers=_answers(turns))}
+
+
+# --------------------------------------------------------------------------- review-and-repair loop (LLM path)
+MAX_OPTIONS = 4
+PREFERRED_OPTIONS = 3
+PROPOSAL_MAX_TOKENS = 16000
+REPAIR_MAX_TOKENS = 16000
+
+
+def _checklist_hint(context: str) -> str:
+    domains = checklists.detect_domains(context)
+    if not domains:
+        return ""
+    caps = checklists.expected_capabilities(domains)
+    labels = ", ".join(checklists.CAPABILITIES[c]["label"] for c, sev in caps.items() if sev != "info")
+    areas = ", ".join(checklists.AREAS[a]["title"].lower() for d in domains for a in checklists.DOMAINS[d]["areas"])
+    names = ", ".join(checklists.DOMAINS[d]["label"] for d in domains)
+    return (f"Domain checklist ({names}): when proposing, every option needs {labels}; the requirements should "
+            f"cover {areas}.\n\n")
+
+
+def _clean_requirements(reqs: list[dict]) -> list[dict]:
+    out, seen = [], set()
+    for r in reqs:
+        title = (r.get("title") or "").strip()
+        if not title or title.lower() in seen:
+            continue
+        seen.add(title.lower())
+        out.append({**r, "title": title, "kind": r.get("kind") if r.get("kind") in ("functional", "non_functional") else "functional",
+                    "acceptance_criteria": [str(c) for c in r.get("acceptance_criteria") or []],
+                    "actors": [str(a) for a in r.get("actors") or []]})
+    return out
+
+
+def _for_prompt(option: dict) -> dict:
+    keep = ("id", "name", "summary", "pros", "cons", "best_for", "cost", "complexity", "components", "connections")
+    return {k: option[k] for k in keep if k in option}
+
+
+def _repair_call(option: dict, issues: list[dict], context: str, requirements: list[dict], others: list[str],
+                 extra_options: int, areas: list[str], org_id: str | None) -> dict:
+    from . import agents
+
+    problems = "\n".join(f"- [{i['severity']}] {i['message']} Fix: {i['suggestion']}"
+                         for i in issues if i["severity"] in ("error", "warning") or i["code"] in
+                         ("completeness", "erasure_event_log", "single_instance_datastore")) or "- (none found)"
+    asks = []
+    if extra_options:
+        asks.append(f"Also return {extra_options} additional_architectures: genuinely different styles from these "
+                    f"existing options: {', '.join(others)}. Make them complete and correctly wired from the start.")
+    if areas:
+        listed = "; ".join(f"{checklists.AREAS[a]['title']} ({checklists.AREAS[a]['description']})" for a in areas)
+        asks.append(f"Also return requirements (functional, measurable acceptance criteria with numbers) for these "
+                    f"functional areas that no requirement covers yet: {listed}.")
+    user = (f"Product idea and answers: {context}\n\n"
+            f"Requirements: {json.dumps([r.get('title') for r in requirements])}\n\n"
+            f"{_checklist_hint(context)}"
+            f"Option to repair:\n{json.dumps(_for_prompt(option))}\n\n"
+            f"Problems found by ArchFlow's checks:\n{problems}\n\n" + "\n".join(asks))
+    return agents.run_json(REPAIR_PROMPT, _repair_schema(), variables={"request": user}, org_id=org_id,
+                           max_tokens=REPAIR_MAX_TOKENS, question=f"Repair {option.get('name', 'option')}")
+
+
+def _style_of(option: dict) -> str:
+    text = f"{option.get('id', '')} {option.get('name', '')} {option.get('style', '')}".lower()
+    for style, pat in (("monolith", r"monolith"), ("serverless", r"serverless|function"), ("event_driven", r"event"),
+                       ("microservices", r"microservice")):
+        if re.search(pat, text):
+            return style
+    return ""
+
+
+def _distinct(candidate: dict, options: list[dict]) -> bool:
+    names = {c["name"].lower() for c in candidate["components"]}
+    for o in options:
+        if o["name"].strip().lower() == candidate["name"].strip().lower():
+            return False
+        other = {c["name"].lower() for c in o["components"]}
+        if names and len(names & other) / len(names | other) > 0.85:
+            return False
+    return True
+
+
+def review_and_repair(card: dict, context: str, org_id: str | None = None, *, idea: str = "",
+                      answers: dict | None = None) -> dict:
+    """Check every proposed option with the deterministic flow and checklist checks; ask the LLM once per option
+    (concurrently) to repair the ones with errors/warnings, keep whichever version is better, then let the rules
+    fix what is left. The recommended option's call also asks for more alternatives when fewer than three were
+    proposed and for requirements covering uncovered functional areas. Records ``option["review"]``."""
+    from . import llm
+
+    options: list[dict] = card["options"]
+    reqs: list[dict] = card["requirements"]
+    req_text = context + " " + " ".join(f"{r.get('title', '')} {r.get('description', '')}" for r in reqs)
+    areas = checklists.missing_areas(req_text, reqs)
+    check_reqs = reqs + option_review.requirement_additions(context, reqs)  # what the card will have at the end, roughly
+    notes = {i: option_review.normalize_option(o) for i, o in enumerate(options)}
+    before = {i: option_review.check_option(o, check_reqs, context) for i, o in enumerate(options)}
+    want_more = max(0, PREFERRED_OPTIONS - len(options))
+    need = [i for i in range(len(options)) if option_review.blocking(before[i])]
+    if (want_more or areas) and 0 not in need:
+        need.insert(0, 0)
+
+    results: dict[int, dict] = {}
+    if need:
+        def call(i: int) -> dict:
+            return _repair_call(options[i], before[i], context, reqs, [o["name"] for o in options],
+                                want_more if i == 0 else 0, areas if i == 0 else [], org_id)
+
+        with ThreadPoolExecutor(max_workers=min(4, len(need))) as pool:
+            futures = {pool.submit(call, i): i for i in need}
+            for fut in as_completed(futures):
+                i = futures[fut]
+                try:
+                    results[i] = fut.result()
+                except (llm.LLMUnavailable, llm.LLMRefused, ValueError, KeyError, TypeError) as exc:
+                    log.warning("architecture repair for option %d failed (%s); using rule-based repair", i, exc)
+
+    for i, option in enumerate(options):
+        res, prior, engine = results.get(i), list(notes[i]), "rules"
+        if res and isinstance(res.get("option"), dict):
+            try:
+                cand = _clean_arch(res["option"], i)
+            except (ValueError, TypeError):
+                cand = None
+            if cand and cand["components"]:
+                cand.update(id=option["id"], recommended=option.get("recommended", False))
+                cand_notes = option_review.normalize_option(cand)
+                after = option_review.check_option(cand, check_reqs, context)
+                better = (option_review.weight(option_review.blocking(after))
+                          < option_review.weight(option_review.blocking(before[i])))
+                kept_enough = len(cand["components"]) >= 0.6 * len(option["components"])
+                if better and kept_enough:
+                    options[i] = option = cand
+                    prior = [str(f) for f in res.get("fixes") or []] + cand_notes
+                    engine = "llm+rules"
+                elif option_review.blocking(before[i]):
+                    prior.append("AI repair was not better than the original; kept the original")
+        option_review.review_option(option, check_reqs, context, before=before[i], prior_fixes=prior, engine=engine)
+
+    # More alternatives: from the recommended option's repair call, else the offline composer's next-best styles.
+    taken_ids = {o["id"] for o in options}
+    for k, raw in enumerate((results.get(0) or {}).get("additional_architectures") or []):
+        if len(options) >= MAX_OPTIONS or not isinstance(raw, dict):
+            break
+        try:
+            cand = _clean_arch(raw, len(options))
+        except (ValueError, TypeError):
+            continue
+        if not cand["components"] or not _distinct(cand, options):
+            continue
+        cand["id"] = unique_slug(cand["id"], taken_ids)
+        taken_ids.add(cand["id"])
+        cand["recommended"] = False
+        option_review.review_option(cand, check_reqs, context, prior_fixes=["Alternative added by the architecture review"],
+                             engine="llm+rules")
+        options.append(cand)
+    if len(options) < PREFERRED_OPTIONS:
+        _add_composer_options(options, idea, answers or {}, reqs)
+
+    # Requirements breadth: the model's additions first, then checklist stubs for what is still uncovered.
+    seen = {r["title"].lower() for r in reqs}
+    for r in _clean_requirements((results.get(0) or {}).get("requirements") or []):
+        if r["title"].lower() not in seen:
+            seen.add(r["title"].lower())
+            reqs.append({**r, "source": "review"})
+    reqs += option_review.requirement_additions(context, reqs)
+    for i, o in enumerate(options):
+        o["recommended"] = i == 0
+    return card
+
+
+def _add_composer_options(options: list[dict], idea: str, answers: dict, reqs: list[dict]) -> None:
+    """Fill up to the preferred number of options with the offline composer's best styles not yet represented,
+    on the same cloud as the proposed options."""
+    from .analysis import _large_scale
+
+    styles_present = {_style_of(o) for o in options}
+    cloud = option_review.infer_cloud(options[0]) if options else _cloud(answers)
+    text = " ".join(f"{r.get('title', '')} {r.get('description', '')} {' '.join(r.get('acceptance_criteria') or [])}" for r in reqs)
+    fallback = {**answers, "cloud": {"option_ids": [cloud], "labels": [cloud]},
+                "scale": {"option_ids": ["l" if _large_scale(text) else "m"], "labels": []}}
+    styles = [s for s in _rank(fallback) if s not in styles_present][:PREFERRED_OPTIONS - len(options)]
+    if not styles:
+        return
+    composed = compose_architectures(idea, fallback, styles=styles)
+    taken_ids = {o["id"] for o in options}
+    for o in composed["options"]:
+        o["id"] = unique_slug(o["id"], taken_ids)
+        taken_ids.add(o["id"])
+        o["review"]["fixes"].insert(0, "Alternative added by ArchFlow's built-in composer")
+        o["review"]["engine"] = "rules"
+        options.append(o)
 
 
 def _clean_options(options: list[dict]) -> list[dict]:
@@ -487,8 +719,10 @@ def next_turn(turns: list[dict[str, Any]], state: ProjectState, org_id: str | No
 
 # --------------------------------------------------------------------------- applying a chosen architecture
 def architecture_ops(state: ProjectState, option: dict[str, Any], requirements: list[dict[str, Any]],
-                     replace: bool = True) -> list[dict[str, Any]]:
-    """Operations that put a chosen architecture (and its requirements) onto the canvas."""
+                     replace: bool = True, ids_out: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """Operations that put a chosen architecture (and its requirements) onto the canvas.
+
+    ``ids_out``, if given, is filled with component key → node id."""
     ops: list[dict[str, Any]] = []
     if replace:
         # Removing a top-level component also removes its internal (LLD) elements.
@@ -536,6 +770,8 @@ def architecture_ops(state: ProjectState, option: dict[str, Any], requirements: 
                 "technology": c.get("technology", ""), "description": c.get("description", ""),
                 "position": {"x": i * COL_X - width / 2, "y": layer * LAYER_Y},
                 "requirement_ids": _link_requirements(c, linked)}})
+    if ids_out is not None:
+        ids_out.update(ids)
     seen = set()
     for e in option.get("connections") or []:
         a, b = ids.get(e.get("from")), ids.get(e.get("to"))

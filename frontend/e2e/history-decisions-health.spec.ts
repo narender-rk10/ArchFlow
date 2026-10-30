@@ -83,7 +83,8 @@ test("health: score, grouped checks that point at the canvas, and the AI review"
   if (await review.isDisabled()) {
     await expect(page.locator(".ai-review")).toContainText("Add an AI model");  // offline: explained, not hidden
   }
-  const first = page.locator(".issue-list .issue").first();
+  // A check about a component (completeness checks name a missing capability, so there is nothing to select).
+  const first = page.locator(".issue-list .issue[title='Show on the canvas']").first();
   if (await first.count()) {
     await first.click();
     await expect(page.locator(".react-flow__node.selected, .react-flow__node .selected").first().or(page.locator(".diff-banner"))).toBeVisible();

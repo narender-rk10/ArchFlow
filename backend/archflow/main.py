@@ -33,7 +33,7 @@ from .authz import ROLES, Access, Authz, CSRFMiddleware, can, cap_scopes
 from .diff import diff_states, diff_to_text
 from .mcp_remote import Services, build_remote_mcp
 from .models import ProjectState
-from .ops import ConflictError, OpError, apply_ops, resolve_node
+from .ops import ConflictError, OpError, apply_ops, resolve_node, unique_slug
 from .store import Store, default_store
 from .templates import TEMPLATES, build_template
 from .vibe import TARGETS, build_prompt
@@ -615,7 +615,10 @@ def create_app(store: Store | None = None) -> FastAPI:
         conv = design_conversation(pid, body.conversation_id) if body.conversation_id else None
         target = branch
         if body.mode == "branch":
-            target = body.branch_name or f"draft/{chat.slugify(body.option.get('name', 'option'))}"
+            # A derived name is cut at a word boundary and made unique (draft/x, draft/x-2…); an explicit name
+            # that already exists is a conflict.
+            target = body.branch_name or unique_slug(body.option.get("name") or "option",
+                                                     lambda b: store.get_state(pid, b) is not None, prefix="draft/")
             if store.get_state(pid, target) is not None:
                 raise HTTPException(409, f"branch '{target}' already exists")
             store.create_branch(pid, target, state_or_404(pid, branch), store.head_version(pid, branch))

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type {
-  ArchitecturesCard, ArchOption, ChatTurn, Conversation, ConversationMessage, ProjectState, QuestionCard, User,
+  ArchitecturesCard, ArchOption, ArchReview, ChatTurn, Conversation, ConversationMessage, ProjectState, QuestionCard, User,
 } from "../types";
 import { useAiSuggestions } from "../aiSuggestions";
 import { TYPE_META } from "./ArchNode";
@@ -400,6 +400,35 @@ function QuestionView({ card, active, answered, onAnswer, onSkip }: {
   );
 }
 
+/** "Reviewed: fixed N issues" with an expandable list of the changes and anything still open. */
+function ReviewNote({ review }: { review: ArchReview }) {
+  const key = (i: { code: string; message: string }) => `${i.code}|${i.message}`;
+  const after = new Set(review.issues_after.map(key));
+  const fixed = review.issues_before.filter((i) => !after.has(key(i))).length;
+  const open = review.issues_after;
+  const by = review.engine === "llm+rules" ? "AI + rules" : "rules";
+  const label = fixed > 0
+    ? `Reviewed: fixed ${fixed} issue${fixed === 1 ? "" : "s"}`
+    : review.fixes.length ? `Reviewed: ${review.fixes.length} improvement${review.fixes.length === 1 ? "" : "s"}` : "Reviewed: no issues found";
+  if (!review.fixes.length && !open.length) return <div className="arch-review tiny ok">✓ {label}</div>;
+  return (
+    <details className="arch-review tiny">
+      <summary>
+        <span className={open.some((i) => i.severity === "error") ? "warn" : "ok"}>✓ {label}</span>
+        {open.length > 0 && <span className="muted"> · {open.length} open</span>}
+        <span className="muted"> · by {by}</span>
+      </summary>
+      {review.fixes.length > 0 && <ul>{review.fixes.map((f, k) => <li key={k}>{f}</li>)}</ul>}
+      {open.length > 0 && (
+        <>
+          <div className="muted">Still open:</div>
+          <ul>{open.map((i, k) => <li key={k} className={`sev-${i.severity}`}>{i.message}</li>)}</ul>
+        </>
+      )}
+    </details>
+  );
+}
+
 function ArchitecturesView({ card, disabled, canvasEmpty, onApply }: {
   card: ArchitecturesCard; disabled: boolean; canvasEmpty: boolean;
   onApply: (o: ArchOption, mode: "replace" | "branch") => void;
@@ -424,6 +453,7 @@ function ArchitecturesView({ card, disabled, canvasEmpty, onApply }: {
               <div className="arch-body">
                 <p className="small">{o.summary}</p>
                 {o.best_for && <p className="tiny muted">Best for: {o.best_for}</p>}
+                {o.review && <ReviewNote review={o.review} />}
                 <div className="pc">
                   <ul className="pros small">{o.pros.map((p) => <li key={p}>{p}</li>)}</ul>
                   <ul className="cons small">{o.cons.map((c) => <li key={c}>{c}</li>)}</ul>
