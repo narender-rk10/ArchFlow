@@ -32,7 +32,7 @@ from .db import migrate
 from .db.models import (Activity, AITrace, AIUsage, ApiToken, Approval, Base, Branch, CodeGraph, Comment, Conversation,
                         ConversationMessage, Decision, Invite, Membership, Notification, OAuthClient, OAuthCode,
                         OpenSpecChange, OpenSpecFile, Org, OrgAIBudget, OrgApprovalPolicy, OrgAIConfig, OrgAIKey, Project, ProjectMemory,
-                        User, UserSession, Version, YDoc)
+                        RequirementRevision, User, UserSession, Version, YDoc)
 from .db.types import now
 from .models import ProjectState
 
@@ -470,6 +470,27 @@ class Store:
             rows = s.scalars(select(Activity).where(Activity.project_id == pid, Activity.branch == branch)
                              .order_by(Activity.id.desc()).limit(limit))
             return [a.to_dict("actor", "summary", "rev", "created_at") for a in rows]
+
+    # ---- requirement history (see history.py) ------------------------------
+    def log_requirement_revisions(self, pid: str, branch: str, actor: str, rev: int,
+                                  entries: list[dict[str, Any]]) -> None:
+        """``entries``: [{requirement_id, action, changes: [{field, before, after}]}]."""
+        if not entries:
+            return
+        with self._s() as s:
+            ts = now()
+            s.add_all(RequirementRevision(project_id=pid, branch=branch, actor=actor, rev=rev, created_at=ts,
+                                          requirement_id=e["requirement_id"], action=e["action"],
+                                          changes=list(e["changes"])) for e in entries)
+
+    def list_requirement_revisions(self, pid: str, branch: str, rid: str, limit: int = 200) -> list[dict[str, Any]]:
+        """Newest first."""
+        with self._s() as s:
+            rows = s.scalars(select(RequirementRevision)
+                             .where(RequirementRevision.project_id == pid, RequirementRevision.branch == branch,
+                                    RequirementRevision.requirement_id == rid)
+                             .order_by(RequirementRevision.id.desc()).limit(limit))
+            return [r.to_dict("id", "requirement_id", "rev", "action", "actor", "changes", "created_at") for r in rows]
 
     # ---- collaborative documents (binary Yjs state) -----------------------
     def get_ydoc(self, pid: str, branch: str) -> bytes | None:

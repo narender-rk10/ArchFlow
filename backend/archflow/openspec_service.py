@@ -43,7 +43,7 @@ from fastapi import Depends, FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from . import agents, change_spec, llm
-from .models import ProjectState
+from .models import ProjectState, without_deleted
 from .vibe import resolve_scope
 
 log = logging.getLogger("archflow.openspec")
@@ -287,6 +287,7 @@ def generate(store: Any, pid: str, state: ProjectState, project_name: str, node_
              extra: str = "", memory: str = "", decisions: list[dict[str, Any]] | None = None,
              org_id: str | None = None, use_llm: bool = True, progress: Progress = lambda s: None) -> dict[str, Any]:
     """Write, validate and store a new change; returns its metadata (see the module docstring)."""
+    state = without_deleted(state)
     scope = resolve_scope(state, node_ids, requirement_ids)
     if not scope.node_ids and not scope.requirement_ids:
         raise ValueError("There is nothing to specify yet: add components or requirements first.")

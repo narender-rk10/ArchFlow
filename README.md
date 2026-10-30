@@ -137,6 +137,9 @@ One assistant panel with three modes, docked **left**, **right** or **floating**
 - **Structured FR/NFR objects** — actors, acceptance criteria, priority, status, category
 - **Completeness lint** — vague terms ("fast", "scalable"…), missing acceptance criteria or actors, missing NFR categories
 - **Traceability** — requirement ↔ component links; click a requirement to highlight everything that implements it; untraced requirements are flagged
+- **History** — every change to a requirement is recorded with who made it (a person, the AI, or an agent via MCP), when, and each field's value before → after; open a requirement and choose **History** (`GET /api/projects/{id}/requirements/{req}/history`)
+- **Soft delete** — deleting a requirement moves it to the **Deleted** filter with its component links kept, so **Restore** brings it back intact; deleted requirements are left out of health, traceability, AI context, coding briefs, OpenSpec changes and MCP tools. Admins can **Delete permanently** (the history is kept)
+- **Stale links** — when a requirement changes after a component linked to it last changed, the component gets a ⟳ badge on the canvas and the Inspector lists what changed; **Mark reviewed** confirms the component still fits. Staleness is computed from revision numbers (`stale_links` in the analysis), nothing extra is stored
 
 ---
 
@@ -303,7 +306,7 @@ flowchart LR
 
 ### The Operation Pipeline
 
-Every mutation — from a person, the assistant, an MCP agent or a restore — is a list of operations (`add_node`, `update_node`, `remove_node`, `add_edge`, `update_edge`, `remove_edge`, `add_requirement`, `update_requirement`, `remove_requirement`) applied by `ops.apply_ops`. A batch is atomic, validated and logged. Update ops carry `base_rev`, the revision the editor last saw, so overlapping edits are detected per field (HTTP 409 for strict API/MCP callers).
+Every mutation — from a person, the assistant, an MCP agent or a restore — is a list of operations (`add_node`, `update_node`, `remove_node`, `add_edge`, `update_edge`, `remove_edge`, `add_requirement`, `update_requirement`, `remove_requirement` (a soft delete), `restore_requirement`, `purge_requirement` (admins), `mark_reviewed`) applied by `ops.apply_ops`. A batch is atomic, validated and logged. Update ops carry `base_rev`, the revision the editor last saw, so overlapping edits are detected per field (HTTP 409 for strict API/MCP callers).
 
 ---
 

@@ -30,7 +30,7 @@ from . import conversations as conversations_mod
 from . import decisions as decisions_mod
 from .analysis import full_analysis, trace_requirement
 from .diff import diff_states, diff_to_text
-from .models import NODE_TYPES, ProjectState
+from .models import NODE_TYPES, ProjectState, without_deleted
 from .ops import OpError, ConflictError, resolve_node
 from .store import MEMORY_CATEGORIES
 from .templates import TEMPLATES, build_template
@@ -120,6 +120,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
         return project, state
 
     def compact(state: ProjectState) -> dict[str, Any]:
+        state = without_deleted(state)
         return {
             "rev": state.rev,
             "components": [{"id": n.id, "name": n.name, "type": n.type, "technology": n.technology,
@@ -128,7 +129,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
                            for n in state.nodes.values()],
             "connections": [{"id": e.id, "source": e.source, "target": e.target, "protocol": e.protocol, "label": e.label}
                             for e in state.edges.values()],
-            "requirements": [r.model_dump(exclude={"rev", "field_revs"}) for r in state.requirements.values()],
+            "requirements": [r.model_dump(exclude={"rev", "field_revs", "deleted"}) for r in state.requirements.values()],
         }
 
     async def edit(project_id: str, branch: str, ops: list[dict[str, Any]]) -> dict[str, Any]:
@@ -212,6 +213,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
         _, state = project_for(Principal(store), project_id, branch)
         order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
         tasks = []
+        state = without_deleted(state)
         for r in state.requirements.values():
             if r.status == "implemented" and not include_done:
                 continue
@@ -226,7 +228,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
         """Implementation brief for one requirement: affected components, interfaces, acceptance criteria and tests.
         target: claude-code, codex, gemini-cli, aider or generic."""
         project, state = project_for(Principal(store), project_id, branch)
-        if requirement_id not in state.requirements:
+        if requirement_id not in without_deleted(state).requirements:
             raise ToolError(f"requirement {requirement_id} not found")
         return build_prompt(state, project["name"], [], [requirement_id], target if target in TARGETS else "generic")
 
@@ -374,7 +376,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
         p = Principal(store)
         p.require_write()
         _, state = project_for(p, project_id, branch)
-        if requirement_id not in state.requirements:
+        if requirement_id not in without_deleted(state).requirements:
             raise ToolError(f"requirement {requirement_id} not found")
         if status not in ("in_progress", "review", "implemented"):
             raise ToolError("status must be in_progress, review or implemented")

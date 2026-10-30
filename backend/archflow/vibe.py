@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .analysis import trace_requirement
-from .models import Edge, ProjectState
+from .models import Edge, ProjectState, without_deleted
 
 TARGETS = {
     "claude-code": "Claude Code",
@@ -34,6 +34,7 @@ class Scope:
 def resolve_scope(state: ProjectState, node_ids: list[str], requirement_ids: list[str]) -> Scope:
     """Expand a selection: requirements pull in the components tracing to them, components pull in the
     requirements they implement; nothing selected means the whole system. Notes are never in scope."""
+    state = without_deleted(state)
     node_ids = [n for n in node_ids if n in state.nodes]
     requirement_ids = [r for r in requirement_ids if r in state.requirements]
     for rid in requirement_ids:
@@ -56,6 +57,7 @@ def resolve_scope(state: ProjectState, node_ids: list[str], requirement_ids: lis
 
 def build_prompt(state: ProjectState, project_name: str, node_ids: list[str], requirement_ids: list[str],
                  target: str = "claude-code", extra: str = "") -> str:
+    state = without_deleted(state)
     node_ids = [n for n in node_ids if n in state.nodes]
     requirement_ids = [r for r in requirement_ids if r in state.requirements]
 

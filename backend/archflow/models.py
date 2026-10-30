@@ -86,6 +86,8 @@ class Requirement(Versioned):
     actors: list[str] = Field(default_factory=list)
     acceptance_criteria: list[str] = Field(default_factory=list)
     status: ReqStatus = "draft"
+    source: dict[str, str] = Field(default_factory=dict)  # provenance: type, ref, url, at
+    deleted: bool = False
 
 
 class ProjectState(BaseModel):
@@ -99,3 +101,22 @@ class ProjectState(BaseModel):
 
 # Fields that clients may not set directly through an update op.
 PROTECTED_FIELDS = {"id", "rev", "field_revs"}
+
+
+# Soft delete: a removed requirement stays in the state with ``deleted=True`` (its links kept) so it can be restored.
+# Everything that reads requirements — analysis, AI context, exports, MCP — sees only the active ones.
+def active_requirements(state: ProjectState) -> dict[str, Requirement]:
+    return {rid: r for rid, r in state.requirements.items() if not r.deleted}
+
+
+def without_deleted(state: ProjectState) -> ProjectState:
+    """``state`` without soft-deleted requirements or the components' links to them (``state`` itself if none)."""
+    gone = {rid for rid, r in state.requirements.items() if r.deleted}
+    if not gone:
+        return state
+    out = state.model_copy(deep=True)
+    for rid in gone:
+        del out.requirements[rid]
+    for node in out.nodes.values():
+        node.requirement_ids = [r for r in node.requirement_ids if r not in gone]
+    return out

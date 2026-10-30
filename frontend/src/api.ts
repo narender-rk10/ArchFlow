@@ -1,7 +1,7 @@
 import type { Activity, Analysis, ArchOption, Branch, ChatCard, ChatTurn, ApiToken, Catalog, Diff, Op, Org, Project, ProjectState, Version } from "./types";
 import type { AppNotification, Comment, CommentTarget, Decision, Evaluation } from "./types";
 import type { AIConfig, AIGroup, AIProvider, AISettings, AITestResult, Invite, InviteInfo, Me, Member, Role } from "./types";
-import type { ComponentViews, LldResult } from "./types";
+import type { ComponentViews, LldResult, RequirementRevision } from "./types";
 import type { MergePreview, MergeResolution, MergeResult, MergeSuggestion } from "./types";
 import type { CodeGraphRecord, CodeJob, CodeOverview, DriftResult, ImpactResult, ReconstructResult } from "./types";
 import type { Conversation, ConversationKind, ConversationMessage, MemoryCategory, MemoryItem } from "./types";
@@ -178,6 +178,11 @@ export const api = {
   mergeApply: (pid: string, source: string, target: string, resolutions: MergeResolution[], source_rev: number, target_rev: number) =>
     call<MergeResult>("POST", `/projects/${pid}/merge/apply`, { source, target, resolutions, source_rev, target_rev }),
   analysis: (pid: string, branch: string) => call<Analysis>("GET", `/projects/${pid}/analysis`, undefined, b(branch)),
+  requirementHistory: (pid: string, branch: string, rid: string) =>
+    call<RequirementRevision[]>("GET", `/projects/${pid}/requirements/${encodeURIComponent(rid)}/history`, undefined, b(branch)),
+  /** Admins: remove a deleted requirement permanently (its history is kept). */
+  purgeRequirement: (pid: string, branch: string, rid: string) =>
+    call<{ summary: string[]; rev: number }>("DELETE", `/projects/${pid}/requirements/${encodeURIComponent(rid)}`, undefined, b(branch)),
   promptTargets: () => call<{ key: string; name: string }[]>("GET", "/prompt-targets"),
   prompt: (pid: string, branch: string, node_ids: string[], requirement_ids: string[], target: string, extra: string) =>
     call<{ prompt: string }>("POST", `/projects/${pid}/prompt`, { node_ids, requirement_ids, target, extra }, b(branch)),

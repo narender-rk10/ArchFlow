@@ -1,4 +1,4 @@
-import { NODE_TYPES, type Catalog, type Op, type ProjectState } from "../types";
+import { activeRequirements, NODE_TYPES, type Catalog, type Op, type ProjectState, type StaleLink } from "../types";
 import { VENDOR_STYLE } from "./Palette";
 import { Field } from "./Field";
 import { TYPE_META } from "./ArchNode";
@@ -37,15 +37,41 @@ interface Props {
   onOpenInternals?: (nodeId: string) => void;
   /** Viewer/reviewer: fields are shown but disabled, delete actions hidden. */
   readOnly?: boolean;
+  /** Links whose requirement changed after the component (from the analysis). */
+  stale?: StaleLink[];
+  /** Confirm the component still fits a changed requirement (all of its stale links when ``requirementId`` is omitted). */
+  onReviewed?: (nodeId: string, requirementId?: string) => void;
 }
 
-export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pid, branch, onOpenInternals, readOnly = false }: Props) {
+/** "Changed since this component": linked requirements edited after the component was, with Mark reviewed. */
+function StaleLinks({ links, state, readOnly, onReviewed }: { links: StaleLink[]; state: ProjectState; readOnly: boolean;
+  onReviewed?: (nodeId: string, requirementId?: string) => void }) {
+  if (!links.length) return null;
+  return (
+    <div className="field stale-links">
+      <span>Requirements changed since this component</span>
+      {links.map((l) => (
+        <div key={l.requirement_id} className="row gap small">
+          <span className="chip stale" title={state.requirements[l.requirement_id]?.title}>{l.requirement_id}</span>
+          <span className="muted tiny">{l.fields.join(", ")} changed</span>
+          {!readOnly && onReviewed && (
+            <button className="small" onClick={() => onReviewed(l.node_id, l.requirement_id)}
+              title="The component still fits this requirement: clear the badge">Mark reviewed</button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pid, branch, onOpenInternals, readOnly = false,
+  stale = [], onReviewed }: Props) {
   if (nodeIds.length === 1 && edgeIds.length === 0) {
     const n = state.nodes[nodeIds[0]];
     if (!n) return null;
     const upd = (field: string, value: unknown, base_rev: number) =>
       send([{ op: "update_node", id: n.id, changes: { [field]: value }, base_rev }]);
-    const reqs = Object.values(state.requirements);
+    const reqs = activeRequirements(state);
     return (
       <div className="inspector">
         <div className="insp-head" style={{ ["--accent" as string]: TYPE_META[n.type].color }}>
@@ -112,6 +138,7 @@ export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pi
           </div>
         </div>
         </fieldset>
+        <StaleLinks links={stale.filter((l) => l.node_id === n.id)} state={state} readOnly={readOnly} onReviewed={onReviewed} />
         {n.props && <CodeTrace props={n.props} />}
         <div className="insp-actions">
           {onOpenInternals && n.type !== "note" && (

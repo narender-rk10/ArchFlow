@@ -1,4 +1,4 @@
-import type { Analysis, ArchNode, ProjectState } from "./types";
+import { activeRequirements, type Analysis, type ArchNode, type ProjectState } from "./types";
 
 /**
  * Starting prompts for the assistant's Edit and Ask modes, built from what is on the canvas (component names, what is
@@ -65,7 +65,7 @@ export function buildSuggestions(state: ProjectState | null, analysis: Analysis 
   }
 
   // Questions about this project.
-  const reqs = Object.values(state.requirements);
+  const reqs = activeRequirements(state);
   const llm = of("llm")[0];
   if (llm) ask.push(`What data is sent to ${llm.name}, and is any of it personal?`);
   if (svc) ask.push(`What are the single points of failure around ${svc.name}?`);

@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from . import approvals
 from . import evaluation as evaluation_mod
-from . import llm
+from . import history, llm
 from .models import ProjectState
 from .store import DECISION_STATUSES
 
@@ -292,6 +292,7 @@ def register_routes(app: FastAPI, store: Any, *, authz: Any,
             store.save_state(pid, target, adopted)
             summary = [f"adopted {source} ({did})"]
             store.log_activity(pid, target, actor, summary, adopted.rev)
+            history.record(store, pid, target, actor, current, adopted)
         await sync_to_live_doc(pid, target, current, adopted, actor)
         version = store.commit(pid, target, f"Adopted {source} ({did})", actor, adopted)
         decision = update_decision(store, pid, did, {"status": "accepted"}, actor)

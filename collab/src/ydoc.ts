@@ -7,6 +7,8 @@
  *
  * Mutations come in two shapes:
  *  - ops    (`applyOps`):   what the canvas UI does — add/update/remove nodes, edges, requirements.
+ *                           Removing a requirement is a soft delete (`deleted: true`, links kept) undone by
+ *                           `restore_requirement`; permanent removal is an admin API call (`purge_requirement`).
  *  - patches (`applyPatch`): what the API sends for server-side changes (AI, MCP, restore) — field-level sets/deletes.
  */
 import * as Y from "yjs";
@@ -26,6 +28,7 @@ const NODE_DEFAULTS = { type: "service", technology: "", vendor: "", catalog_id:
 const EDGE_DEFAULTS = { protocol: "", label: "" };
 const REQ_DEFAULTS = {
   description: "", kind: "functional", category: "", priority: "medium", actors: [], acceptance_criteria: [], status: "draft",
+  source: {}, deleted: false,
 };
 
 export const coll = (doc: Y.Doc, c: Collection) => doc.getMap<Y.Map<unknown>>(c);
@@ -244,6 +247,9 @@ export function validateOps(doc: Y.Doc, ops: Op[]): void {
         break;
       case "remove_requirement":
         break;
+      case "restore_requirement":
+        if (!coll(doc, "requirements").has(String(op.id))) throw new OpError(`requirement '${String(op.id)}' not found`);
+        break;
       default:
         throw new OpError(`unknown op '${op.op}'`);
     }
@@ -322,13 +328,13 @@ export function applyOps(doc: Y.Doc, ops: Op[], origin: unknown = ORIGIN_LOCAL):
           setFields(reqs, id, op.changes as Record<string, unknown>);
           break;
         }
-        case "remove_requirement": {
+        case "remove_requirement":
+        case "restore_requirement": {
           const id = String(op.id);
-          reqs.delete(id);
-          nodes.forEach((n) => {
-            const ids = (n.get("requirement_ids") as string[] | undefined) ?? [];
-            if (ids.includes(id)) n.set("requirement_ids", ids.filter((x) => x !== id));
-          });
+          if (!reqs.has(id)) break; // already gone (e.g. removed permanently)
+          const deleted = op.op === "remove_requirement";
+          setFields(reqs, id, { deleted });
+          summary.push(`${deleted ? "removed" : "restored"} ${id}`);
           break;
         }
         default:

@@ -159,6 +159,25 @@ class Activity(Base):
     created_at: Mapped[str] = created()
 
 
+class RequirementRevision(Base):
+    """One change to one requirement: who, at which revision, and each field's value before and after."""
+    __tablename__ = "requirement_revisions"
+    __table_args__ = (
+        CheckConstraint("action IN ('added', 'updated', 'deleted', 'restored', 'purged')",
+                        name="ck_requirement_revisions_action"),
+        Index("idx_requirement_revisions", "project_id", "branch", "requirement_id", text("id DESC")),
+    )
+    id: Mapped[int] = mapped_column(BigId, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(Text, _fk("projects.id"), nullable=False)
+    branch: Mapped[str] = mapped_column(Text, nullable=False)
+    requirement_id: Mapped[str] = mapped_column(Text, nullable=False)
+    rev: Mapped[int] = mapped_column(Integer, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    changes: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, nullable=False)  # [{field, before, after}]
+    created_at: Mapped[str] = created()
+
+
 class YDoc(Base):
     """Binary Yjs state of a branch's live collaborative document."""
     __tablename__ = "ydocs"
