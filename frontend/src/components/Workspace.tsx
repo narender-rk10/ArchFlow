@@ -26,6 +26,7 @@ import { CommentsPanel } from "./CommentsPanel";
 import { NotificationBell } from "./NotificationBell";
 import type { AppNotification, Comment, Member } from "../types";
 import { ConnectDialog } from "./ConnectDialog";
+import { DiagramsDialog } from "./DiagramsDialog";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { DesignChat } from "./DesignChat";
 import { PromptDialog } from "./Dialogs";
@@ -112,6 +113,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const [loadError, setLoadError] = useState("");
   const [connectOpen, setConnectOpen] = useState(false);
   const [codeOpen, setCodeOpen] = useState(false);
+  const [diagramsOpen, setDiagramsOpen] = useState(false);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [converting, setConverting] = useState(false);
   const [ai, setAi] = useState<{ available: boolean; model: string } | null>(null);
@@ -746,6 +748,8 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
             <div className="tools-pop" role="menu">
               <button role="menuitem" onClick={() => { setToolsOpen(false); setCodeOpen(true); }}>
                 <b>⟨/⟩ Code analysis</b><span className="muted tiny">Reconstruct a repository, check drift and change impact</span></button>
+              <button role="menuitem" onClick={() => { setToolsOpen(false); setDiagramsOpen(true); }}>
+                <b>◫ Diagrams</b><span className="muted tiny">C4, sequence, ER, deployment and data flow as Mermaid / PlantUML</span></button>
               <button role="menuitem" onClick={() => { setToolsOpen(false); setConnectOpen(true); }}>
                 <b>⌘ Connect AI agents</b><span className="muted tiny">Claude, Codex and others over MCP</span></button>
               <button role="menuitem" onClick={() => { setToolsOpen(false); toggleCanvasFull(); }}>
@@ -954,6 +958,10 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
 
       {connectOpen && project && (
         <ConnectDialog orgId={project.org_id ?? "org-default"} canManage={can(role, "admin")} onClose={() => setConnectOpen(false)} />
+      )}
+      {diagramsOpen && (
+        <DiagramsDialog pid={pid} branch={branch} projectName={project?.name ?? "diagram"} aiAvailable={!!ai?.available}
+          rev={state?.rev ?? 0} onClose={() => setDiagramsOpen(false)} />
       )}
       {codeOpen && (
         <CodeDialog pid={pid} branch={branch} readOnly={readOnly} toast={toast} onClose={() => setCodeOpen(false)}

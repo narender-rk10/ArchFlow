@@ -24,7 +24,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import auth, authz, catalog, lld
+from . import auth, authz, catalog, diagrams, lld
 from . import openspec_service as openspec_mod
 from . import conversations as conversations_mod
 from . import decisions as decisions_mod
@@ -413,6 +413,24 @@ def build_remote_mcp(services: Services) -> MCPServer:
         if not node:
             raise ToolError(f"component '{component}' not found")
         return lld.views(state, node)
+
+    @mcp.tool()
+    def get_diagram(project_id: str, diagram: str = "", branch: str = "main", format: str = "mermaid") -> dict[str, Any]:
+        """Diagrams derived from the model as text. Without `diagram`, lists them with their alt text: hld,
+        c4-context, c4-container, sequence-1, sequence-2… (one per critical request flow), er (all LLD tables),
+        deployment and dataflow (trust boundaries). With `diagram`, returns its source in `format` (mermaid or
+        plantuml) plus the alt text."""
+        if format not in ("mermaid", "plantuml"):
+            raise ToolError("format must be 'mermaid' or 'plantuml'")
+        p = Principal(store)
+        project, state = project_for(p, project_id, branch)
+        found = diagrams.all_diagrams(state, project["name"], p.org_id)
+        if not diagram:
+            return {"diagrams": [diagrams.summary(d) for d in found]}
+        d = next((x for x in found if x["id"] == diagram), None)
+        if not d:
+            raise ToolError(f"diagram '{diagram}' not found; available: {', '.join(x['id'] for x in found)}")
+        return {**diagrams.summary(d), "format": format, "source": d[format]}
 
     @mcp.tool()
     async def commit_version(project_id: str, message: str, branch: str = "main") -> dict[str, Any]:

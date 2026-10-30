@@ -20,10 +20,10 @@ from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from . import (accounts, ai, openspec_service, diagram_export, auth, catalog, chat, collab_sync, comments, conversations, decisions, lld, llm,
+from . import (accounts, ai, openspec_service, diagram_export, diagrams, auth, catalog, chat, collab_sync, comments, conversations, decisions, lld, llm,
                observability, review, secrets_box, suggestions, usage, users)
 from .analysis import full_analysis, trace_requirement
 from .codegraph.service import CodeGraphService
@@ -463,6 +463,31 @@ def create_app(store: Store | None = None) -> FastAPI:
         flow = lld.sequence_steps(state, node, lld.api_view(state, node))
         html = await run_export(diagram_export.export_sequence, flow, f"{node.name}: request flow")
         return export_response(html, f"{node.name}-request-flow")
+
+    # ---- diagrams as text: C4, sequence, ER, deployment, data flow (Mermaid / PlantUML, see diagrams.py) ----
+    @app.get("/api/projects/{pid}/diagrams")
+    async def list_diagrams(pid: str, branch: str = "main", ai: bool = False, a: Access = Depends(read)):
+        """The diagrams this branch's model yields, with alt text (sources via the route below). ``ai=true`` lets the
+        diagrams.sequence agent name the critical flows (when a model is configured)."""
+        state = state_or_404(pid, branch)
+        found = await asyncio.to_thread(diagrams.all_diagrams, state, a.project["name"], a.org_id, ai)
+        return {"branch": branch, "diagrams": [diagrams.summary(d) for d in found]}
+
+    @app.get("/api/projects/{pid}/diagrams/{diagram_id}")
+    async def get_diagram(pid: str, diagram_id: str, branch: str = "main", ai: bool = False,
+                          fmt: str = Query("", alias="format", pattern="^(|mermaid|plantuml)$"),
+                          a: Access = Depends(read)):
+        """One diagram as Mermaid and PlantUML text plus alt text; ``format=mermaid|plantuml`` returns that source
+        alone as a text file."""
+        state = state_or_404(pid, branch)
+        d = await asyncio.to_thread(diagrams.get, state, a.project["name"], diagram_id, a.org_id, ai)
+        if not d:
+            raise HTTPException(404, "diagram not found")
+        if fmt:
+            ext = "mmd" if fmt == "mermaid" else "puml"
+            filename = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{a.project['name']}-{branch}-{diagram_id}").strip("-")[:80]
+            return PlainTextResponse(d[fmt], headers={"Content-Disposition": f'attachment; filename="{filename}.{ext}"'})
+        return d
 
     # ---- vibe coding ----
     @app.get("/api/prompt-targets")

@@ -223,6 +223,14 @@ export interface ComponentViews {
   sequence: { mermaid: string };
 }
 
+// ---- diagrams derived from the model (backend diagrams.py) ----
+export type DiagramKind = "hld" | "c4-context" | "c4-container" | "sequence" | "er" | "deployment" | "dataflow";
+export interface DiagramInfo {
+  id: string; kind: DiagramKind; title: string; alt: string; empty: boolean;
+  flow?: string; requirement_ids?: string[]; path?: string[]; engine?: "llm" | "offline";
+}
+export interface Diagram extends DiagramInfo { mermaid: string; plantuml: string }
+
 // ---- repository analysis (code graph) ----
 export interface CodeSummary {
   stats: { files?: number; symbols?: number; edges?: number; communities?: number };

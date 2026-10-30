@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .. import ai, chat, evaluation, suggestions
+from .. import ai, chat, diagrams, evaluation, suggestions
 from ..analysis import full_analysis
 from ..models import ProjectState
 from ..ops import apply_ops
@@ -182,6 +182,28 @@ def run_suggestions(case: dict[str, Any], org_id: str | None) -> Outcome:
                    contexts=[json.dumps(suggestions.project_summary(state))], raw=items)
 
 
+def run_diagrams(case: dict[str, Any], org_id: str | None) -> Outcome:
+    state = build(case.get("project"))
+    found, engine = diagrams.flows(state, org_id, ai=True)
+    exp = case.get("expect") or {}
+    edges = {(e.source, e.target) for e in state.edges.values()}
+    entries = {n.id for n in state.nodes.values() if n.type == "client"} or {p[0] for p in diagrams.candidate_paths(state)}
+    checks: list[Check] = [
+        ("engine is llm", engine == "llm", engine),
+        (f"at least {exp.get('min_flows', 1)} flow(s)", len(found) >= exp.get("min_flows", 1), str(len(found))),
+        ("every flow follows connections", all(all((a, b) in edges for a, b in zip(f.path, f.path[1:])) for f in found), ""),
+        ("every flow starts at an entry point", all(f.path[0] in entries for f in found), ""),
+    ]
+    if found:
+        share = sum(1 for f in found if f.requirement_ids) / len(found)
+        checks.append(("flows name their requirements", share >= exp.get("requirement_share", 0.5), f"{share:.0%}"))
+    text = "\n".join(f"- {f.name} ({', '.join(f.requirement_ids)}): " + " -> ".join(state.nodes[x].name for x in f.path)
+                     for f in found)
+    checks += _text_checks(text, exp)
+    return Outcome(response=text, checks=checks, question="Name the critical flows",
+                   contexts=[diagrams._flows_prompt(state, diagrams.candidate_paths(state))], raw=text)
+
+
 SUITES: dict[str, tuple[Callable[[dict[str, Any], str | None], Outcome], list[str]]] = {
     # suite: (runner, prompt ids it exercises)
     "compare": (run_compare, ["compare.evaluate"]),
@@ -189,4 +211,5 @@ SUITES: dict[str, tuple[Callable[[dict[str, Any], str | None], Outcome], list[st
     "command": (run_command, ["canvas.command"]),
     "design": (run_design, ["design.turn"]),
     "suggestions": (run_suggestions, ["assistant.suggestions"]),
+    "diagrams": (run_diagrams, ["diagrams.sequence"]),
 }

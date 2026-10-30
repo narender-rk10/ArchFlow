@@ -119,6 +119,13 @@ One assistant panel with three modes, docked **left**, **right** or **floating**
 - **Tidy up** (`L`) — arranges a diagram in tiers (clients → gateways → services → caches/queues → databases → external/LLMs), ordered to reduce crossings, each store under its service; one undo step. **Auto-arrange after AI edits**, and new components never land on existing ones
 - **Typed components** — `service`, `database`, `cache`, `queue`, `gateway`, `agent`, `llm`, `mcp`, `security`, … with technology, description and linked requirements
 - **HLD → LLD drill-down (C4)** — double-click a component to open its own low-level diagram. **Generate low-level design** creates controllers, services, repositories, API endpoints, tables for connected databases and events for connected queues. Inspector **Views**: API list (OpenAPI), data model and request flow, drawn with Mermaid
+- **More diagrams from the same model** (Tools → **Diagrams**) — always in step with the canvas, nothing to redraw:
+  - **C4 system context** (clients as users, external systems and LLMs around the system) and **C4 containers** (gateways, services, agents, stores and queues inside the system boundary)
+  - **Sequence diagram per critical flow** — traced along your connections from a client through gateways and services to each data store, with calls to auth, caches and LLMs on the way and asynchronous hops through queues. Flows are named after the requirement they implement; with AI on, the `diagrams.sequence` agent names them after the user goal and picks among the traced paths (it cannot invent connections)
+  - **ER diagram** of every table across all low-level designs, grouped by database, with relations from LLD connections and foreign-key columns (`customer_id` → `customers`)
+  - **Deployment** — components grouped by platform (AWS, Azure, Google Cloud, SaaS, self-hosted) and runtime (Kubernetes, serverless, containers, managed data services…) from vendor, catalog entry, technology and `runtime` / `hosting` props
+  - **Data flow with trust boundaries** — public clients, edge / DMZ (gateways and security controls), private services, data stores and third parties; boundary-crossing flows are drawn thick, and a client reaching a service or database without a gateway is flagged
+  - Every diagram comes with a plain-language **alt text** (set on the rendered SVG and embedded as Mermaid `accTitle` / `accDescr`)
 - **Convert** a whole design to **AWS / Azure / Google Cloud / open source**, or swap one component for its equivalent
 - **Dark / light mode**, keyboard shortcuts (`Ctrl+K` project switcher, `L` tidy, `F` full screen)
 
@@ -196,7 +203,7 @@ One assistant panel with three modes, docked **left**, **right** or **floating**
 ### 🤖 MCP for AI Agents
 
 - **Remote MCP server** at `/mcp` (Streamable HTTP) with **OAuth 2.1** (dynamic client registration, PKCE, consent page, rotating refresh tokens, revocation) or personal access tokens
-- Works with **Claude Code, Claude.ai, Claude Desktop, Codex** and other MCP clients; **40 tools**, org-scoped, read-only or read & edit, capped by your role
+- Works with **Claude Code, Claude.ai, Claude Desktop, Codex** and other MCP clients; **41 tools**, org-scoped, read-only or read & edit, capped by your role
 - Agent edits go through the same pipeline as the canvas and appear live, attributed to "*user* via MCP"
 - Coding loop: **list_tasks → get_task_brief → implement → report_progress** (status and PR link show in the activity)
 
@@ -231,7 +238,7 @@ One assistant panel with three modes, docked **left**, **right** or **floating**
 - **LLM follow-ups instead of fixed prompts** — starting prompts, follow-ups after each answer, design-chat next steps and comparison questions are written by the `assistant.suggestions` agent from the project's components, requirements, health issues and the last exchange (the rule-based ones remain only for offline use)
 - **The AI asks in bubbles** — in Edit mode clarifying questions arrive as chat bubbles with answers to tap; in Ask mode the assistant asks back when a question is ambiguous and offers quick replies; the Design interview asks multiple-choice questions
 - **Prompts in YAML, versioned** — `backend/archflow/prompts/<id>.yaml` holds every version of a prompt; released versions are locked by hash in `prompts.lock.json` (tests fail if one is edited), a change ships as a new version, and `ARCHFLOW_PROMPTS=compare.evaluate=v1` pins or rolls back without a deploy. Every usage row and trace records `id@version`
-- **Evals** — `uv run archflow-eval` runs golden datasets (`archflow/evals/datasets/*.yaml`: compare, ask, command, design, suggestions) against your models with deterministic checks, and with `--ragas` adds RAGAS metrics (faithfulness, groundedness, answer accuracy, aspect critics) judged through the same gateway. `--prompt id=v2 --baseline old.json` A/B tests a prompt version; `--fail-under 0.8` gates CI
+- **Evals** — `uv run archflow-eval` runs golden datasets (`archflow/evals/datasets/*.yaml`: compare, ask, command, design, suggestions, diagrams) against your models with deterministic checks, and with `--ragas` adds RAGAS metrics (faithfulness, groundedness, answer accuracy, aspect critics) judged through the same gateway. `--prompt id=v2 --baseline old.json` A/B tests a prompt version; `--fail-under 0.8` gates CI
 - **Traces** — each run records **who asked**, **what they asked**, **what the AI answered**, the full input and output, every LLM call (model, tokens, cost, latency), every tool and API call (arguments, result), and the prompt version. Agents fired in parallel (the AI review, the Jev + LLM comparison panel) appear as one run with its child agents. Admins browse them under **Traces** on the home page, filter by person, feature or status, and see the prompt catalog; **Usage & budget** breaks spend down by feature, model, project, prompt version and person. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to also export the agents' OpenTelemetry spans to Langfuse, Phoenix, Jaeger or Logfire
 
 ```bash
@@ -245,6 +252,7 @@ uv run --with ragas==0.3.9 --with "langchain-community>=0.3,<0.4" archflow-eval 
 ### 📤 Export
 
 - **PNG** or **SVG** image of the diagram you are looking at (system or a component's internals)
+- **Mermaid and PlantUML text** of the high-level architecture and of every diagram above (C4 context and containers with the C4-PlantUML library, sequence, ER, deployment, data flow): copy either source or save the SVG from Tools → Diagrams; `GET /api/projects/{id}/diagrams` lists them with alt text, `GET /api/projects/{id}/diagrams/{diagram}?format=mermaid|plantuml` downloads one (viewers can read), and agents use the `get_diagram` MCP tool
 - **Interactive HTML diagram** — a standalone, ArchFlow-branded viewer (explore nodes, trace paths, themes, PNG/SVG/WebM export) made by ArchFlow's renderer in `backend/renderer`
 
 ---
@@ -645,6 +653,7 @@ ArchFlow/
 │   │   ├── catalog.py           # 151-component catalog + cloud conversion
 │   │   ├── templates.py         # Starter architectures
 │   │   ├── lld.py               # Low-level design generation and views
+│   │   ├── diagrams.py          # C4, sequence, ER, deployment, data-flow diagrams as Mermaid / PlantUML
 │   │   ├── ai.py                # AI canvas edits (tool calls → ops) + offline parser
 │   │   ├── chat.py              # Guided design chat
 │   │   ├── conversations.py     # Shared threads, summaries, project memory
@@ -659,7 +668,7 @@ ArchFlow/
 │   │   ├── collab_sync.py       # API ↔ collab server (field-level patches)
 │   │   ├── users.py · auth.py · authz.py · accounts.py  # Accounts, sessions, roles, orgs, CSRF
 │   │   ├── secrets_box.py       # AES-256-GCM encryption of org secrets
-│   │   ├── mcp_remote.py        # Remote MCP server (OAuth 2.1, 40 tools)
+│   │   ├── mcp_remote.py        # Remote MCP server (OAuth 2.1, 41 tools)
 │   │   ├── mcp_server.py        # Local stdio MCP server
 │   │   ├── store.py             # persistence (one store for SQLite and Postgres)
 │   │   ├── db/                  # SQLAlchemy models, column types, Alembic migrations
@@ -692,6 +701,7 @@ ArchFlow/
 │   │   │   ├── Inspector.tsx · Palette.tsx · ArchNode.tsx · LldViews.tsx
 │   │   │   ├── RequirementsPanel.tsx · IssuesPanel.tsx · VersionsPanel.tsx · DecisionsPanel.tsx
 │   │   │   ├── OpenSpecPanel.tsx · CodeDialog.tsx · ConnectDialog.tsx · MemoryDialog.tsx
+│   │   │   ├── DiagramsDialog.tsx  # C4, sequence, ER, deployment, data flow (Mermaid)
 │   │   │   └── OrgDialogs.tsx   # Members, AI settings, AI usage
 │   │   ├── api.ts · types.ts    # API client and shared types
 │   │   ├── collab.ts · realtime.ts  # Yjs provider, WebSocket events
@@ -740,7 +750,7 @@ The full production plan is in [docs/production-plan.md](docs/production-plan.md
 2. **Comments, @mentions and approval workflows** on any object; per-project role overrides, SSO
 3. **Repository analysis**: GitHub App, drift on every push/PR, PR review comments
 4. **Jira sync** — epics/stories from requirements, with status reflected on the canvas
-5. **More diagrams** from the same model: sequence, C4, ER, deployment, agent graph, MCP topology
+5. **More diagrams** from the same model: ~~sequence, C4, ER, deployment, data flow~~ (done, with Mermaid / PlantUML export); still to do: agent graph, MCP topology
 6. **Document intake** — SRS/PDF → requirements; meeting transcripts → live canvas
 7. **Generation** of tests, infrastructure as code and documentation (SRS/BRD/runbooks)
 8. **Scale-out** — shared Redis for rate limits, jobs and real-time fan-out across API instances
