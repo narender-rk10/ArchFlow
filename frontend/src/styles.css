@@ -877,6 +877,27 @@ button.ai-pill { cursor: pointer; }
 .compare-ask input.grow { flex: 1; min-width: 0; }
 @media (max-width: 720px) { .compare-grid { grid-template-columns: 1fr; } }
 
+/* ---- merge branches dialog ---- */
+.modal.merge { width: min(980px, 100%); max-height: 92vh; overflow-y: auto; }
+.modal.merge h4 { margin: 4px 0 6px; font-size: 13px; }
+.modal.merge section { display: flex; flex-direction: column; gap: 6px; }
+.merge-pick label { display: flex; align-items: center; gap: 6px; }
+.merge-changes, .merge-conflicts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.merge-changes li { font-size: 13px; overflow-wrap: anywhere; }
+.merge-changes .lg { font-size: 11px; margin-right: 4px; }
+.merge-conflicts > li { border: 1px solid var(--border); border-left: 3px solid var(--warn); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.merge-conflicts > li.resolved { border-left-color: var(--added); }
+.merge-sides { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.merge-side { text-align: left; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; background: var(--panel-2); min-width: 0; overflow-wrap: anywhere; }
+button.merge-side { cursor: pointer; background: var(--panel); }
+button.merge-side.on { border-color: var(--primary); box-shadow: inset 3px 0 var(--primary); }
+.merge-conflicts button.small.on { border-color: var(--primary); color: var(--primary); }
+.merge-conflicts input.grow { flex: 1; min-width: 0; }
+.merge-ai { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: 6px; background: color-mix(in srgb, var(--primary) 8%, var(--panel)); }
+.branch-list { list-style: none; margin: 0 12px 8px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.branch-list li { display: flex; align-items: center; gap: 6px; }
+@media (max-width: 720px) { .merge-sides { grid-template-columns: 1fr; } }
+
 /* ---- AI suggestions: tag and follow-ups ---- */
 .ai-tag { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 999px; font-size: 9.5px; font-weight: 600;
   letter-spacing: .04em; color: var(--primary); border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--border)); vertical-align: 1px; }

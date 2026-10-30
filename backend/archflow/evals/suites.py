@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .. import ai, chat, evaluation, suggestions
+from .. import ai, chat, evaluation, merge, suggestions
 from ..analysis import full_analysis
 from ..models import ProjectState
 from ..ops import apply_ops
@@ -182,6 +182,29 @@ def run_suggestions(case: dict[str, Any], org_id: str | None) -> Outcome:
                    contexts=[json.dumps(suggestions.project_summary(state))], raw=items)
 
 
+def run_merge(case: dict[str, Any], org_id: str | None) -> Outcome:
+    """``project`` is the merge base; ``ours`` and ``theirs`` are ops applied to it on each branch."""
+    base = build(case.get("project"))
+    ours, _ = apply_ops(base, (case.get("ours") or {}).get("ops") or [])
+    theirs, _ = apply_ops(base, (case.get("theirs") or {}).get("ops") or [])
+    conflicts = merge.merge_states(base, ours, theirs).conflicts
+    items = merge.suggest(conflicts, ours, theirs, "source", "target", org_id)
+    by_id = {s["id"]: s for s in items}
+    exp = case.get("expect") or {}
+    checks: list[Check] = [("has conflicts", bool(conflicts), str(len(conflicts))),
+                           ("every conflict resolved", set(by_id) == {c["id"] for c in conflicts},
+                            f"{len(by_id)}/{len(conflicts)}"),
+                           ("every resolution explained", all(s["rationale"] for s in items), "")]
+    for key, choice in (exp.get("choices") or {}).items():  # "<name>.<field>" (field "" for a deletion)
+        c = next((c for c in conflicts if f"{c['name']}.{c['field']}" == key), None)
+        got = by_id.get(c["id"], {}).get("choice") if c else None
+        checks.append((f"{key}: {choice}", got == choice, str(got)))
+    text = "\n".join(f"- {s['id']}: {s['choice']} ({s['rationale']})" for s in items)
+    checks += _text_checks(text, exp)
+    return Outcome(response=text, checks=checks, question="Resolve the merge conflicts",
+                   contexts=[json.dumps(conflicts, default=str)], raw=items)
+
+
 SUITES: dict[str, tuple[Callable[[dict[str, Any], str | None], Outcome], list[str]]] = {
     # suite: (runner, prompt ids it exercises)
     "compare": (run_compare, ["compare.evaluate"]),
@@ -189,4 +212,5 @@ SUITES: dict[str, tuple[Callable[[dict[str, Any], str | None], Outcome], list[st
     "command": (run_command, ["canvas.command"]),
     "design": (run_design, ["design.turn"]),
     "suggestions": (run_suggestions, ["assistant.suggestions"]),
+    "merge": (run_merge, ["merge.resolve"]),
 }

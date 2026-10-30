@@ -143,6 +143,31 @@ export interface Diff {
   total_changes: number; text: string; from_state: ProjectState;
 }
 
+// ---- branch merge (three-way) ----
+/** One field both branches changed differently, or an element one deleted while the other changed it. */
+export interface MergeConflict {
+  id: string; collection: "nodes" | "edges" | "requirements"; entity_id: string;
+  entity: "component" | "connection" | "requirement"; name: string;
+  field: string; // "" for a deletion conflict; "props.<key>" for one property
+  kind: "field" | "deleted-in-ours" | "deleted-in-theirs";
+  base: unknown; ours: unknown; theirs: unknown;
+}
+export interface MergePreview {
+  source: string; target: string; source_rev: number; target_rev: number;
+  base: { version: number | null; how: "common-ancestor" | "branch-point" | "none" };
+  changes: Omit<Diff, "from_state">;
+  conflicts: MergeConflict[];
+  dropped: { collection: string; id: string; entity: string; name: string; reason: string }[];
+  renumbered: { from: string; to: string; title: string }[];
+}
+export type MergeChoice = "ours" | "theirs" | "custom";
+export interface MergeResolution { id: string; choice: MergeChoice; value?: unknown }
+export interface MergeSuggestion extends MergeResolution { rationale: string }
+export interface MergeResult {
+  version: number; safety_version: number | null; source_version: number; branch: string; source_branch: string;
+  summary: string[]; conflicts_resolved: number; state: ProjectState;
+}
+
 export interface User { name: string; color: string }
 export interface PresenceUser extends User { client_id: number }
 
