@@ -10,17 +10,25 @@ import { useAssistant } from "../assistant";
 import { exportCanvasImage, exportName } from "../exportImage";
 import { autoLayout } from "../layout";
 import { touchRecent } from "../recent";
+import { buildSuggestions } from "../suggestions";
+import { asSuggestions, useAiSuggestions } from "../aiSuggestions";
 import { useRealtime } from "../realtime";
 import type {
   Activity, Analysis, ArchNode, Branch, Catalog, CatalogItem, Diff, Issue, Me, MemoryItem, Op, Project, Role, User, Version,
 } from "../types";
-import { can } from "../types";
+import { activeRequirements, can } from "../types";
 import { UserMenu } from "./UserMenu";
 import { ArchNodeComponent, TYPE_META, type ArchFlowNode, type DiffMark } from "./ArchNode";
 import { CodeDialog } from "./CodeDialog";
 import { AISettingsDialog } from "./OrgDialogs";
-import { CommandBar } from "./CommandBar";
+import { CommandBar, type ChatDock, type ChatMode } from "./CommandBar";
+import { CommentsPanel } from "./CommentsPanel";
+import { NotificationBell } from "./NotificationBell";
+import type { AppNotification, Comment, JiraLinks, Member } from "../types";
+import { JiraDialog } from "./JiraDialog";
 import { ConnectDialog } from "./ConnectDialog";
+import { ExportDialog } from "./ExportDialog";
+import { DiagramsDialog } from "./DiagramsDialog";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { DesignChat } from "./DesignChat";
 import { PromptDialog } from "./Dialogs";
@@ -29,6 +37,7 @@ import { Inspector } from "./Inspector";
 import { IssuesPanel } from "./IssuesPanel";
 import type { EntityLinks } from "./Markdown";
 import { MemoryDialog } from "./MemoryDialog";
+import { MergeDialog } from "./MergeDialog";
 import { DRAG_MIME, Palette } from "./Palette";
 import { RequirementsPanel } from "./RequirementsPanel";
 import { VersionsPanel } from "./VersionsPanel";
@@ -48,7 +57,18 @@ interface Props {
 }
 
 const nodeTypes = { arch: ArchNodeComponent };
-type Tab = "design" | "requirements" | "issues" | "versions" | "decisions";
+type Tab = "chat" | "requirements" | "issues" | "comments" | "versions" | "decisions";
+const TAB_META: Record<Tab, { icon: string; label: string; title: string }> = {
+  chat: { icon: "✦", label: "Assistant", title: "AI assistant: design, edit and ask" },
+  requirements: { icon: "☰", label: "Requirements", title: "What the system must do, and how well" },
+  issues: { icon: "♥", label: "Health", title: "Checks and the AI review of this design" },
+  comments: { icon: "💬", label: "Comments", title: "Discuss components and the design with your team" },
+  versions: { icon: "⟲", label: "History", title: "Saved versions and activity" },
+  decisions: { icon: "⚖", label: "Decisions", title: "Compare drafts and record architecture decisions" },
+};
+const DOCK_KEY = "archflow.chatDock";
+/** A comment thread to open once a workspace loads (set when a notification leads to another project). */
+const OPEN_THREAD_KEY = "archflow.openThread";
 const rand = () => Math.random().toString(36).slice(2, 6);
 
 export function Workspace(props: Props) {
@@ -67,12 +87,29 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const [versions, setVersions] = useState<Version[]>([]);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
-  const [tab, setTab] = useState<Tab>("design");
+  const [dock, setDockState] = useState<ChatDock>(() => {
+    try { const v = localStorage.getItem(DOCK_KEY); if (v === "left" || v === "right" || v === "float") return v; } catch { /* storage unavailable */ }
+    return "left";
+  });
+  const [tab, setTab] = useState<Tab>(dock === "left" ? "chat" : "requirements");
+  const [rightTab, setRightTab] = useState<"chat" | "props">("chat");
+  const [chatMode, setChatMode] = useState<ChatMode | null>(null); // null until the project loads: Design on an empty canvas
+  const setDock = (d: ChatDock) => {
+    setDockState(d);
+    try { localStorage.setItem(DOCK_KEY, d); } catch { /* storage unavailable */ }
+    if (d === "left") setTab("chat"); else if (tab === "chat") setTab("requirements");
+    if (d === "right") setRightTab("chat");
+  };
   const [traced, setTraced] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [diff, setDiff] = useState<{ from: number; data: Diff } | null>(null);
+  const [mergeSource, setMergeSource] = useState<string | null>(null);
   const [promptFor, setPromptFor] = useState<{ nodeIds: string[]; requirementIds: string[] } | null>(null);
   const [memory, setMemory] = useState<MemoryItem[]>([]);
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [members, setMembers] = useState<Member[]>([]);
+  const [focusThread, setFocusThread] = useState<string | null>(null);
+  const [notifKey, setNotifKey] = useState(0);
   const [memoryOpen, setMemoryOpen] = useState(false);
   // Latest server event about a conversation, for the design chat (the assistant hook gets it directly).
   const [designRemote, setDesignRemote] = useState<{ id: string; at: number } | null>(null);
@@ -80,6 +117,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const [loadError, setLoadError] = useState("");
   const [connectOpen, setConnectOpen] = useState(false);
   const [codeOpen, setCodeOpen] = useState(false);
+  const [diagramsOpen, setDiagramsOpen] = useState(false);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [converting, setConverting] = useState(false);
   const [ai, setAi] = useState<{ available: boolean; model: string } | null>(null);
@@ -97,7 +135,10 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const [canvasFull, setCanvasFull] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
+  const [jiraOpen, setJiraOpen] = useState(false);
+  const [jira, setJira] = useState<JiraLinks | null>(null);
   const toolsRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!toolsOpen) return;
@@ -239,6 +280,33 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
     }
   });
   const loadMemory = useCallback(() => { api.memory(pid).then(setMemory).catch(() => {}); }, [pid]);
+  const loadComments = useCallback(() => { api.comments(pid, branch).then(setComments).catch(() => {}); }, [pid, branch]);
+  useEffect(() => { setComments([]); loadComments(); }, [loadComments]);
+  // Jira issues pushed for this project: keys and pulled status next to requirements and components.
+  const loadJira = useCallback(() => { api.jiraLinks(pid).then(setJira).catch(() => setJira(null)); }, [pid]);
+  useEffect(loadJira, [loadJira]);
+  const jiraByReq = Object.fromEntries((jira?.links ?? []).filter((l) => l.object_kind === "requirement").map((l) => [l.object_id, l]));
+  // People you can @mention: refreshed when comments open and when someone new comes online (they may have just joined).
+  const peerNames = live.peers.map((p) => p.name).sort().join("|");
+  useEffect(() => {
+    if (project?.org_id) api.members(project.org_id).then(setMembers).catch(() => {});
+  }, [project?.org_id, tab === "comments", peerNames]); // eslint-disable-line react-hooks/exhaustive-deps
+  const openThread = useCallback((threadId: string) => { setTab("comments"); setFocusThread(threadId); }, []);
+  useEffect(() => {
+    try {
+      const pending = JSON.parse(sessionStorage.getItem(OPEN_THREAD_KEY) ?? "null");
+      if (pending?.pid === pid) { sessionStorage.removeItem(OPEN_THREAD_KEY); openThread(pending.thread); }
+    } catch { /* storage unavailable */ }
+  }, [pid, branch, openThread]);
+  const openNotification = (n: AppNotification) => {
+    if (n.version != null) {  // a version review: open the versions panel (it lists every branch's versions)
+      if (n.project_id === pid) { refreshMeta(); setTab("versions"); } else onOpenProject(n.project_id, n.branch);
+      return;
+    }
+    if (n.project_id === pid && n.branch === branch) { loadComments(); openThread(n.thread_id); return; }
+    try { sessionStorage.setItem(OPEN_THREAD_KEY, JSON.stringify({ pid: n.project_id, thread: n.thread_id })); } catch { /* ignore */ }
+    if (n.project_id === pid) onBranch(n.branch); else onOpenProject(n.project_id, n.branch);
+  };
   useEffect(() => { loadMemory(); }, [loadMemory]);
 
   // ---- realtime ----
@@ -246,10 +314,15 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const rt = useRealtime(pid, branch, user, {
     onActivity: () => {
       window.clearTimeout(activityTimer.current);
-      activityTimer.current = window.setTimeout(() => api.activity(pid, branch).then(setActivity).catch(() => {}), 400);
+      activityTimer.current = window.setTimeout(() => {
+        api.activity(pid, branch).then(setActivity).catch(() => {});
+        // server-side changes (e.g. Mark reviewed) may not touch the live document, so refresh the checks too
+        api.analysis(pid, branch).then(setAnalysis).catch(() => {});
+      }, 400);
     },
     onVersions: refreshMeta,
     onConversation: (id) => { assistant.onRemote(id); setDesignRemote({ id, at: Date.now() }); },
+    onComments: () => { loadComments(); setNotifKey((k) => k + 1); },
     onMemory: (_actor, added) => {
       loadMemory();
       if (added.length) toast(`✦ Remembered: ${added.join(" · ")}`);
@@ -311,6 +384,26 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
     return m;
   }, [analysis]);
 
+  // Stale requirement links per component (a requirement changed after the component did).
+  const staleByNode = useMemo(() => {
+    const m: Record<string, string[]> = {};
+    for (const l of analysis?.stale_links ?? []) (m[l.node_id] ??= []).push(l.requirement_id);
+    return m;
+  }, [analysis]);
+  const markReviewed = useCallback((nodeId: string, requirementId?: string) => {
+    api.ops(pid, branch, [{ op: "mark_reviewed", id: nodeId, ...(requirementId ? { requirement_id: requirementId } : {}) }], user.name)
+      .then(() => api.analysis(pid, branch).then(setAnalysis))
+      .catch((e) => toast(`⚠ ${(e as Error).message}`));
+  }, [pid, branch, user.name, toast]);
+
+  // Open comment threads per component (the canvas shows a badge; clicking it opens the newest thread).
+  const commentsByNode = useMemo(() => {
+    const m: Record<string, string[]> = {};
+    for (const c of comments) if (!c.parent_id && !c.resolved && c.target_type === "node") (m[c.target_id] ??= []).push(c.id);
+    return m;
+  }, [comments]);
+  const openThreadsCount = comments.filter((c) => !c.parent_id && !c.resolved).length;
+
   const highlight = useMemo<Set<string> | null>(() => {
     if (!state) return null;
     if (traced) return new Set(Object.values(state.nodes).filter((n) => n.requirement_ids.includes(traced)).map((n) => n.id));
@@ -351,7 +444,9 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           data: {
             model: m, dimmed: !!highlight && !highlight.has(m.id), highlighted: !!highlight?.has(m.id),
             diff: mark(m.id, d?.nodes), remote: remoteByNode[m.id], issues: issuesByNode[m.id],
-            childCount: childCount[m.id],
+            childCount: childCount[m.id], stale: staleByNode[m.id],
+            requirementIds: m.requirement_ids.filter((r) => !state.requirements[r]?.deleted),
+            comments: commentsByNode[m.id]?.length, onComments: commentsByNode[m.id] ? () => openThread(commentsByNode[m.id].at(-1)!) : undefined,
           },
         };
       });
@@ -390,7 +485,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
       }
       return out;
     });
-  }, [state, diff, highlight, remoteByNode, issuesByNode, level, levelOf, childCount]);
+  }, [state, diff, highlight, remoteByNode, issuesByNode, level, levelOf, childCount, commentsByNode, openThread, staleByNode]);
 
 
   const selectedNodeIds = useMemo(() => nodes.filter((n) => n.selected && !n.id.startsWith("ghost:")).map((n) => n.id), [nodes]);
@@ -496,7 +591,13 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   }, [copySelection, paste, readOnly]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- AI ----
-  const runAsk = (question: string) => { assistant.ask(question); };
+  // "Fix with AI": put the instruction in the assistant's Edit mode; the person reviews it and presses Apply.
+  const [prefill, setPrefill] = useState<{ text: string; at: number } | null>(null);
+  const fixWithAI = (instruction: string) => {
+    setChatMode("command");
+    if (dock === "left") setTab("chat"); else if (dock === "right") setRightTab("chat");
+    setPrefill({ text: instruction, at: Date.now() });
+  };
 
   const generateLld = async (nodeId: string) => {
     setGenerating(true);
@@ -566,6 +667,20 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
     if (highlight?.size) flow.fitView({ nodes: [...highlight].map((id) => ({ id })), padding: 0.5, duration: 400, maxZoom: 1.2 });
   };
 
+  // What to suggest in the assistant: the LLM writes starting prompts for this project, or follow-ups to the last
+  // answer; without AI the offline ones from suggestions.ts are used. (Hooks stay above the early return below.)
+  const canvasIsEmpty = !!state && Object.keys(state.nodes).length === 0;
+  const chatModeNow: ChatMode = chatMode ?? (canvasIsEmpty && !readOnly ? "design" : readOnly ? "ask" : "command");
+  const lastMsg = assistant.messages[assistant.messages.length - 1];
+  const lastQuestion = lastMsg?.role === "assistant"
+    ? [...assistant.messages].reverse().find((m) => m.role === "user" && m.seq < lastMsg.seq)?.content ?? "" : "";
+  const followUp = lastMsg?.role === "assistant" && !lastMsg.data.error && !assistant.busy;
+  const aiSuggest = useAiSuggestions(pid, branch, {
+    mode: chatModeNow === "command" ? "edit" : "ask", selection: selectedNodeIds,
+    conversationId: followUp ? assistant.current?.id : null,
+    lastQuestion: followUp ? lastQuestion : "", lastAnswer: followUp ? lastMsg.content + (lastMsg.data.summary?.length ? "\n" + lastMsg.data.summary.join("\n") : "") : "",
+  }, !!ai?.available && !!state && chatModeNow !== "design" && (!lastMsg || followUp), state?.rev);
+
   if (loadError) {
     return (
       <div className="picker">
@@ -581,18 +696,47 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const others = live.peers.filter((p) => p.clientId !== live.selfId);
   const aiBusy = rt.aiStatus.status === "thinking" ? `AI is applying “${rt.aiStatus.text}” for ${rt.aiStatus.actor}` : null;
 
+  const canvasEmpty = canvasIsEmpty;
+  const offline = buildSuggestions(state, analysis, selectedNodeIds); // cheap; no hook after the early return above
+  const chatSuggestions = aiSuggest.items ?? (aiSuggest.loading || lastMsg ? [] : asSuggestions(chatModeNow === "command" ? offline.edit : offline.ask));
+  const effectiveMode = chatModeNow;
+  const chatPanel = (
+    <CommandBar assistant={assistant} selection={selectedNodeIds} aiBusy={aiBusy} links={entityLinks}
+      memoryCount={memory.length} onOpenMemory={() => setMemoryOpen(true)} meId={me.user.id} isAdmin={can(role, "admin")}
+      userName={user.name} readOnly={readOnly} mode={effectiveMode} onMode={setChatMode} dock={dock} onDock={setDock}
+      suggestions={chatSuggestions} suggestionsSource={aiSuggest.items ? "ai" : "offline"} suggestionsLoading={aiSuggest.loading}
+      prefill={prefill}
+      designSlot={state && !readOnly ? (
+        <DesignChat pid={pid} branch={branch} user={user} aiAvailable={ai?.available ?? true} canvasEmpty={canvasEmpty}
+          remote={designRemote}
+          context={{ name: project?.name ?? "", description: project?.description ?? "", components: Object.keys(state.nodes).length,
+            requirements: activeRequirements(state).map((r) => ({ id: r.id, title: r.title })).sort((x, y) => x.id.localeCompare(y.id)) }}
+          onApplied={(r) => {
+            if (r.branch !== branch) { onBranch(r.branch); return; }
+            refreshMeta();
+            toast(`Applied architecture · v${r.version}`);
+            window.setTimeout(() => flow.fitView({ padding: 0.15, duration: 400 }), 400); // after the live document receives the change
+          }} />
+      ) : undefined} />
+  );
+
   return (
     <div className={`workspace ${canvasFull ? "canvas-full" : ""}`}>
       <header className="topbar">
         <div className="tb-group tb-left">
-        <button className="ghost brand-btn" onClick={onExit} title="All projects"><span className="logo">▲</span></button>
+        <button className="ghost back-btn" onClick={onExit} title="Back to all projects" aria-label="Back to all projects">
+          <span aria-hidden>←</span> <span className="back-label">Projects</span>
+        </button>
         <ProjectSwitcher me={me} current={project} open={switcherOpen} onOpenChange={setSwitcherOpen}
           onOpen={onOpenProject} onHome={onExit} />
-        {readOnly && <span className="ro-badge" title="Your role can view and comment on decisions, but not edit">Read only · {role}</span>}
+        {readOnly && <span className="ro-badge" title={can(role, "review") ? "Your role can view and comment, but not edit" : "Your role can view, but not edit or comment"}>Read only · {role}</span>}
         <div className="branch">
           <select value={branch} onChange={(e) => onBranch(e.target.value)} aria-label="Branch">
             {branches.map((b) => <option key={b.name} value={b.name}>⎇ {b.name}</option>)}
           </select>
+          {branch !== "main" && branches.some((b) => b.name === "main") && (
+            <button className="small ghost" onClick={() => onBranch("main")} title="Switch back to the main branch">↩ main</button>
+          )}
           {readOnly ? null : newBranch === null ? (
             <button className="small ghost icon-btn" onClick={() => setNewBranch("experiment/")} title="New branch" aria-label="New branch">+</button>
           ) : (
@@ -610,10 +754,15 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         <div className="spacer" />
         <div className="tb-group tb-right">
         {analysis && (
-          <button className="health-pill" onClick={() => setTab("issues")} title="Architecture health">
+          <button className="health-pill" onClick={() => setTab("issues")}
+            title={`Architecture health: ${analysis.health.issues.errors} error(s), ${analysis.health.issues.warnings} warning(s). `
+              + `${analysis.health.traceability}% of requirements are linked to a component. Click for details.`}>
             {analysis.health.issues.errors > 0 && <span className="dot error" />}
             {analysis.health.issues.warnings > 0 && <span className="dot warning" />}
-            {analysis.health.issues.errors + analysis.health.issues.warnings} issues · trace {analysis.health.traceability}%
+            {analysis.health.issues.errors + analysis.health.issues.warnings === 0
+              ? "✓ No issues"
+              : `${analysis.health.issues.errors + analysis.health.issues.warnings} issue${analysis.health.issues.errors + analysis.health.issues.warnings === 1 ? "" : "s"}`}
+            {" · "}{analysis.health.traceability}% traced
           </button>
         )}
         {ai && (() => {
@@ -631,6 +780,8 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
             <div className="tools-pop" role="menu">
               <button role="menuitem" onClick={() => { setToolsOpen(false); setCodeOpen(true); }}>
                 <b>⟨/⟩ Code analysis</b><span className="muted tiny">Reconstruct a repository, check drift and change impact</span></button>
+              <button role="menuitem" onClick={() => { setToolsOpen(false); setDiagramsOpen(true); }}>
+                <b>◫ Diagrams</b><span className="muted tiny">C4, sequence, ER, deployment and data flow as Mermaid / PlantUML</span></button>
               <button role="menuitem" onClick={() => { setToolsOpen(false); setConnectOpen(true); }}>
                 <b>⌘ Connect AI agents</b><span className="muted tiny">Claude, Codex and others over MCP</span></button>
               <button role="menuitem" onClick={() => { setToolsOpen(false); toggleCanvasFull(); }}>
@@ -642,6 +793,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           onChange={async (e) => {
             const target = e.target.value;
             if (!target) return;
+            setToolsOpen(false);
             setConverting(true);
             try {
               const r = await api.convert(pid, branch, target, user.name);
@@ -661,6 +813,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           onChange={async (e) => {
             const kind = e.target.value as "png" | "svg" | "html" | "";
             if (!kind) return;
+            setToolsOpen(false);
             setExporting(true);
             const name = exportName(project?.name ?? "diagram", branch, level ? state?.nodes[level]?.name ?? level : "");
             try {
@@ -678,6 +831,8 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
           <option value="html">Interactive diagram (HTML)</option>
         </select>
               </label>
+              <button role="menuitem" onClick={() => { setToolsOpen(false); setExportOpen(true); }}>
+                <b>⤓ Export spec &amp; agent guides</b><span className="muted tiny">Markdown, PDF, JSON, YAML, CLAUDE.md, AGENTS.md, .cursorrules</span></button>
             </div>
           )}
         </div>
@@ -685,12 +840,13 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         <div className="presence">
           <span className={`conn ${live.status === "connected" && live.synced ? "on" : ""}`}
             title={live.status === "connected" ? (live.synced ? "Live: changes sync instantly" : "Syncing…") : "Reconnecting… your edits are kept and sync when back online"} />
-          <span className="avatar" style={{ background: user.color }} title={`${user.name} (you)`}>{user.name[0]?.toUpperCase()}</span>
           {others.map((u) => <span key={u.clientId} className="avatar" style={{ background: u.color }} title={u.name}>{u.name[0]?.toUpperCase()}</span>)}
         </div>
-        <button className="primary" onClick={() => setPromptFor({ nodeIds: selectedNodeIds, requirementIds: [] })}>
+        <button className="primary" onClick={() => setPromptFor({ nodeIds: selectedNodeIds, requirementIds: [] })}
+          title="Turn this design (or the selected components) into a change spec for a coding agent">
           ⚙ Vibe code{selectedNodeIds.length ? ` (${selectedNodeIds.length})` : ""}
         </button>
+        <NotificationBell refreshKey={notifKey} onOpen={openNotification} />
         <UserMenu me={me} user={user} role={role} onLogout={onLogout} />
         </div>
       </header>
@@ -700,37 +856,43 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
       )}
 
       <aside className="sidebar">
-        <nav className="tabs">
-          {(["design", "requirements", "issues", "versions", "decisions"] as Tab[]).map((t) => (
-            <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)} role="tab" aria-selected={tab === t}>
-              {t === "design" ? "Design" : t === "requirements" ? "Reqs" : t === "issues" ? "Health" : t === "decisions" ? "Decisions" : "Versions"}
-              {t === "requirements" && state && <span className="tab-count">{Object.keys(state.requirements).length}</span>}
-              {t === "issues" && analysis && analysis.health.issues.errors + analysis.health.issues.warnings > 0 &&
-                <span className={`tab-count ${analysis.health.issues.errors ? "bad" : "warn"}`}>{analysis.health.issues.errors + analysis.health.issues.warnings}</span>}
-            </button>
-          ))}
+        <nav className="tabs side-tabs" role="tablist" aria-label="Project panels">
+          {((dock === "left" ? ["chat"] : []).concat(["requirements", "issues", "comments", "versions", "decisions"]) as Tab[]).map((t) => {
+            const meta = TAB_META[t];
+            const problems = analysis ? analysis.health.issues.errors + analysis.health.issues.warnings : 0;
+            const count = t === "requirements" && state ? activeRequirements(state).length : t === "issues" ? problems
+              : t === "comments" ? openThreadsCount : 0;
+            return (
+              <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)} role="tab" aria-selected={tab === t} title={meta.title}>
+                <span className="tab-icon" aria-hidden>{meta.icon}</span>
+                <span className="tab-label">{meta.label}</span>
+                {count > 0 && <span className={`tab-count ${t === "issues" ? (analysis?.health.issues.errors ? "bad" : "warn") : ""}`}>{count}</span>}
+              </button>
+            );
+          })}
         </nav>
-        {state && tab === "design" && readOnly && (
-          <p className="muted small pad">The design chat creates and changes architectures, which needs the developer role or above.</p>
-        )}
-        {state && tab === "design" && !readOnly && (
-          <DesignChat pid={pid} branch={branch} user={user} aiAvailable={ai?.available ?? true} canvasEmpty={Object.keys(state.nodes).length === 0}
-            remote={designRemote}
-            onApplied={(r) => {
-              if (r.branch !== branch) { onBranch(r.branch); return; }
-              refreshMeta();
-              toast(`Applied architecture · v${r.version}`);
-              window.setTimeout(() => flow.fitView({ padding: 0.15, duration: 400 }), 400); // after the live document receives the change
-            }} />
-        )}
+        {tab === "chat" && dock === "left" && chatPanel}
         {state && tab === "requirements" && (
           <RequirementsPanel state={state} issues={analysis?.requirement_issues ?? []} traced={traced} onTrace={setTraced} readOnly={readOnly}
-            send={send} onPrompt={(rid) => setPromptFor({ nodeIds: [], requirementIds: [rid] })} />
+            send={send} onPrompt={(rid) => setPromptFor({ nodeIds: [], requirementIds: [rid] })}
+            pid={pid} branch={branch} isAdmin={can(role, "admin")} toast={toast} onMemoryChanged={loadMemory}
+            jira={jiraByReq} onJira={jira?.connected && can(role, "edit") ? () => setJiraOpen(true) : undefined} />
         )}
-        {tab === "issues" && <IssuesPanel analysis={analysis} onFocus={focusIssue} onAsk={runAsk} onOpenCode={() => setCodeOpen(true)} />}
+        {tab === "issues" && (
+          <IssuesPanel pid={pid} branch={branch} analysis={analysis} aiAvailable={!!ai?.available} onFocus={focusIssue}
+            onShow={(names) => focusNodes(Object.values(state?.nodes ?? {}).filter((n) => names.includes(n.name)).map((n) => n.id))}
+            onFix={fixWithAI} onOpenCode={() => setCodeOpen(true)} />
+        )}
+        {tab === "comments" && (
+          <CommentsPanel pid={pid} branch={branch} comments={comments} members={members} meId={me.user.id} state={state}
+            selectedNode={selectedNodeIds.length === 1 ? selectedNodeIds[0] : null} focusThread={focusThread}
+            canComment={can(role, "review")} canResolveAny={can(role, "edit")} isAdmin={can(role, "admin")}
+            onChanged={loadComments} onShowNode={(id) => focusNodes([id])} toast={toast} />
+        )}
         {tab === "versions" && (
-          <VersionsPanel versions={versions} activity={activity} branch={branch} headVersion={headVersion} diff={diff}
-            onCommit={commit} onDiff={showDiff} onRestore={restore} onBranchFrom={(v, name) => createBranch(name, v)} />
+          <VersionsPanel pid={pid} role={role} versions={versions} activity={activity} branch={branch} headVersion={headVersion} diff={diff}
+            onCommit={commit} onDiff={showDiff} onRestore={restore} onBranchFrom={(v, name) => createBranch(name, v)} onReviewed={refreshMeta}
+            branches={branches} onMerge={readOnly ? undefined : setMergeSource} />
         )}
         {tab === "decisions" && (
           <DecisionsPanel pid={pid} branches={branches} user={user} role={role ?? undefined} toast={toast}
@@ -806,26 +968,45 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         {state && !level && Object.keys(state.nodes).length === 0 && (
           <div className="empty-canvas">
             <h3>Empty canvas</h3>
-            <p className="muted">Drag components from the palette, or describe your system below — e.g.
+            <p className="muted">Drag components from the palette, or describe your system in the assistant (Design mode), e.g.
               “Build an AI customer-support platform where customers use WhatsApp and web.”</p>
           </div>
         )}
-        <CommandBar assistant={assistant} selection={selectedNodeIds} aiBusy={aiBusy} links={entityLinks}
-          memoryCount={memory.length} onOpenMemory={() => setMemoryOpen(true)} meId={me.user.id} isAdmin={can(role, "admin")}
-          userName={user.name} readOnly={readOnly} />
+        {dock === "float" && chatPanel}
         <div className="toasts">{toasts.map((t) => <div key={t.id} className="toast">{t.text}</div>)}</div>
       </main>
 
-      <aside className="rightbar">
-        {state && (
+      <aside className={`rightbar ${dock === "right" ? "with-chat" : ""}`}>
+        {dock === "right" && (
+          <nav className="tabs">
+            <button className={rightTab === "chat" ? "on" : ""} onClick={() => setRightTab("chat")} role="tab" aria-selected={rightTab === "chat"}>Assistant</button>
+            <button className={rightTab === "props" ? "on" : ""} onClick={() => setRightTab("props")} role="tab" aria-selected={rightTab === "props"}>
+              Properties{selectedNodeIds.length + selectedEdgeIds.length > 0 && <span className="tab-count">{selectedNodeIds.length + selectedEdgeIds.length}</span>}
+            </button>
+          </nav>
+        )}
+        {dock === "right" && rightTab === "chat" && chatPanel}
+        {state && (dock !== "right" || rightTab === "props") && (
           <Inspector catalog={catalog} state={state} nodeIds={selectedNodeIds} edgeIds={selectedEdgeIds} send={send}
-            pid={pid} branch={branch} onOpenInternals={openLevel} readOnly={readOnly}
+            pid={pid} branch={branch} onOpenInternals={openLevel} readOnly={readOnly} jira={jira?.links}
+            stale={analysis?.stale_links} onReviewed={markReviewed}
             onPrompt={() => setPromptFor({ nodeIds: selectedNodeIds, requirementIds: [] })} />
         )}
       </aside>
 
+      {exportOpen && (
+        <ExportDialog pid={pid} branch={branch} aiAvailable={!!ai?.available} toast={toast} onClose={() => setExportOpen(false)} />
+      )}
+      {jiraOpen && jira && (
+        <JiraDialog pid={pid} branch={branch} defaultKey={jira.project_key} aiAvailable={!!ai?.available}
+          onClose={() => setJiraOpen(false)} onChanged={loadJira} />
+      )}
       {connectOpen && project && (
         <ConnectDialog orgId={project.org_id ?? "org-default"} canManage={can(role, "admin")} onClose={() => setConnectOpen(false)} />
+      )}
+      {diagramsOpen && (
+        <DiagramsDialog pid={pid} branch={branch} projectName={project?.name ?? "diagram"} aiAvailable={!!ai?.available}
+          rev={state?.rev ?? 0} onClose={() => setDiagramsOpen(false)} />
       )}
       {codeOpen && (
         <CodeDialog pid={pid} branch={branch} readOnly={readOnly} toast={toast} onClose={() => setCodeOpen(false)}
@@ -835,6 +1016,18 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
       {memoryOpen && (
         <MemoryDialog pid={pid} branch={branch} items={memory} readOnly={readOnly} onChanged={loadMemory}
           onClose={() => setMemoryOpen(false)} />
+      )}
+      {mergeSource && (
+        <MergeDialog pid={pid} branches={branches} source={mergeSource}
+          target={mergeSource !== branch ? branch : branches.some((b) => b.name === "main") && branch !== "main" ? "main" : branches.find((b) => b.name !== mergeSource)?.name ?? branch}
+          onClose={() => setMergeSource(null)}
+          onMerged={(r) => {
+            setMergeSource(null);
+            refreshMeta();
+            toast(`Merged ${r.source_branch} into ${r.branch} · v${r.version}${r.conflicts_resolved ? ` (${r.conflicts_resolved} conflict(s) resolved)` : ""}`);
+            // show what the merge changed on the canvas, like "Compare with now"
+            if (r.branch === branch && r.safety_version !== null) showDiff(r.safety_version);
+          }} />
       )}
       {promptFor && <PromptDialog pid={pid} branch={branch} nodeIds={promptFor.nodeIds} requirementIds={promptFor.requirementIds} readOnly={readOnly}
         onClose={() => setPromptFor(null)} />}

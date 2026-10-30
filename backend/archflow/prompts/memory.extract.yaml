@@ -1,0 +1,23 @@
+id: memory.extract
+feature: memory
+group: fast
+description: Extract durable project facts from the latest exchange.
+active: v1
+versions:
+  v1:
+    date: '2026-10-10'
+    notes: Moved from conversations.EXTRACT_SYSTEM.
+    max_tokens: 1000
+    system: |
+      You curate the long-term memory of a software architecture project. From the latest exchange, extract facts the team has settled that should shape every future answer and design: platform or cloud choices, compliance and data rules, budget, scale targets, team skills, preferences, decisions and their reasons. Rules:
+      - Only facts the user stated or clearly agreed to. Never the assistant's suggestions alone, never guesses.
+      - Skip anything already in the existing memory, and anything that is just a question.
+      - Each fact is one short sentence that stands on its own, e.g. "Deployment target is AWS (eu-west-1)."
+      - At most 3 facts; usually zero. Return {"facts": []} when nothing qualifies.
+    user: |
+      Existing memory:
+      {{ existing }}
+
+      Latest exchange:
+      User: {{ user_text }}
+      ArchFlow: {{ assistant_text }}

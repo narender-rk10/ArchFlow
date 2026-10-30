@@ -1,0 +1,72 @@
+suite: lld
+description: Low-level design (lld.design) of one component - endpoints, internals, tables and events that fit its connections and requirements, and apply cleanly.
+cases:
+  - id: support-order-service
+    project: {template: ai-customer-support}
+    component: Order Service
+    expect:
+      element_types_all: [endpoint, component, table]
+      endpoints_any: [order]
+      tables_any: [order]
+      links_requirements: [REQ-003]
+    ragas: [technically_sound]
+
+  - id: support-agent-conversations
+    project: {template: ai-customer-support}
+    component: Support Agent
+    expect:
+      element_types_all: [endpoint, component]
+      endpoints_any: [conversation, message, chat]
+      mentions_any: [escalat, Helpdesk, tool, MCP]
+    ragas: [technically_sound]
+
+  - id: fintech-ledger-service
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Transfers are double-entry and idempotent", description: "Every transfer writes a debit and a credit in one transaction; retries with the same idempotency key return the first result.", kind: functional, priority: critical, actors: [customer]}}
+        - {op: add_node, node: {name: Transfers API, type: gateway, technology: Envoy}}
+        - {op: add_node, node: {name: Ledger Service, type: service, technology: Kotlin, requirement_ids: [REQ-001]}}
+        - {op: add_node, node: {name: Ledger DB, type: database, technology: PostgreSQL}}
+        - {op: add_node, node: {name: Ledger Events, type: queue, technology: Apache Kafka}}
+        - {op: add_edge, edge: {source: Transfers API, target: Ledger Service, protocol: gRPC}}
+        - {op: add_edge, edge: {source: Ledger Service, target: Ledger DB, protocol: SQL}}
+        - {op: add_edge, edge: {source: Ledger Service, target: Ledger Events, protocol: Kafka}}
+    component: Ledger Service
+    expect:
+      element_types_all: [endpoint, table, event]
+      tables_any: [entr, ledger, account, transaction, transfer]
+      links_requirements: [REQ-001]
+      mentions_any: [idempoten, debit, credit, double-entry]
+    ragas: [technically_sound]
+
+  - id: healthcare-records-database
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Clinicians record encounters and observations for their patients", kind: functional, priority: high, actors: [clinician, patient]}}
+        - {op: add_requirement, requirement: {title: "Every read of a patient record is audited", kind: non_functional, category: privacy, priority: critical}}
+        - {op: add_node, node: {name: FHIR API, type: service, technology: HAPI FHIR, requirement_ids: [REQ-001, REQ-002]}}
+        - {op: add_node, node: {name: Patient Records DB, type: database, technology: PostgreSQL, requirement_ids: [REQ-001, REQ-002]}}
+        - {op: add_edge, edge: {source: FHIR API, target: Patient Records DB, protocol: SQL}}
+    component: Patient Records DB
+    expect:
+      element_types_all: [table]
+      tables_any: [patient]
+      mentions_any: [audit, encounter, observation]
+    ragas: [technically_sound]
+
+  - id: iot-telemetry-stream-events
+    project:
+      ops:
+        - {op: add_node, node: {name: MQTT Bridge, type: service, technology: EMQX Kafka bridge}}
+        - {op: add_node, node: {name: Telemetry Stream, type: queue, technology: Apache Kafka}}
+        - {op: add_node, node: {name: Anomaly Detector, type: service, technology: Apache Flink}}
+        - {op: add_node, node: {name: Telemetry DB, type: database, technology: TimescaleDB}}
+        - {op: add_edge, edge: {source: MQTT Bridge, target: Telemetry Stream, protocol: Kafka}}
+        - {op: add_edge, edge: {source: Telemetry Stream, target: Anomaly Detector, protocol: Kafka}}
+        - {op: add_edge, edge: {source: Anomaly Detector, target: Telemetry DB, protocol: SQL}}
+    component: Telemetry Stream
+    expect:
+      element_types_all: [event]
+      events_any: [reading, telemetry, measurement, anomal, meter, sensor]
+      max_elements: 25
+    ragas: [technically_sound]

@@ -24,13 +24,13 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import auth, authz, catalog, lld
+from . import approvals, auth, authz, catalog, lld, exports, diagrams
 from . import openspec_service as openspec_mod
 from . import conversations as conversations_mod
 from . import decisions as decisions_mod
 from .analysis import full_analysis, trace_requirement
 from .diff import diff_states, diff_to_text
-from .models import NODE_TYPES, ProjectState
+from .models import NODE_TYPES, ProjectState, without_deleted
 from .ops import OpError, ConflictError, resolve_node
 from .store import MEMORY_CATEGORIES
 from .templates import TEMPLATES, build_template
@@ -120,6 +120,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
         return project, state
 
     def compact(state: ProjectState) -> dict[str, Any]:
+        state = without_deleted(state)
         return {
             "rev": state.rev,
             "components": [{"id": n.id, "name": n.name, "type": n.type, "technology": n.technology,
@@ -128,7 +129,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
                            for n in state.nodes.values()],
             "connections": [{"id": e.id, "source": e.source, "target": e.target, "protocol": e.protocol, "label": e.label}
                             for e in state.edges.values()],
-            "requirements": [r.model_dump(exclude={"rev", "field_revs"}) for r in state.requirements.values()],
+            "requirements": [r.model_dump(exclude={"rev", "field_revs", "deleted"}) for r in state.requirements.values()],
         }
 
     async def edit(project_id: str, branch: str, ops: list[dict[str, Any]]) -> dict[str, Any]:
@@ -178,9 +179,22 @@ def build_remote_mcp(services: Services) -> MCPServer:
 
     @mcp.tool()
     def list_versions(project_id: str) -> list[dict[str, Any]]:
-        """Committed versions of the project (all branches), newest first."""
-        project_for(Principal(store), project_id)
-        return store.list_versions(project_id)
+        """Committed versions of the project (all branches), newest first, with each one's review status."""
+        p = Principal(store)
+        project_for(p, project_id)
+        return approvals.with_status(store, p.org_id, project_id, store.list_versions(project_id))
+
+    @mcp.tool()
+    def get_approval_status(project_id: str, version: int | None = None, branch: str = "main") -> dict[str, Any]:
+        """Review status of a saved version (draft, in_review, approved, changes_requested) with who approved it
+        and the review history; without a version, the status of the branch's latest version."""
+        p = Principal(store)
+        project_for(p, project_id, branch)
+        if version is None:
+            return approvals.branch_status(store, p.org_id, project_id, branch)
+        if not store.get_version(project_id, version, with_state=False):
+            raise ToolError(f"version {version} not found")
+        return approvals.version_status(store, p.org_id, project_id, version)
 
     @mcp.tool()
     def get_architecture_diff(project_id: str, from_version: int, to_version: int | None = None,
@@ -199,6 +213,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
         _, state = project_for(Principal(store), project_id, branch)
         order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
         tasks = []
+        state = without_deleted(state)
         for r in state.requirements.values():
             if r.status == "implemented" and not include_done:
                 continue
@@ -213,7 +228,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
         """Implementation brief for one requirement: affected components, interfaces, acceptance criteria and tests.
         target: claude-code, codex, gemini-cli, aider or generic."""
         project, state = project_for(Principal(store), project_id, branch)
-        if requirement_id not in state.requirements:
+        if requirement_id not in without_deleted(state).requirements:
             raise ToolError(f"requirement {requirement_id} not found")
         return build_prompt(state, project["name"], [], [requirement_id], target if target in TARGETS else "generic")
 
@@ -260,6 +275,16 @@ def build_remote_mcp(services: Services) -> MCPServer:
         if not f:
             raise ToolError(f"{path} not found")
         return f["content"]
+
+    @mcp.tool()
+    def export_spec(project_id: str, format: str = "markdown", branch: str = "main") -> str:
+        """The branch as a specification document. format: markdown (requirements, architecture, low-level designs,
+        ADRs, memory, health) or json (the full project: state, decisions, memory, versions; schema_version'd)."""
+        _, state = project_for(Principal(store), project_id, branch)
+        if format not in ("markdown", "json"):
+            raise ToolError("format must be markdown or json")
+        b = exports.collect(store, project_id, branch, state)
+        return exports.spec_markdown(b) if format == "markdown" else exports.to_json(b)
 
     @mcp.tool()
     def generate_coding_prompt(project_id: str, component_ids: list[str] | None = None, target: str = "claude-code",
@@ -361,7 +386,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
         p = Principal(store)
         p.require_write()
         _, state = project_for(p, project_id, branch)
-        if requirement_id not in state.requirements:
+        if requirement_id not in without_deleted(state).requirements:
             raise ToolError(f"requirement {requirement_id} not found")
         if status not in ("in_progress", "review", "implemented"):
             raise ToolError("status must be in_progress, review or implemented")
@@ -413,6 +438,24 @@ def build_remote_mcp(services: Services) -> MCPServer:
         if not node:
             raise ToolError(f"component '{component}' not found")
         return lld.views(state, node)
+
+    @mcp.tool()
+    def get_diagram(project_id: str, diagram: str = "", branch: str = "main", format: str = "mermaid") -> dict[str, Any]:
+        """Diagrams derived from the model as text. Without `diagram`, lists them with their alt text: hld,
+        c4-context, c4-container, sequence-1, sequence-2… (one per critical request flow), er (all LLD tables),
+        deployment and dataflow (trust boundaries). With `diagram`, returns its source in `format` (mermaid or
+        plantuml) plus the alt text."""
+        if format not in ("mermaid", "plantuml"):
+            raise ToolError("format must be 'mermaid' or 'plantuml'")
+        p = Principal(store)
+        project, state = project_for(p, project_id, branch)
+        found = diagrams.all_diagrams(state, project["name"], p.org_id)
+        if not diagram:
+            return {"diagrams": [diagrams.summary(d) for d in found]}
+        d = next((x for x in found if x["id"] == diagram), None)
+        if not d:
+            raise ToolError(f"diagram '{diagram}' not found; available: {', '.join(x['id'] for x in found)}")
+        return {**diagrams.summary(d), "format": format, "source": d[format]}
 
     @mcp.tool()
     async def commit_version(project_id: str, message: str, branch: str = "main") -> dict[str, Any]:

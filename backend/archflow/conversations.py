@@ -29,7 +29,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import ai, llm
+from . import agents, ai, cloud_docs, llm
 from .store import CONVERSATION_KINDS, MEMORY_CATEGORIES
 
 log = logging.getLogger("archflow.conversations")
@@ -46,20 +46,7 @@ MEMORY_PROMPT_CHARS = 3000
 MAX_FACTS_PER_TURN = 3
 FACT_MAX_CHARS = 240
 
-SUMMARY_SYSTEM = """You maintain the running summary of a conversation between a software team and ArchFlow, \
-an AI architecture assistant. Merge the new turns into the summary so far. Keep: what was asked and answered, \
-decisions and their reasons, open questions, components and requirement IDs discussed, and any edits made to \
-the architecture. Drop pleasantries and repetition. Write terse bullet points, at most 250 words. Reply with \
-the updated summary only."""
-
-EXTRACT_SYSTEM = """You curate the long-term memory of a software architecture project. From the latest \
-exchange, extract facts the team has settled that should shape every future answer and design: platform or \
-cloud choices, compliance and data rules, budget, scale targets, team skills, preferences, decisions and \
-their reasons. Rules:
-- Only facts the user stated or clearly agreed to. Never the assistant's suggestions alone, never guesses.
-- Skip anything already in the existing memory, and anything that is just a question.
-- Each fact is one short sentence that stands on its own, e.g. "Deployment target is AWS (eu-west-1)."
-- At most 3 facts; usually zero. Return {"facts": []} when nothing qualifies."""
+# Prompts: prompts/memory.summarize.yaml, memory.extract.yaml and assistant.ask.yaml (see agents.prompts).
 
 _FACTS_SCHEMA = {"type": "object", "properties": {"facts": {"type": "array", "items": {
     "type": "object", "properties": {
@@ -180,11 +167,11 @@ def learn_from_exchange(store: Any, pid: str, cid: str, user_text: str, assistan
     if len((user_text or "").strip()) < 12 or not llm.available(org_id):
         return []
     existing = store.list_memory(pid)
-    prompt = ("Existing memory:\n" + ("\n".join(f"- {m['text']}" for m in existing) or "(empty)")
-              + f"\n\nLatest exchange:\nUser: {_clip(user_text, 3000)}\nArchFlow: {_clip(assistant_text, 3000)}")
     try:
-        data = llm.complete_json(EXTRACT_SYSTEM, [{"role": "user", "content": prompt}], _FACTS_SCHEMA,
-                                 group="fast", org_id=org_id, max_tokens=1000)
+        data = agents.run_json("memory.extract", _FACTS_SCHEMA, org_id=org_id,
+                               question=f"Remember from: {_clip(user_text, 200)}", variables={
+            "existing": "\n".join(f"- {m['text']}" for m in existing) or "(empty)",
+            "user_text": _clip(user_text, 3000), "assistant_text": _clip(assistant_text, 3000)})
     except (llm.LLMUnavailable, llm.LLMRefused) as exc:
         log.info("memory extraction skipped: %s", type(exc).__name__)
         return []
@@ -226,8 +213,9 @@ def summary_block(summary: str) -> str:
     return f"<conversation_summary>\n{summary}\n</conversation_summary>" if summary.strip() else ""
 
 
-def ask_system(project_context: str, memory: str, summary: str) -> str:
-    return "\n\n".join(x for x in (ai.ASK_SYSTEM, project_context, memory, summary_block(summary)) if x)
+def ask_variables(project_context: str, memory: str, summary: str) -> dict[str, str]:
+    """Variables of the assistant.ask prompt's system blocks (project data, memory, conversation summary)."""
+    return {"project_context": project_context, "memory": memory, "summary": summary.strip()}
 
 
 def command_context(store: Any, pid: str, conv: dict[str, Any] | None) -> str:
@@ -266,11 +254,9 @@ def maybe_summarize(store: Any, cid: str, org_id: str | None) -> bool:
         fold = msgs[:-RECENT_MESSAGES]
         summary = None
         if llm.available(org_id):
-            prompt = (f"<summary_so_far>\n{conv['summary'] or '(none)'}\n</summary_so_far>\n\n"
-                      f"<new_turns>\n{transcript(fold)}\n</new_turns>")
             try:
-                summary, _ = llm.complete_tools(SUMMARY_SYSTEM, [{"role": "user", "content": prompt}], [],
-                                                group="fast", org_id=org_id, max_tokens=1500)
+                summary = agents.run_text("memory.summarize", org_id=org_id, question="Summarize older turns",
+                                          variables={"summary": conv["summary"] or "(none)", "turns": transcript(fold)})
             except (llm.LLMUnavailable, llm.LLMRefused) as exc:
                 log.info("summary via LLM failed (%s); using the offline digest", type(exc).__name__)
         summary = _clip(summary, SUMMARY_MAX_CHARS) if summary and summary.strip() else _digest(conv["summary"], fold)
@@ -441,7 +427,7 @@ def register_routes(app: FastAPI, store: Any, *, authz: Any,
     def stream_answer(pid: str, branch: str, conv: dict[str, Any], question: str, user_msg: dict[str, Any],
                       a: Any, background: BackgroundTasks) -> StreamingResponse:
         summary, history = window(store, conv, before_seq=user_msg["seq"])
-        system = ask_system(project_context(pid, branch), memory_block(store, pid), summary)
+        variables = ask_variables(project_context(pid, branch), memory_block(store, pid), summary)
         messages = chat_messages(history) + [{"role": "user", "content": question}]
         if len(messages) > 1 and messages[-2]["role"] == "user":  # an earlier question that got no answer
             messages[-2:] = [{"role": "user", "content": messages[-2]["content"] + "\n\n" + question}]
@@ -452,8 +438,10 @@ def register_routes(app: FastAPI, store: Any, *, authz: Any,
             parts: list[str] = []
             error = ""
             try:
-                for chunk in llm.stream_text(system, messages, group="reasoning", org_id=a.org_id,
-                                             max_tokens=ai.MAX_TOKENS):
+                docs = cloud_docs.DocsRequest(query=question, about=f"{variables['project_context']}\n{summary}")
+                for chunk in agents.stream_text(ai.ASK_PROMPT, variables=variables, history=messages[:-1],
+                                                user=messages[-1]["content"], org_id=a.org_id,
+                                                max_tokens=ai.MAX_TOKENS, docs=docs):
                     parts.append(chunk)
                     loop.call_soon_threadsafe(queue.put_nowait, ("delta", chunk))
             except llm.LLMRefused:
@@ -538,7 +526,8 @@ def register_routes(app: FastAPI, store: Any, *, authz: Any,
             if exc.status_code != 503:
                 raise
             result = {"applied": False, "error": exc.detail, "explanation": "", "questions": [], "engine": "llm"}
-        data = {k: result[k] for k in ("applied", "summary", "questions", "engine", "error") if result.get(k) is not None}
+        data = {k: result[k] for k in ("applied", "summary", "questions", "question_options", "engine", "error")
+                if result.get(k) is not None}
         msg = store.add_message(cid, "assistant", "command", result.get("explanation") or "", data, AI_AUTHOR)
         background.add_task(housekeeping, pid, branch, cid, a.org_id, a.actor, True)
         return {"user_message": user_msg, "message": msg, "state": result.get("state")}

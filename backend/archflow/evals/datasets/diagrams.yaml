@@ -1,0 +1,54 @@
+suite: diagrams
+description: Critical flows for sequence diagrams (diagrams.sequence) follow real connections and are named after the requirements they serve.
+cases:
+  - id: support-order-lookup
+    project: {template: ai-customer-support}
+    expect:
+      min_flows: 1
+      requirement_share: 1.0
+      mentions_any: [order, look]
+
+  - id: shop-checkout-and-catalog
+    project:
+      ops:
+        - {op: add_requirement, requirement: {id: REQ-001, title: Browse products, description: Shoppers search and browse the product catalog., priority: high, actors: [shopper]}}
+        - {op: add_requirement, requirement: {id: REQ-002, title: Place an order, description: Shoppers pay for the items in their cart and get an order confirmation., priority: critical, actors: [shopper]}}
+        - {op: add_requirement, requirement: {id: REQ-003, title: Order notifications, description: Shoppers get an email when their order ships., actors: [shopper]}}
+        - {op: add_node, node: {id: web, name: Web Shop, type: client, technology: Next.js, requirement_ids: [REQ-001, REQ-002]}}
+        - {op: add_node, node: {id: gw, name: API Gateway, type: gateway, technology: Kong, requirement_ids: [REQ-001, REQ-002]}}
+        - {op: add_node, node: {id: catalog, name: Catalog Service, type: service, technology: Go, requirement_ids: [REQ-001]}}
+        - {op: add_node, node: {id: catalog-db, name: Catalog DB, type: database, technology: PostgreSQL, requirement_ids: [REQ-001]}}
+        - {op: add_node, node: {id: checkout, name: Checkout Service, type: service, technology: Java, requirement_ids: [REQ-002]}}
+        - {op: add_node, node: {id: orders-db, name: Orders DB, type: database, technology: PostgreSQL, requirement_ids: [REQ-002]}}
+        - {op: add_node, node: {id: stripe, name: Stripe, type: external, technology: Stripe API, requirement_ids: [REQ-002]}}
+        - {op: add_node, node: {id: events, name: Order Events, type: queue, technology: Kafka, requirement_ids: [REQ-003]}}
+        - {op: add_node, node: {id: notify, name: Notification Service, type: service, technology: Node.js, requirement_ids: [REQ-003]}}
+        - {op: add_node, node: {id: notify-db, name: Notifications DB, type: database, technology: MongoDB, requirement_ids: [REQ-003]}}
+        - {op: add_edge, edge: {source: web, target: gw, protocol: HTTPS}}
+        - {op: add_edge, edge: {source: gw, target: catalog, protocol: REST}}
+        - {op: add_edge, edge: {source: catalog, target: catalog-db, protocol: SQL}}
+        - {op: add_edge, edge: {source: gw, target: checkout, protocol: REST}}
+        - {op: add_edge, edge: {source: checkout, target: orders-db, protocol: SQL}}
+        - {op: add_edge, edge: {source: checkout, target: stripe, protocol: HTTPS}}
+        - {op: add_edge, edge: {source: checkout, target: events, protocol: Kafka}}
+        - {op: add_edge, edge: {source: events, target: notify, protocol: Kafka}}
+        - {op: add_edge, edge: {source: notify, target: notify-db, protocol: MongoDB wire}}
+    expect:
+      min_flows: 2
+      requirement_share: 0.66
+      mentions_all: [order]
+      mentions_any: [product, catalog, browse]
+
+  - id: batch-pipeline-without-clients
+    project:
+      ops:
+        - {op: add_requirement, requirement: {id: REQ-001, title: Nightly sales report, description: Finance gets a sales report every morning built from the day's orders., priority: high, actors: [finance analyst]}}
+        - {op: add_node, node: {id: scheduler, name: Scheduler, type: service, technology: Airflow, requirement_ids: [REQ-001]}}
+        - {op: add_node, node: {id: etl, name: ETL Worker, type: service, technology: Python, requirement_ids: [REQ-001]}}
+        - {op: add_node, node: {id: warehouse, name: Sales Warehouse, type: database, technology: BigQuery, requirement_ids: [REQ-001]}}
+        - {op: add_edge, edge: {source: scheduler, target: etl, protocol: gRPC}}
+        - {op: add_edge, edge: {source: etl, target: warehouse, protocol: SQL}}
+    expect:
+      min_flows: 1
+      requirement_share: 1.0
+      mentions_any: [report, sales]

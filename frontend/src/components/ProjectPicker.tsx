@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { getRecent, pruneRecent, timeAgo } from "../recent";
 import { can, type AISettings, type Me, type Project, type User } from "../types";
-import { AISettingsDialog, AIUsageDialog, MembersDialog } from "./OrgDialogs";
+import { AISettingsDialog, AIUsageDialog, JiraSettingsDialog, MembersDialog } from "./OrgDialogs";
+import { TracesDialog } from "./TracesDialog";
 import { UserMenu } from "./UserMenu";
 
 interface Props {
@@ -47,7 +48,7 @@ export function ProjectPicker({ me, user, colors, onColor, onOpen, onLogout, onM
     return orgs.some((o) => o.id === saved) ? saved : orgs[0]?.id ?? "";
   });
   const [newOrg, setNewOrg] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"members" | "ai" | "usage" | null>(null);
+  const [dialog, setDialog] = useState<"members" | "ai" | "usage" | "traces" | "jira" | null>(null);
   const org = orgs.find((o) => o.id === orgId);
   const role = org?.role;
   const isAdmin = can(role, "admin");
@@ -224,6 +225,7 @@ export function ProjectPicker({ me, user, colors, onColor, onOpen, onLogout, onM
               <div className="row gap">
                 <button className="small primary" onClick={() => setDialog("ai")}>{ai?.available ? "AI settings" : "Set up AI"}</button>
                 <button className="small" onClick={() => setDialog("usage")}>Usage & budget</button>
+                <button className="small" onClick={() => setDialog("traces")} title="Every AI run: input, output, model and tool calls, tokens and cost">Traces</button>
               </div>
             )}
           </section>
@@ -234,6 +236,7 @@ export function ProjectPicker({ me, user, colors, onColor, onOpen, onLogout, onM
               <p className="small muted">{(projects ?? []).length} project{(projects ?? []).length === 1 ? "" : "s"}{orgs.length > 1 ? ` · ${orgs.length} organizations` : ""}</p>
               <div className="side-actions">
                 <button className="small" onClick={() => setDialog("members")}>{isAdmin ? "Members & invites" : "Members"}</button>
+                {isAdmin && <button className="small" onClick={() => setDialog("jira")} title="Connect Jira Cloud to push requirements as epics and stories">Jira</button>}
                 {newOrg === null ? (
                   <button className="small ghost" onClick={() => setNewOrg("")}>+ New organization</button>
                 ) : (
@@ -276,6 +279,12 @@ export function ProjectPicker({ me, user, colors, onColor, onOpen, onLogout, onM
       )}
       {dialog === "usage" && org && role && (
         <AIUsageDialog orgId={org.id} orgName={org.name} role={role} selfId={me.user.id} onClose={() => setDialog(null)} />
+      )}
+      {dialog === "traces" && org && (
+        <TracesDialog orgId={org.id} orgName={org.name} onClose={() => setDialog(null)} />
+      )}
+      {dialog === "jira" && org && role && (
+        <JiraSettingsDialog orgId={org.id} orgName={org.name} role={role} selfId={me.user.id} onClose={() => setDialog(null)} />
       )}
       {dialog === "ai" && org && role && (
         <AISettingsDialog orgId={org.id} orgName={org.name} role={role} selfId={me.user.id} onClose={() => { setDialog(null); loadAi(); }} />

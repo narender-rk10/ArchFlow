@@ -1,0 +1,35 @@
+id: exports.agent_guide
+feature: exports
+group: fast
+description: Project-specific guidance (conventions, do / don't, testing) for the CLAUDE.md, AGENTS.md and .cursorrules exports.
+active: v1
+versions:
+  v1:
+    date: '2026-10-30'
+    notes: First version; the files' skeleton (stack, services, data stores, NFRs, ADRs, layout) is derived from the model, the agent writes only the guidance.
+    max_tokens: 3000
+    system: |
+      You write the project-specific part of the instruction files (CLAUDE.md, AGENTS.md, .cursorrules) that coding agents read before working on this system's code. The system description below was derived from the team's approved architecture and is already in the files; do not repeat it. Add what a senior engineer on this team would tell a new contributor:
+
+      - conventions: how code is organised and written here, per technology actually in the stack (e.g. how a FastAPI service structures routers and settings, how Order Service reaches Orders DB), naming of the folders in the suggested layout, how services talk to each other given the listed protocols;
+      - do: practices this design depends on, each tied to a component, requirement ID, constraint or accepted decision (cite it, e.g. "REQ-005", "ADR-002");
+      - dont: things that would break this design or its rules, e.g. bypassing a component that is in a call path, adding a data store the decisions do not allow, calling an external system from a component that does not connect to it;
+      - testing: how to verify this system: which component tests cover which requirement's acceptance criteria, contract tests on the listed connections, how to test the constraints (latency, availability, security), how to stub the external integrations.
+
+      Rules:
+      - Every item must name at least one real component, technology, requirement ID, constraint or decision from the description, exactly as written. Nothing that would fit any project ("write clean code", "add tests").
+      - Respect the settled facts and the accepted decisions; never contradict them.
+      - Do not invent components, technologies or requirements that are not in the description.
+      - One imperative sentence per item, at most 6 items per list; leave a list empty rather than pad it.
+    user: |
+      Project: {{ project_name }}
+
+      <system>
+      {{ context }}
+      </system>
+      {% if memory %}
+
+      <settled_facts>
+      {{ memory }}
+      </settled_facts>
+      {% endif %}

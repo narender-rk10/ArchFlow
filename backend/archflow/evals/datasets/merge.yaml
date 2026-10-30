@@ -1,0 +1,59 @@
+suite: merge
+description: Merge-conflict resolution (merge.resolve) picks the side the requirements favour and explains why.
+cases:
+  - id: latency-nfr-keeps-redis
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Product page p95 latency under 150 ms at 5,000 rps", kind: non_functional, category: performance, priority: critical}}
+        - {op: add_node, node: {name: Storefront, type: client, technology: React}}
+        - {op: add_node, node: {name: Catalog API, type: service, technology: Go}}
+        - {op: add_node, node: {name: Catalog Cache, type: cache, technology: Memcached}}
+        - {op: add_edge, edge: {source: Storefront, target: Catalog API, protocol: HTTPS}}
+        - {op: add_edge, edge: {source: Catalog API, target: Catalog Cache}}
+    ours:
+      ops:
+        - {op: update_node, id: Catalog Cache, changes: {technology: "Redis Cluster", description: "Read-through cache, 3 shards with replicas"}}
+    theirs:
+      ops:
+        - {op: update_node, id: Catalog Cache, changes: {technology: "none (cache removed to save cost)"}}
+    expect:
+      choices: {"Catalog Cache.technology": ours}
+      mentions_any: [REQ-001, latency, p95, "150"]
+    ragas: [faithfulness]
+
+  - id: security-nfr-takes-mtls
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "All service-to-service traffic is encrypted and mutually authenticated", kind: non_functional, category: security, priority: critical}}
+        - {op: add_node, node: {name: Orders Service, type: service, technology: Java}}
+        - {op: add_node, node: {name: Payments Service, type: service, technology: Java}}
+        - {op: add_edge, edge: {source: Orders Service, target: Payments Service, protocol: HTTP}}
+    ours:
+      ops:
+        - {op: update_node, id: Payments Service, changes: {props: {auth: "none (internal network)"}}}
+    theirs:
+      ops:
+        - {op: update_node, id: Payments Service, changes: {props: {auth: "mTLS via service mesh"}}}
+    expect:
+      choices: {"Payments Service.props.auth": theirs}
+      mentions_any: [REQ-001, mTLS, mutual, encrypt]
+    ragas: [faithfulness]
+
+  - id: keep-improved-requirement-over-deletion
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Patients can book appointments online", kind: functional, priority: high}}
+        - {op: add_requirement, requirement: {title: "Booking data is retained for 7 years for audits", kind: non_functional, category: compliance, priority: medium}}
+        - {op: add_node, node: {name: Booking API, type: service, technology: Node.js, requirement_ids: [REQ-001, REQ-002]}}
+        - {op: add_node, node: {name: Booking DB, type: database, technology: PostgreSQL, requirement_ids: [REQ-002]}}
+        - {op: add_edge, edge: {source: Booking API, target: Booking DB, protocol: SQL}}
+    ours:
+      ops:
+        - {op: update_requirement, id: REQ-002, changes: {priority: critical, acceptance_criteria: ["Records are immutable for 7 years", "Audit exports complete within 24 h"]}}
+    theirs:
+      ops:
+        - {op: remove_requirement, id: REQ-002}
+    expect:
+      choices: {"Booking data is retained for 7 years for audits.": ours}
+      mentions_any: [REQ-002, audit, compliance, retain, critical]
+    ragas: [faithfulness]

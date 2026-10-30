@@ -143,8 +143,13 @@ def test_api_flow():
     assert client.post(f"/api/projects/{pid}/branches", json={"name": "experiment/serverless", "from_version": 1}).status_code == 201
     b = client.get(f"/api/projects/{pid}", params={"branch": "experiment/serverless"}).json()
     assert "redis" not in b["state"]["nodes"]
-    client.post(f"/api/projects/{pid}/restore", json={"version": 1})
+    r = client.post(f"/api/projects/{pid}/restore", json={"version": 1})
     assert "redis" not in client.get(f"/api/projects/{pid}").json()["state"]["nodes"]
+    # restoring first saves the state it replaces, so a restore can always be undone
+    safety = client.get(f"/api/projects/{pid}/versions").json()[0]
+    assert safety["number"] == r.json()["safety_version"] and safety["message"] == "Before restoring v1"
+    undo = client.post(f"/api/projects/{pid}/restore", json={"version": safety["number"]})
+    assert undo.status_code == 200 and "redis" in client.get(f"/api/projects/{pid}").json()["state"]["nodes"]
 
     # realtime: a websocket client sees state broadcasts
     with client.websocket_connect(f"/ws/{pid}/main", headers=ws_headers(client)) as ws:

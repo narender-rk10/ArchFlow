@@ -60,6 +60,46 @@ jobs:
           OPENSPEC_NO_UPDATE_CHECK: "1"
         run: uv run pytest -q -ra
 
+  ai-evals:
+    name: AI evals (golden datasets)
+    # Calls a real model (costs money), so only on pushes to main, and only when a key is configured.
+    # Secrets cannot be read in a job-level `if`, so the key is checked per step.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [backend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Skip without a GEMINI_API_KEY secret
+        if: env.GEMINI_API_KEY == ''
+        run: echo "::notice::GEMINI_API_KEY is not set; skipping the AI evals."
+      - uses: actions/checkout@v4
+        if: env.GEMINI_API_KEY != ''
+      - uses: astral-sh/setup-uv@v6
+        if: env.GEMINI_API_KEY != ''
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install Python dependencies
+        if: env.GEMINI_API_KEY != ''
+        run: uv sync --frozen
+      - name: Run every suite (fail below 0.7)
+        if: env.GEMINI_API_KEY != ''
+        run: uv run archflow-eval --fail-under 0.7 --out evals/reports/ci.json
+      - name: Report
+        if: always() && env.GEMINI_API_KEY != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: backend/evals/reports/ci.json
+          if-no-files-found: ignore
+          retention-days: 30
+
   frontend:
     name: Web app (typecheck + build)
     runs-on: ubuntu-latest
@@ -82,6 +122,44 @@ jobs:
       - name: Production dependency audit (high and critical)
         run: npm audit --omit=dev --audit-level=high
         working-directory: frontend
+
+  browser-e2e:
+    name: Browser end-to-end (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            collab/package-lock.json
+      - run: uv sync --frozen
+        working-directory: backend
+      - run: npm ci --no-audit --no-fund
+        working-directory: collab
+      - run: npm ci --no-audit --no-fund
+        working-directory: frontend
+      - name: Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Sign up, edit, connect code, export the diagram, history, decisions, health
+        run: npm run e2e
+        working-directory: frontend
+      - name: Report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report
+          retention-days: 7
 
   collab-e2e:
     name: Collaboration end-to-end
@@ -130,7 +208,7 @@ jobs:
     name: Docker images
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [backend, frontend]
+    needs: [backend, frontend, browser-e2e]
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3

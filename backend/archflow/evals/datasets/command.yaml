@@ -1,0 +1,112 @@
+suite: command
+description: Canvas edits (canvas.command tool agent) make the requested change, apply cleanly and touch nothing else.
+cases:
+  - id: cache-between-service-and-db
+    project: {template: ai-customer-support}
+    request: Add a Redis cache between Order Service and Orders DB
+    expect:
+      adds_types: [cache]
+      adds_any: [redis]
+      connects: [[Order Service, Redis]]
+      removes_nothing: true
+    ragas: [technically_sound]
+
+  - id: dead-letter-queue
+    project:
+      ops:
+        - {op: add_node, node: {name: Order Service, type: service, technology: Spring Boot}}
+        - {op: add_node, node: {name: Order Events, type: queue, technology: Apache Kafka}}
+        - {op: add_node, node: {name: Fulfillment Worker, type: service, technology: Spring Boot}}
+        - {op: add_edge, edge: {source: Order Service, target: Order Events, protocol: Kafka}}
+        - {op: add_edge, edge: {source: Order Events, target: Fulfillment Worker, protocol: Kafka}}
+    request: Add a dead-letter queue for Order Events messages that Fulfillment Worker fails to process
+    expect:
+      adds_types: [queue]
+      adds_any: [dead, dlq]
+      removes_nothing: true
+    ragas: [technically_sound]
+
+  - id: ambiguous-request-changes-nothing
+    project: {template: ai-customer-support}
+    request: Remove the old one
+    expect:
+      max_ops: 0
+      removes_nothing: true
+
+  - id: remove-one-integration
+    project: {template: ai-customer-support}
+    request: Remove the Helpdesk integration, we now escalate inside our own app
+    expect:
+      removes: [Helpdesk]
+      max_removed: 1
+      keeps: [Support Agent, Orders DB]
+
+  - id: rename-keeps-identity
+    project: {template: ai-customer-support}
+    request: Rename Order Service to Order Management Service
+    expect:
+      renames: [[Order Service, Order Management Service]]
+      removes_nothing: true
+      max_ops: 2
+
+  - id: ambiguous-which-database
+    project:
+      ops:
+        - {op: add_node, node: {name: Checkout API, type: service, technology: Spring Boot}}
+        - {op: add_node, node: {name: Orders DB, type: database, technology: PostgreSQL}}
+        - {op: add_node, node: {name: Inventory DB, type: database, technology: MySQL}}
+        - {op: add_edge, edge: {source: Checkout API, target: Orders DB, protocol: SQL}}
+        - {op: add_edge, edge: {source: Checkout API, target: Inventory DB, protocol: SQL}}
+    request: Delete the database
+    expect:
+      max_ops: 0
+      removes_nothing: true
+
+  - id: empty-canvas-three-tier
+    project: {template: blank}
+    request: Add a React web app that calls a FastAPI backend, which stores data in PostgreSQL
+    expect:
+      adds_types: [client, service, database]
+      connects: [[React, FastAPI], [FastAPI, PostgreSQL]]
+    ragas: [technically_sound]
+
+  - id: ecommerce-product-search
+    project:
+      ops:
+        - {op: add_node, node: {name: Storefront, type: client, technology: Next.js}}
+        - {op: add_node, node: {name: Catalog Service, type: service, technology: Node.js}}
+        - {op: add_node, node: {name: Catalog DB, type: database, technology: PostgreSQL}}
+        - {op: add_edge, edge: {source: Storefront, target: Catalog Service, protocol: REST}}
+        - {op: add_edge, edge: {source: Catalog Service, target: Catalog DB, protocol: SQL}}
+    request: Add full-text product search with OpenSearch, kept in sync with Catalog DB
+    expect:
+      adds_any: [opensearch, search]
+      removes_nothing: true
+      keeps: [Catalog DB]
+    ragas: [technically_sound]
+
+  - id: iot-buffer-bursts
+    project:
+      ops:
+        - {op: add_node, node: {name: Smart Meters, type: client, technology: MQTT devices}}
+        - {op: add_node, node: {name: MQTT Broker, type: queue, technology: EMQX}}
+        - {op: add_node, node: {name: Ingest Service, type: service, technology: Node.js}}
+        - {op: add_node, node: {name: Telemetry DB, type: database, technology: TimescaleDB}}
+        - {op: add_edge, edge: {source: Smart Meters, target: MQTT Broker, protocol: MQTT}}
+        - {op: add_edge, edge: {source: MQTT Broker, target: Ingest Service, protocol: MQTT}}
+        - {op: add_edge, edge: {source: Ingest Service, target: Telemetry DB, protocol: SQL}}
+    request: Put a Kafka topic after Ingest Service so bursts of readings don't overload Telemetry DB
+    expect:
+      adds_types: [queue]
+      adds_any: [kafka]
+      connects: [[Ingest Service, Kafka]]
+      removes_nothing: true
+    ragas: [technically_sound]
+
+  - id: ai-agent-output-guardrail
+    project: {template: ai-customer-support}
+    request: Add a guardrail that checks Support Agent replies for leaked PII before they reach customers
+    expect:
+      adds_any: [guardrail, guard, moderation, pii, filter, redact]
+      removes_nothing: true
+    ragas: [technically_sound]

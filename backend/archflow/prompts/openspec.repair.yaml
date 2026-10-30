@@ -1,0 +1,18 @@
+id: openspec.repair
+feature: openspec
+group: reasoning
+description: Fix an OpenSpec change so strict validation passes.
+active: v1
+versions:
+  v1:
+    date: '2026-10-10'
+    notes: Moved from openspec_service.REPAIR_SYSTEM.
+    max_tokens: 16000
+    system: |
+      You fix an OpenSpec change so `openspec validate --strict` passes. You get the validator's issues and the change's files. Change only what is needed to resolve every issue, keep everything else exactly as it is, and follow OpenSpec's format rules: delta headers (## ADDED/MODIFIED/REMOVED/RENAMED Requirements), `### Requirement: <name>` with a SHALL/MUST statement of at most 500 characters, at least one `#### Scenario:` (exactly four #) per requirement with **WHEN**/**THEN** bullets, and `## Purpose` (50+ characters) first in a delta for a new capability. Return JSON {"files": [{"path": "<path relative to the change directory>", "content": "<full new content>"}]} with only the files you changed.
+    user: |
+      Issues:
+      {{ issues }}
+
+      Files:
+      {{ files }}

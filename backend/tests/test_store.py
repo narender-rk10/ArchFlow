@@ -23,9 +23,7 @@ DEV_DB = Path(__file__).resolve().parent.parent / "data" / "archflow.db"
 def pg_store():
     if not PG_URL:
         pytest.skip("TEST_DATABASE_URL not set")
-    from archflow.store_pg import PostgresStore
-
-    store = PostgresStore(PG_URL)
+    store = Store(PG_URL)
     yield store
     store.close()
 
@@ -236,6 +234,13 @@ def test_code_graphs(store, org):
     assert store.list_code_graphs(pid) == []  # cascades
 
 
+def test_timestamps_strictly_increase():
+    from archflow.db.types import now
+
+    stamps = [now() for _ in range(2000)]  # far faster than the clock ticks
+    assert stamps == sorted(stamps) and len(set(stamps)) == len(stamps)
+
+
 # ---------------------------------------------------------------- postgres specifics
 def test_pg_transaction_rolls_back_on_error(pg_store):
     pid = pg_store.create_project("RB")["id"]
@@ -252,14 +257,12 @@ def test_pg_transaction_rolls_back_on_error(pg_store):
 def test_pg_transaction_is_safe_across_processes(pg_store):
     """Two independent stores (separate pools and RLocks, like two server processes) racing on one
     branch: SELECT ... FOR UPDATE must serialize them so no increment is lost."""
-    from archflow.store_pg import PostgresStore
-
     pid = pg_store.create_project("Race")["id"]
-    stores = [PostgresStore(PG_URL, max_size=4), PostgresStore(PG_URL, max_size=4)]
+    stores = [Store(PG_URL, max_size=4), Store(PG_URL, max_size=4)]
     workers, rounds = 4, 15
     errors: list[BaseException] = []
 
-    def work(s: PostgresStore) -> None:
+    def work(s: Store) -> None:
         try:
             for _ in range(rounds):
                 with s.transaction(pid, "main") as state:
@@ -281,17 +284,53 @@ def test_pg_transaction_is_safe_across_processes(pg_store):
         pg_store.delete_project(pid)
 
 
-def test_pg_migrations_recorded_and_rls_scaffolded(pg_store):
-    from archflow.store_pg import run_migrations
+def _schema_drift(engine) -> list:
+    """Tables, columns and indexes the ORM models have but the database lacks (or the other way round)."""
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
 
-    with pg_store.pool.connection() as conn:
-        assert run_migrations(conn) == []  # idempotent
-        versions = [r["version"] for r in conn.execute("SELECT version FROM schema_migrations")]
-        assert "001_init.sql" in versions
-        rls = conn.execute(
-            "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname='projects'").fetchone()
-        assert rls == {"relrowsecurity": True, "relforcerowsecurity": False}
-        assert conn.execute("SELECT 1 FROM pg_extension WHERE extname='vector'").fetchone()
+    from archflow.db.models import Base
+
+    from sqlalchemy import Column
+
+    with engine.connect() as conn:
+        diff = compare_metadata(MigrationContext.configure(conn), Base.metadata)
+    # Alembic cannot compare indexes with expressions (e.g. "id DESC"): it reports them removed and re-added.
+    expression = {i.name for t in Base.metadata.tables.values() for i in t.indexes
+                  if any(not isinstance(e, Column) for e in i.expressions)}
+    return [d for d in diff if isinstance(d, tuple)
+            and d[0] in ("add_table", "remove_table", "add_column", "remove_column", "add_index", "remove_index")
+            and not (d[0] in ("add_index", "remove_index") and d[1].name in expression)]
+
+
+def test_migrations_build_the_same_schema_as_the_models(tmp_path):
+    """A fresh store is created from the models and stamped; running the migrations on an empty database must
+    produce exactly that schema."""
+    from alembic import command
+    from sqlalchemy import create_engine
+
+    from archflow.db import migrate
+
+    fresh = Store(tmp_path / "fresh.db")
+    assert migrate.current(fresh.engine) == "0005" and _schema_drift(fresh.engine) == []
+    fresh.close()
+    engine = create_engine(f"sqlite:///{tmp_path / 'migrated.db'}")
+    cfg = migrate.config()
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        command.upgrade(cfg, "head")
+    assert _schema_drift(engine) == []
+    with engine.begin() as conn:  # idempotent: the baseline converges, it never fails on existing tables
+        cfg.attributes["connection"] = conn
+        command.stamp(cfg, "base")
+        command.upgrade(cfg, "head")
+    assert _schema_drift(engine) == []
+
+
+def test_pg_schema_matches_the_models(pg_store):
+    from archflow.db import migrate
+
+    assert migrate.current(pg_store.engine) == "0005" and _schema_drift(pg_store.engine) == []
 
 
 # ---------------------------------------------------------------- sqlite migration
@@ -320,6 +359,7 @@ def test_sqlite_migrates_pre_org_db(tmp_path):
     assert store.get_state("p-old", "main") == sample_state()
     new = store.create_project("New")
     assert {x["id"] for x in store.list_projects(DEFAULT_ORG_ID)} == {"p-old", new["id"]}
+    assert _schema_drift(store.engine) == []
     store.close()
     Store(path).close()  # re-opening an already-migrated DB is a no-op
 
@@ -349,6 +389,7 @@ def test_sqlite_migrates_copy_of_dev_db(tmp_path):
     for t, n in counts.items():
         assert raw.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] == n
     raw.close()
+    assert _schema_drift(store.engine) == []
     store.close()
 
 
@@ -407,3 +448,13 @@ def test_openspec_files_and_changes(store, org):
     assert store.delete_openspec_change(pid, "a") and store.list_openspec_files(pid, "openspec/changes/a/") == []
     store.delete_project(pid)
     assert store.list_openspec_files(pid) == []
+
+
+def test_ready_endpoint_reports_the_schema():
+    from fastapi.testclient import TestClient
+
+    from archflow.main import create_app
+
+    with TestClient(create_app(Store(":memory:"))) as c:
+        r = c.get("/api/ready")
+        assert r.status_code == 200 and r.json() == {"ready": True, "database": "sqlite", "schema": "0005", "expected": "0005"}

@@ -40,12 +40,17 @@ export interface ArchNodeData extends Record<string, unknown> {
   remote?: { name: string; color: string }[];
   issues?: number;
   childCount?: number; // elements in this component's internal (LLD) diagram
+  comments?: number; // open comment threads on this component
+  requirementIds?: string[]; // linked requirements to show (soft-deleted ones left out); default: all links
+  stale?: string[]; // linked requirements that changed after this component did
+  onComments?: () => void;
 }
 
 export type ArchFlowNode = Node<ArchNodeData, "arch">;
 
 function ArchNodeView({ data, selected }: NodeProps<ArchFlowNode>) {
-  const { model, dimmed, highlighted, diff, remote, issues, childCount } = data;
+  const { model, dimmed, highlighted, diff, remote, issues, childCount, comments, onComments, stale } = data;
+  const reqIds = data.requirementIds ?? model.requirement_ids;
   const meta = TYPE_META[model.type] ?? TYPE_META.service;
   const logo = brandIcon(model.technology, model.name);
   const ring = remote?.[0]?.color;
@@ -74,6 +79,14 @@ function ArchNodeView({ data, selected }: NodeProps<ArchFlowNode>) {
           <span className="vbadge" style={{ ["--vc" as string]: VENDOR_STYLE[model.vendor].color }}>{VENDOR_STYLE[model.vendor].short}</span>
         )}
         {!!issues && <span className="an-issues" title={`${issues} issue(s)`}>{issues}</span>}
+        {!!stale?.length && (
+          <span className="an-stale" title={`Requirement${stale.length > 1 ? "s" : ""} changed since this component: ${stale.join(", ")}. Review it in Properties.`}>
+            ⟳ {stale.length}</span>
+        )}
+        {!!comments && (
+          <button className="an-comments nodrag" title={`${comments} open comment thread(s) · click to read`} aria-label={`${comments} open comments`}
+            onClick={(e) => { e.stopPropagation(); onComments?.(); }} onDoubleClick={(e) => e.stopPropagation()}>💬 {comments}</button>
+        )}
         {!!childCount && <span className="an-children" title={`${childCount} internal element(s) · double-click to open`}>↘ {childCount}</span>}
       </div>
       {model.type === "endpoint" ? (
@@ -95,10 +108,10 @@ function ArchNodeView({ data, selected }: NodeProps<ArchFlowNode>) {
       })()}
       {model.type === "event" && model.props?.channel && <div className="an-tech">on {model.props.channel}</div>}
       {model.technology && model.type !== "table" && model.type !== "event" && <div className="an-tech">{model.technology}</div>}
-      {model.requirement_ids.length > 0 && (
+      {reqIds.length > 0 && (
         <div className="an-reqs">
-          {model.requirement_ids.slice(0, 4).map((r) => <span key={r} className="chip">{r}</span>)}
-          {model.requirement_ids.length > 4 && <span className="chip">+{model.requirement_ids.length - 4}</span>}
+          {reqIds.slice(0, 4).map((r) => <span key={r} className={`chip ${stale?.includes(r) ? "stale" : ""}`}>{r}</span>)}
+          {reqIds.length > 4 && <span className="chip">+{reqIds.length - 4}</span>}
         </div>
       )}
       {remote && remote.length > 0 && (

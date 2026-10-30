@@ -24,9 +24,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import llm
+from . import agents, llm
 from .lld import api_view, children, er_view
-from .models import ProjectState, Requirement
+from .models import ProjectState, Requirement, without_deleted
 from .vibe import TARGETS, Scope, resolve_scope
 
 log = logging.getLogger("archflow.spec")
@@ -34,26 +34,7 @@ log = logging.getLogger("archflow.spec")
 MAX_TOKENS = 16000
 ID_RE = re.compile(r"^[a-z][a-z0-9-]{2,47}$")
 
-SYSTEM = """You are a principal engineer writing an implementation change for a coding agent, in the OpenSpec \
-format (spec-driven development). The architecture and requirements you are given are the approved design: \
-specify how to build exactly that. Never invent components, technologies or integrations that are not in the \
-design; if something essential is missing, list it under open questions.
-
-Write:
-- proposal: why (the problem and value, 2-4 sentences), what_changes (concrete bullet points), impact.
-- specs: group requirements into a few capabilities (kebab-case names such as "order-checkout"). Each spec \
-requirement has a short name, ONE normative statement using SHALL (e.g. "The system SHALL ..."), the source \
-requirement IDs it covers, and scenarios with WHEN / THEN (and optional AND) that are testable. Turn every \
-acceptance criterion into at least one scenario. Non-functional requirements keep their numbers.
-- design: context, goals, non_goals, decisions (decision, rationale, alternatives considered; reuse the recorded \
-architecture decisions), risks with mitigations, open_questions.
-- tasks: ordered sections (setup, data model, each component or interface, integration, observability, tests). \
-Items are small, concrete and verifiable, name files or modules where sensible, and the tests section has one \
-task per requirement ID ("Test REQ-001: ...").
-- change_id: kebab-case verb phrase, e.g. "add-order-checkout". title: short human title.
-
-Respect the project memory (settled facts) and the conventions in the extra instructions. Be specific to this \
-system; no generic filler."""
+PROMPT = "spec.change"  # prompts/spec.change.yaml (versioned; see agents.prompts)
 
 _STRS = {"type": "array", "items": {"type": "string"}}
 SCHEMA: dict[str, Any] = {"type": "object", "properties": {
@@ -126,7 +107,7 @@ def build_context(state: ProjectState, project_name: str, scope: Scope, *, memor
                          "protocol": e.protocol, **({"label": e.label} if e.label else {})} for e in scope.edges],
         "neighbours_to_stub": [{"name": state.nodes[b].name, "type": state.nodes[b].type,
                                 "technology": state.nodes[b].technology} for b in scope.boundary],
-        "requirements": [state.requirements[r].model_dump(exclude={"rev", "field_revs"}) for r in scope.requirement_ids],
+        "requirements": [state.requirements[r].model_dump(exclude={"rev", "field_revs", "deleted"}) for r in scope.requirement_ids],
         "architecture_decisions": [{k: d.get(k) for k in ("id", "title", "status", "decision", "consequences")}
                                    for d in (decisions or []) if d.get("status") in ("accepted", "proposed")],
     }
@@ -395,6 +376,7 @@ def generate(state: ProjectState, project_name: str, node_ids: list[str], requir
              target: str = "claude-code", extra: str = "", memory: str = "",
              decisions: list[dict[str, Any]] | None = None, org_id: str | None = None,
              use_llm: bool = True) -> ChangeSpec:
+    state = without_deleted(state)
     scope = resolve_scope(state, node_ids, requirement_ids)
     if not scope.node_ids and not scope.requirement_ids:
         raise ValueError("There is nothing to specify yet: add components or requirements first.")
@@ -403,8 +385,7 @@ def generate(state: ProjectState, project_name: str, node_ids: list[str], requir
     if use_llm and llm.available(org_id):
         context = build_context(state, project_name, scope, memory=memory, decisions=decisions, target=target, extra=extra)
         try:
-            data = llm.complete_json(SYSTEM, [{"role": "user", "content": context}], SCHEMA, group="reasoning",
-                                     org_id=org_id, max_tokens=MAX_TOKENS)
+            data = agents.run_json(PROMPT, SCHEMA, org_id=org_id, variables={"context": context})
             engine = "llm"
         except (llm.LLMUnavailable, llm.LLMRefused) as exc:
             log.warning("spec generation via LLM failed (%s); deriving it from the model", type(exc).__name__)

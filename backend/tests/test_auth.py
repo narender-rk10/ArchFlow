@@ -2,6 +2,8 @@
 
 import os
 import sqlite3
+
+from sqlalchemy import inspect, text
 import time
 from types import SimpleNamespace
 
@@ -237,7 +239,8 @@ def test_invites(app, owner):
     # Expired invites are refused.
     inv4 = owner.post("/api/orgs/org-default/invites", json={"role": "viewer"}).json()
     store = app.state.store
-    store._conn.execute("UPDATE invites SET expires_at=? WHERE id=?", (time.time() - 1, inv4["id"]))
+    with store.engine.begin() as conn:
+        conn.execute(text("UPDATE invites SET expires_at=:t WHERE id=:id"), {"t": time.time() - 1, "id": inv4["id"]})
     assert new_client(app).get(f"/api/invites/{inv4['token']}").status_code == 404
 
 
@@ -417,6 +420,7 @@ def test_sqlite_migrates_display_name_memberships(tmp_path):
     s.close()
     raw = sqlite3.connect(path)
     raw.executescript("""
+        DROP TABLE alembic_version;  -- databases from before the ORM have no Alembic stamp
         DROP TABLE memberships;
         CREATE TABLE memberships (org_id TEXT NOT NULL, user_name TEXT NOT NULL, role TEXT NOT NULL,
                                   created_at TEXT NOT NULL, PRIMARY KEY (org_id, user_name));
@@ -427,7 +431,7 @@ def test_sqlite_migrates_display_name_memberships(tmp_path):
     raw.commit()
     raw.close()
     store = Store(path)
-    cols = {r[1] for r in store._conn.execute("PRAGMA table_info(memberships)")}
+    cols = {c["name"] for c in inspect(store.engine).get_columns("memberships")}
     assert "user_id" in cols and "user_name" not in cols
     assert store.list_members(DEFAULT_ORG_ID) == []
     assert store.get_token_by_id("tok-old")["revoked"] is True  # ownerless legacy token no longer works

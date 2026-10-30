@@ -13,11 +13,18 @@ Operation shapes::
     {"op": "remove_edge", "id": ...}   # or {"op": "remove_edge", "source": ..., "target": ...}
     {"op": "add_requirement", "requirement": {...}}
     {"op": "update_requirement", "id": "REQ-001", "changes": {...}, "base_rev": 12}
-    {"op": "remove_requirement", "id": "REQ-001"}
+    {"op": "remove_requirement", "id": "REQ-001"}    # soft delete: marks it deleted, keeps its links
+    {"op": "restore_requirement", "id": "REQ-001"}   # undoes a soft delete
+    {"op": "purge_requirement", "id": "REQ-001"}     # hard delete of a deleted requirement (admins; see main.py)
+    {"op": "mark_reviewed", "id": "<node id or name>", "requirement_id": "REQ-001"}  # omit requirement_id: all
 
 ``base_rev`` is the project revision the client last saw. If a field in ``changes`` was
 modified by someone else after that revision (and to a different value), the batch is
 rejected with a :class:`ConflictError` instead of silently overwriting.
+
+Stale links: a component's link to a requirement is stale when the requirement changed after the component did
+(see ``analysis.stale_links``). ``mark_reviewed`` records that someone checked the component still fits, as the
+bookkeeping entry ``field_revs["reviewed:<requirement id>"]`` on the node.
 
 Diagram levels (C4 drill-down): a node's ``parent_id`` names the component whose internal diagram it belongs
 to ("" = top level). Connections must join two nodes of the same diagram.
@@ -33,6 +40,8 @@ from pydantic import ValidationError
 
 from .models import PROTECTED_FIELDS, Edge, Node, ProjectState, Requirement
 
+REVIEWED = "reviewed:"  # node.field_revs key prefix: revision at which a linked requirement was last reviewed
+
 # Moving things around is last-writer-wins; everything else is conflict-checked.
 NO_CONFLICT_FIELDS = {"position"}
 
@@ -47,9 +56,28 @@ class ConflictError(Exception):
         self.conflicts = conflicts
 
 
-def slugify(text: str) -> str:
+def slugify(text: str, max_len: int = 40) -> str:
+    """Lower-case, hyphen-separated slug of at most ``max_len`` characters, cut at a word boundary."""
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return slug[:40] or "item"
+    if len(slug) > max_len:
+        cut = slug[:max_len + 1]
+        # Prefer the last hyphen (a word boundary); a single over-long word is cut hard.
+        slug = cut[:cut.rfind("-")] if cut.rfind("-") > 0 else slug[:max_len]
+        slug = slug.strip("-")
+    return slug or "item"
+
+
+def unique_slug(text: str, taken, max_len: int = 40, prefix: str = "") -> str:
+    """``prefix + slugify(text)``, made unique against ``taken`` (a container or a predicate) by appending -2, -3…
+
+    The suffix never pushes the slug past ``max_len``: the base is re-cut at a word boundary to make room."""
+    exists = taken if callable(taken) else (lambda name: name in taken)
+    base = slugify(text, max_len)
+    candidate, i = f"{prefix}{base}", 2
+    while exists(candidate):
+        suffix = f"-{i}"
+        candidate, i = f"{prefix}{slugify(base, max_len - len(suffix))}{suffix}", i + 1
+    return candidate
 
 
 def new_node_id(state: ProjectState, name: str) -> str:
@@ -95,7 +123,8 @@ def resolve_requirement(state: ProjectState, ref: str | None) -> Requirement | N
     if ref in state.requirements:
         return state.requirements[ref]
     wanted = ref.strip().lower()
-    for req in state.requirements.values():
+    # active requirements first, so a title shared with a deleted one finds the live one
+    for req in sorted(state.requirements.values(), key=lambda r: r.deleted):
         if req.id.lower() == wanted or req.title.lower() == wanted:
             return req
     return None
@@ -250,6 +279,10 @@ def apply_ops(state: ProjectState, ops: list[dict[str, Any]]) -> tuple[ProjectSt
             if changes.get("parent_id"):
                 parent = resolve_node(st, changes["parent_id"])
                 changes["parent_id"] = parent.id if parent else changes["parent_id"]
+            if isinstance(changes.get("requirement_ids"), list):
+                # Callers see only active requirements; keep links to deleted ones so a restore brings them back.
+                hidden = [r for r in node.requirement_ids if r in st.requirements and st.requirements[r].deleted]
+                changes["requirement_ids"] = [*changes["requirement_ids"], *(r for r in hidden if r not in changes["requirement_ids"])]
             updated, fields = _apply_changes(node, changes, op.get("base_rev"), new_rev, "node", conflicts)
             if "parent_id" in fields:
                 _check_parent(st, node.id, updated.parent_id)
@@ -348,17 +381,43 @@ def apply_ops(state: ProjectState, ops: list[dict[str, Any]]) -> tuple[ProjectSt
             if fields:
                 summary.append(f"updated {req.id} ({', '.join(fields)})")
 
-        elif kind == "remove_requirement":
+        elif kind in ("remove_requirement", "restore_requirement"):
             req = resolve_requirement(st, op.get("id"))
             if not req:
                 raise OpError(f"requirement '{op.get('id')}' not found")
+            deleted = kind == "remove_requirement"
+            if req.deleted != deleted:
+                req.deleted = deleted
+                req.field_revs["deleted"] = new_rev
+                req.rev = new_rev
+                summary.append(f"{'removed' if deleted else 'restored'} {req.id} '{req.title}'")
+
+        elif kind == "purge_requirement":
+            req = resolve_requirement(st, op.get("id"))
+            if not req:
+                raise OpError(f"requirement '{op.get('id')}' not found")
+            if not req.deleted:
+                raise OpError(f"{req.id} is not deleted; delete it before removing it permanently")
             del st.requirements[req.id]
             for node in st.nodes.values():
                 if req.id in node.requirement_ids:
                     node.requirement_ids = [r for r in node.requirement_ids if r != req.id]
                     node.field_revs["requirement_ids"] = new_rev
                     node.rev = new_rev
-            summary.append(f"removed {req.id} '{req.title}'")
+                node.field_revs.pop(REVIEWED + req.id, None)
+            summary.append(f"permanently removed {req.id} '{req.title}'")
+
+        elif kind == "mark_reviewed":
+            node = resolve_node(st, op.get("id"))
+            if not node:
+                raise OpError(f"node '{op.get('id')}' not found")
+            rids = [op["requirement_id"]] if op.get("requirement_id") else list(node.requirement_ids)
+            for rid in rids:
+                if rid not in node.requirement_ids:
+                    raise OpError(f"'{node.name}' is not linked to {rid}")
+                node.field_revs[REVIEWED + rid] = new_rev
+            if rids:
+                summary.append(f"reviewed '{node.name}' against {', '.join(rids)}")
 
         else:
             raise OpError(f"unknown op '{kind}'")

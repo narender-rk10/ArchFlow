@@ -1,0 +1,117 @@
+suite: ask
+description: The project assistant (assistant.ask) answers from the project data, names real components and does not invent facts.
+cases:
+  - id: database-failure-impact
+    project: {template: ai-customer-support}
+    question: What happens to order lookups if Orders DB goes down?
+    reference: >-
+      Order lookup (REQ-003) fails. The Support Agent reads orders through the Orders MCP Server and the Order
+      Service, which both depend on the single Orders DB, so there is no fallback; add a replica with failover
+      and a cached or degraded answer so the agent can escalate to the Helpdesk.
+    expect:
+      mentions_all: [Orders DB]
+      mentions_any: [Order Service, Orders MCP Server, REQ-003]
+    ragas: [faithfulness, answer_accuracy]
+
+  - id: authentication-path
+    project: {template: ai-customer-support}
+    question: How are customers authenticated before the agent can see their orders?
+    expect:
+      mentions_any: [Auth Service, REQ-002]
+    ragas: [faithfulness]
+
+  - id: unknown-fact-is-not-invented
+    project: {template: ai-customer-support}
+    question: Which payment provider does this system use?
+    expect:
+      mentions_any: [not, no payment, isn't, doesn't, none]
+      forbid: ["(uses|use|integrates with) (Stripe|PayPal|Adyen|Braintree)"]
+    ragas: [faithfulness]
+
+  - id: fintech-double-charge-on-timeout
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "A customer is never charged twice for one payment", kind: non_functional, category: reliability, priority: critical}}
+        - {op: add_node, node: {name: Mobile App, type: client, technology: React Native}}
+        - {op: add_node, node: {name: Payments API, type: service, technology: Go, requirement_ids: [REQ-001]}}
+        - {op: add_node, node: {name: Card Processor, type: external, technology: Stripe}}
+        - {op: add_node, node: {name: Ledger DB, type: database, technology: PostgreSQL}}
+        - {op: add_edge, edge: {source: Mobile App, target: Payments API, protocol: HTTPS}}
+        - {op: add_edge, edge: {source: Payments API, target: Card Processor, protocol: REST}}
+        - {op: add_edge, edge: {source: Payments API, target: Ledger DB, protocol: SQL}}
+    question: If the Card Processor times out after it has already charged the card and the app retries, can we charge the customer twice?
+    reference: >-
+      Yes. Nothing in the model makes the charge idempotent: Payments API calls the Card Processor (Stripe) over
+      REST and a retry after a timeout issues a second charge, violating REQ-001. Send an idempotency key per
+      payment, record the payment intent in Ledger DB before calling out, and reconcile timeouts instead of
+      blindly retrying.
+    expect:
+      mentions_all: [Card Processor]
+      mentions_any: [idempoten, REQ-001, Payments API]
+    ragas: [faithfulness, answer_accuracy]
+
+  - id: healthcare-where-phi-leaves
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Protected health information stays in HIPAA-eligible, encrypted stores", kind: non_functional, category: privacy, priority: critical}}
+        - {op: add_node, node: {name: Patient Portal, type: client, technology: React}}
+        - {op: add_node, node: {name: FHIR API, type: service, technology: HAPI FHIR}}
+        - {op: add_node, node: {name: Clinical DB, type: database, technology: "PostgreSQL (encrypted, KMS)", requirement_ids: [REQ-001]}}
+        - {op: add_node, node: {name: Nightly Export, type: service, technology: Airflow}}
+        - {op: add_node, node: {name: Analytics Warehouse, type: database, technology: BigQuery}}
+        - {op: add_edge, edge: {source: Patient Portal, target: FHIR API, protocol: HTTPS}}
+        - {op: add_edge, edge: {source: FHIR API, target: Clinical DB, protocol: SQL}}
+        - {op: add_edge, edge: {source: Nightly Export, target: Clinical DB, protocol: SQL}}
+        - {op: add_edge, edge: {source: Nightly Export, target: Analytics Warehouse, protocol: Batch load}}
+    question: Where does patient data leave the Clinical DB, and is that a risk for REQ-001?
+    expect:
+      mentions_all: [Analytics Warehouse]
+      mentions_any: [Nightly Export, de-identif, deidentif, anonymi, pseudonym, BAA]
+    ragas: [faithfulness]
+
+  - id: iot-ingest-bottleneck
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Ingest 50,000 sensor readings per second with bursts to 3x", kind: non_functional, category: scalability, priority: critical}}
+        - {op: add_node, node: {name: Smart Meters, type: client, technology: MQTT devices}}
+        - {op: add_node, node: {name: MQTT Broker, type: queue, technology: EMQX}}
+        - {op: add_node, node: {name: Ingest Service, type: service, technology: Node.js, props: {replicas: "1"}, requirement_ids: [REQ-001]}}
+        - {op: add_node, node: {name: Telemetry DB, type: database, technology: TimescaleDB}}
+        - {op: add_edge, edge: {source: Smart Meters, target: MQTT Broker, protocol: MQTT}}
+        - {op: add_edge, edge: {source: MQTT Broker, target: Ingest Service, protocol: MQTT}}
+        - {op: add_edge, edge: {source: Ingest Service, target: Telemetry DB, protocol: "SQL (row inserts)"}}
+    question: What breaks first at 50,000 readings per second, and what would you change?
+    expect:
+      mentions_any: [Ingest Service, Telemetry DB]
+    ragas: [faithfulness]
+
+  - id: empty-canvas-has-no-answer
+    project: {template: blank}
+    question: Which database does this system use and how is it backed up?
+    expect:
+      mentions_any: [no components, empty, not, no database, nothing, doesn't, hasn't, none]
+      forbid: ["(uses|use|stored in|backed by) (PostgreSQL|MySQL|MongoDB|DynamoDB|Aurora)"]
+    ragas: [faithfulness]
+
+  - id: conflicting-nfrs-are-called-out
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Total infrastructure cost under $50 per month", kind: non_functional, category: cost, priority: critical}}
+        - {op: add_requirement, requirement: {title: "99.999% availability, active-active across three regions", kind: non_functional, category: availability, priority: critical}}
+        - {op: add_node, node: {name: Storefront, type: client, technology: Next.js}}
+        - {op: add_node, node: {name: Shop API, type: service, technology: Node.js}}
+        - {op: add_node, node: {name: Shop DB, type: database, technology: PostgreSQL}}
+        - {op: add_edge, edge: {source: Storefront, target: Shop API, protocol: HTTPS}}
+        - {op: add_edge, edge: {source: Shop API, target: Shop DB, protocol: SQL}}
+    question: Can this design meet all of its non-functional requirements?
+    expect:
+      mentions_all: [REQ-001, REQ-002]
+      mentions_any: [conflict, trade-off, tradeoff, tension, contradict, unrealistic, not feasible, cannot, can't, incompatible]
+    ragas: [faithfulness]
+
+  - id: secret-in-question-is-not-echoed
+    project: {template: ai-customer-support}
+    question: Our Order Service uses the AWS key AKIAIOSFODNN7EXAMPLE in its config file. Is that a problem?
+    expect:
+      mentions_any: [secret, Secrets Manager, Key Vault, vault, rotate, environment]
+      forbid: ["AKIA[0-9A-Z]{16}"]

@@ -1,0 +1,75 @@
+suite: review
+description: The AI review (review.specialist, four specialists in parallel) finds the real risks, names the components and gives an applicable fix.
+cases:
+  - id: support-template-single-points
+    project: {template: ai-customer-support}
+    expect:
+      min_findings: 3
+      flags_any: [Orders DB, Claude, Support Agent]
+      mentions_any: [single point, replica, fallback, failover, prompt injection, timeout]
+    ragas: [technically_sound, grounded_in_project]
+
+  - id: fintech-unauthenticated-payments
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Card data is handled in a PCI DSS compliant way", kind: non_functional, category: security, priority: critical}}
+        - {op: add_node, node: {name: Mobile App, type: client, technology: React Native}}
+        - {op: add_node, node: {name: Payments API, type: service, technology: Go, description: "Public endpoint, no authentication; receives raw card numbers", requirement_ids: [REQ-001]}}
+        - {op: add_node, node: {name: Card Processor, type: external, technology: Stripe}}
+        - {op: add_node, node: {name: Ledger DB, type: database, technology: "PostgreSQL (unencrypted)"}}
+        - {op: add_edge, edge: {source: Mobile App, target: Payments API, protocol: HTTP}}
+        - {op: add_edge, edge: {source: Payments API, target: Card Processor, protocol: REST}}
+        - {op: add_edge, edge: {source: Payments API, target: Ledger DB, protocol: SQL}}
+    focuses: [security]
+    expect:
+      top_severity: [critical, high]
+      flags_any: [Payments API, Ledger DB, Mobile App]
+      mentions_any: [authenticat, PCI, tokeni, encrypt, TLS, HTTPS]
+    ragas: [technically_sound]
+
+  - id: iot-direct-writes-under-load
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Ingest 50,000 sensor readings per second with bursts to 3x", kind: non_functional, category: scalability, priority: critical}}
+        - {op: add_node, node: {name: Sensors, type: client, technology: HTTP devices}}
+        - {op: add_node, node: {name: Ingest API, type: service, technology: Express, props: {replicas: "1"}, requirement_ids: [REQ-001]}}
+        - {op: add_node, node: {name: Telemetry DB, type: database, technology: PostgreSQL}}
+        - {op: add_edge, edge: {source: Sensors, target: Ingest API, protocol: HTTPS}}
+        - {op: add_edge, edge: {source: Ingest API, target: Telemetry DB, protocol: "SQL (one insert per reading)"}}
+    focuses: [performance, reliability]
+    expect:
+      min_findings: 2
+      flags_any: [Ingest API, Telemetry DB]
+      mentions_any: [queue, buffer, backpressure, Kafka, batch, partition, time-series, Timescale]
+    ragas: [technically_sound, grounded_in_project]
+
+  - id: small-mvp-is-over-engineered
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "About 200 users in the first year; a team of two maintains it", kind: non_functional, category: maintainability, priority: high}}
+        - {op: add_node, node: {name: Web App, type: client, technology: Next.js}}
+        - {op: add_node, node: {name: API Gateway, type: gateway, technology: Kong}}
+        - {op: add_node, node: {name: Booking Service, type: service, technology: Go}}
+        - {op: add_node, node: {name: Studio Service, type: service, technology: Go}}
+        - {op: add_node, node: {name: Billing Service, type: service, technology: Go}}
+        - {op: add_node, node: {name: Notification Service, type: service, technology: Go}}
+        - {op: add_node, node: {name: Event Bus, type: queue, technology: "Kafka (3 brokers, self-hosted)"}}
+        - {op: add_node, node: {name: Service Mesh, type: service, technology: Istio on Kubernetes}}
+        - {op: add_node, node: {name: Booking DB, type: database, technology: PostgreSQL}}
+        - {op: add_edge, edge: {source: Web App, target: API Gateway, protocol: HTTPS}}
+        - {op: add_edge, edge: {source: API Gateway, target: Booking Service, protocol: gRPC}}
+        - {op: add_edge, edge: {source: API Gateway, target: Studio Service, protocol: gRPC}}
+        - {op: add_edge, edge: {source: Booking Service, target: Event Bus, protocol: Kafka}}
+        - {op: add_edge, edge: {source: Event Bus, target: Billing Service, protocol: Kafka}}
+        - {op: add_edge, edge: {source: Event Bus, target: Notification Service, protocol: Kafka}}
+        - {op: add_edge, edge: {source: Booking Service, target: Booking DB, protocol: SQL}}
+    focuses: [operations]
+    expect:
+      flags_any: [Event Bus, Service Mesh, API Gateway, Booking Service]
+      mentions_any: [over-engineer, overengineer, overkill, complexity, simplif, monolith, managed, on-call]
+    ragas: [technically_sound]
+
+  - id: empty-canvas-is-rejected
+    project: {template: blank}
+    expect:
+      rejected: true

@@ -1,0 +1,95 @@
+suite: design
+description: The design chat (design.turn) interviews before proposing, and proposes complete, distinct options on request.
+cases:
+  - id: first-turn-asks
+    idea: A booking app for yoga studios with online payments
+    expect:
+      action: ask
+
+  - id: skip-to-options
+    turns:
+      - {role: user, content: A booking app for yoga studios with online payments}
+      - {role: user, content: Skip the questions and show me architecture options now}
+    expect:
+      action: propose
+      min_options: 2
+      component_types_all: [database]
+      mentions_any: [payment, Stripe, Adyen, PayPal]
+
+  - id: agentic-options-include-llm
+    idea: >-
+      Show me architecture options now: an AI agent that triages new GitHub issues, labels them and drafts a
+      reply using an LLM and our internal docs.
+    expect:
+      action: propose
+      min_options: 2
+      component_types_all: [llm]
+      mentions_any: [GitHub]
+
+  # Official documentation as context (cloud_docs: Microsoft Learn / AWS Knowledge MCP servers)
+  - id: azure-options-use-azure-services
+    idea: >-
+      Show me architecture options now: an order-processing backend on Azure with a public API, background
+      fulfilment and a relational database.
+    expect:
+      action: propose
+      min_options: 2
+      component_types_all: [database]
+      mentions_any: [Azure SQL, Cosmos DB, Service Bus, AKS, Container Apps, Azure Functions, App Service, API Management]
+      not_mentions: [DynamoDB, Lambda, CloudFront]
+
+  - id: aws-options-use-aws-services
+    idea: >-
+      Show me architecture options now: an order-processing backend on AWS with a public API, background
+      fulfilment and a relational database.
+    expect:
+      action: propose
+      min_options: 2
+      component_types_all: [database]
+      mentions_any: [Aurora, RDS, SQS, Lambda, ECS, EKS, API Gateway, EventBridge]
+      not_mentions: [Cosmos DB, Service Bus, AKS]
+
+  - id: fintech-first-turn-asks
+    idea: A peer-to-peer payments app for university students to split rent and bills
+    expect:
+      action: ask
+
+  - id: healthcare-options-are-hipaa-aware
+    idea: >-
+      Show me architecture options now: a telehealth app with video visits, e-prescriptions and patient records
+      that must be HIPAA compliant.
+    expect:
+      action: propose
+      min_options: 2
+      component_types_all: [database]
+      mentions_any: [HIPAA, encrypt, audit, KMS, OIDC, Keycloak, Cognito, Auth0, Identity, FHIR]
+
+  - id: iot-options-include-a-stream
+    idea: >-
+      Show me architecture options now: ingest telemetry from 200,000 smart meters every 10 seconds and alert
+      on anomalies within one minute.
+    expect:
+      action: propose
+      min_options: 2
+      component_types_all: [queue, database]
+      mentions_any: [MQTT, Kafka, Kinesis, IoT Core, IoT Hub, Event Hubs, Timescale, InfluxDB, time-series, Flink]
+
+  - id: conflicting-nfrs-first-turn-asks
+    idea: >-
+      A global stock trading platform with 99.999% availability across three regions and sub-millisecond order
+      matching, and the whole thing must cost under $100 a month.
+    expect:
+      action: ask
+      mentions_any: [budget, cost, availability, region, latency, trade, priorit]
+
+  - id: ecommerce-answers-then-propose
+    turns:
+      - {role: user, content: A marketplace where independent bakers sell cakes for local delivery}
+      - {role: user, content: "About 5,000 orders a day in one city, payments via Stripe, a team of four, and we deploy on GCP."}
+      - {role: user, content: That's everything I know. Please propose the architecture options.}
+    expect:
+      action: propose
+      min_options: 2
+      component_types_all: [database]
+      mentions_any: [Stripe, Cloud Run, GKE, Cloud SQL, Firestore, Pub/Sub, App Engine]
+      not_mentions: [DynamoDB, Cosmos DB]

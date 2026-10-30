@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import { ApiError, api } from "../api";
-import { ROLES, ROLE_HELP, can, type AIConfig, type AIGroup, type AISettings, type AITestResult, type AIUsageReport, type AIUsageRow, type Invite, type Member, type Role } from "../types";
+import { useEscape } from "../useEscape";
+import { ROLES, ROLE_HELP, can, type AIConfig, type ApprovalPolicy, type AIGroup, type AISettings, type AITestResult, type AIUsageReport, type AIUsageRow, type Invite, type Member, type Role, type JiraSettings, type JiraTestResult } from "../types";
 import { Copy } from "./ConnectDialog";
 
 interface Base { orgId: string; orgName: string; role: Role; selfId: string; onClose: () => void; onChanged?: () => void }
 
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  const escRef = useEscape(onClose);
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={onClose} ref={escRef}>
       <div className="modal wide" role="dialog" aria-label={title} onClick={(e) => e.stopPropagation()}>
         <div className="row between">
           <h3>{title}</h3>
@@ -121,12 +123,56 @@ export function MembersDialog({ orgId, orgName, role, selfId, onClose, onChanged
           )}
         </>
       ) : <p className="muted small">Only admins and owners can invite people or change roles.</p>}
+      <ApprovalPolicySection orgId={orgId} manage={manage} />
       <details className="small muted roles-help">
         <summary>What each role can do</summary>
         <ul>{ROLES.map((r) => <li key={r}><b>{r}</b>: {ROLE_HELP[r]}</li>)}</ul>
       </details>
       {error && <p className="error small">{error}</p>}
     </Modal>
+  );
+}
+
+/** Version approvals: how many approvals a version needs, and whether adopting a draft requires one. Admins edit. */
+function ApprovalPolicySection({ orgId, manage }: { orgId: string; manage: boolean }) {
+  const [policy, setPolicy] = useState<ApprovalPolicy | null>(null);
+  const [required, setRequired] = useState(1);
+  const [forAdopt, setForAdopt] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  const show = (p: ApprovalPolicy) => { setPolicy(p); setRequired(p.required_approvals); setForAdopt(p.require_for_adopt); };
+  useEffect(() => { api.approvalPolicy(orgId).then(show).catch((e) => setError(e.message)); }, [orgId]);
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(""); setSaved(false);
+    try { show(await api.setApprovalPolicy(orgId, required, forAdopt)); setSaved(true); }
+    catch (err) { setError((err as Error).message); }
+  };
+
+  if (!policy) return error ? <p className="error small">{error}</p> : null;
+  return (
+    <form className="approval-policy" onSubmit={save}>
+      <h4>Version approvals</h4>
+      <p className="muted small">Reviewers, architects, admins and owners approve saved versions. Authors cannot approve
+        their own version unless they are the only owner.</p>
+      <label className="field"><span>Approvals required per version</span>
+        <input type="number" min={1} max={10} value={required} disabled={!manage}
+          onChange={(e) => setRequired(Math.max(1, Math.min(10, Number(e.target.value) || 1)))} />
+      </label>
+      <label className="small row gap">
+        <input type="checkbox" checked={forAdopt} disabled={!manage} onChange={(e) => setForAdopt(e.target.checked)} />
+        Require an approved version before a draft is adopted into main
+      </label>
+      {manage && (
+        <div className="row gap">
+          <button className="primary small">Save approval settings</button>
+          {saved && <span className="small ok">Saved</span>}
+        </div>
+      )}
+      {error && <p className="error small">{error}</p>}
+    </form>
   );
 }
 
@@ -303,13 +349,93 @@ export function AISettingsDialog({ orgId, orgName, onClose }: Base) {
   );
 }
 
-const FEATURE_LABEL: Record<string, string> = {
+/**
+ * Jira Cloud connection for an organization (admins): site, account email, API token (write-only, encrypted) and the
+ * default project. Developers then preview and push requirements from a project's Requirements panel.
+ */
+export function JiraSettingsDialog({ orgId, orgName, onClose }: Base) {
+  const [s, setS] = useState<JiraSettings | null>(null);
+  const [form, setForm] = useState({ site_url: "", email: "", api_token: "", project_key: "" });
+  const [test, setTest] = useState<JiraTestResult | "running" | null>(null);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState("");
+
+  const load = (next: JiraSettings) => {
+    setS(next);
+    setForm({ site_url: next.site_url, email: next.email, api_token: "", project_key: next.project_key });
+  };
+  useEffect(() => { api.jiraSettings(orgId).then(load).catch((e) => setError(e.message)); }, [orgId]);
+  const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, [k]: e.target.value });
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(""); setTest(null);
+    try {
+      load(await api.saveJiraSettings(orgId, { ...form, api_token: form.api_token.trim() || null }));
+      setSaved("Saved"); window.setTimeout(() => setSaved(""), 2500);
+    } catch (err) { setError((err as Error).message); }
+  };
+  const runTest = async () => {
+    setTest("running");
+    try { setTest(await api.testJira(orgId)); } catch (err) { setTest({ ok: false, error: (err as Error).message }); }
+  };
+  const disconnect = async () => {
+    if (!window.confirm(`Disconnect Jira from ${orgName}? Issues already pushed stay in Jira and stay linked.`)) return;
+    try { await api.deleteJiraSettings(orgId); load(await api.jiraSettings(orgId)); } catch (err) { setError((err as Error).message); }
+  };
+
+  return (
+    <Modal title={`Jira · ${orgName}`} onClose={onClose}>
+      {!s && !error && <p className="muted small">Loading…</p>}
+      {s && (
+        <form onSubmit={save}>
+          {!s.enabled && <p className="warn small">The token cannot be stored: set ARCHFLOW_SECRET_KEY in the API's environment and restart it.</p>}
+          <p className="muted small">Requirements become stories under one epic per component, with Given/When/Then acceptance criteria, story
+            points and sub-tasks from the low-level design. Pushes always show a preview first and update existing issues instead of
+            duplicating them. The API token is encrypted at rest and never shown again (only its last 4 characters).</p>
+          <label className="field"><span>Site URL</span>
+            <input value={form.site_url} onChange={set("site_url")} placeholder="https://your-team.atlassian.net" required />
+          </label>
+          <label className="field"><span>Account email</span>
+            <input type="email" value={form.email} onChange={set("email")} placeholder="jira-bot@your-company.com" required />
+          </label>
+          <label className="field"><span>API token <span className="muted tiny">
+            {s.configured ? `Stored token …${s.last4}. Leave empty to keep it.` : <>Create one at <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer">id.atlassian.com</a></>}</span></span>
+            <input type="password" autoComplete="off" value={form.api_token} onChange={set("api_token")}
+              placeholder={s.configured ? "Enter a new token to replace it" : "Paste API token"} disabled={!s.enabled} />
+          </label>
+          <label className="field"><span>Default project key <span className="muted tiny">e.g. SHOP; a push can pick another</span></span>
+            <input className="mono" value={form.project_key} onChange={(e) => setForm({ ...form, project_key: e.target.value.toUpperCase() })} maxLength={10} />
+          </label>
+          <div className="row between">
+            <span className="row gap">
+              {s.configured && <button type="button" className="small" onClick={runTest} disabled={test === "running"}
+                title="Uses the saved settings">Test connection</button>}
+              {test === "running" ? <span className="muted small pulse">Testing…</span>
+                : test ? <span className={`small ${test.ok ? "ok" : "error"}`}>
+                  {test.ok ? `✓ Signed in as ${test.account}${test.project ? ` · ${test.project.key} (${test.project.name}): ${test.project.issue_types.join(", ")}${test.project.story_points ? ", story points" : ""}` : ""}`
+                    : `✗ ${test.error}`}</span> : null}
+            </span>
+            <span className="row gap">
+              {saved && <span className="small ok">{saved}</span>}
+              {s.configured && <button type="button" className="small danger" onClick={disconnect}>Disconnect</button>}
+              <button className="primary" disabled={!s.enabled}>Save</button>
+            </span>
+          </div>
+        </form>
+      )}
+      {error && <p className="error small">{error}</p>}
+    </Modal>
+  );
+}
+
+export const FEATURE_LABEL: Record<string, string> = {
   assistant: "Assistant (Ask)", "canvas-edit": "Canvas edits", "design-chat": "Design chat", openspec: "Vibe code (OpenSpec)",
   "low-level-design": "Low-level design", decisions: "Decisions", "code-analysis": "Code analysis", memory: "Memory & summaries",
-  mcp: "MCP agents", other: "Other",
+  mcp: "MCP agents", suggestions: "Suggestions & follow-ups", review: "AI review", intake: "Document import", eval: "Evals", jira: "Jira stories", other: "Other",
 };
-const usd = (n: number) => (n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`);
-const tokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));
+export const usd = (n: number) => (n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`);
+export const tokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));
 
 function UsageTable({ title, rows, label }: { title: string; rows: AIUsageRow[]; label: (r: AIUsageRow) => string }) {
   if (!rows.length) return null;
@@ -404,6 +530,10 @@ export function AIUsageDialog({ orgId, orgName, onClose }: Base) {
             <UsageTable title="By feature" rows={r.by_feature} label={(x) => FEATURE_LABEL[x.key] ?? x.key} />
             <UsageTable title="By model" rows={r.by_model} label={(x) => x.key || "unknown"} />
             <UsageTable title="By project" rows={r.by_project} label={(x) => x.name ?? x.key} />
+            {r.by_user && r.by_user.length > 0 && <UsageTable title="By person" rows={r.by_user} label={(x) => x.name ?? x.key} />}
+            {r.by_prompt && r.by_prompt.some((x) => x.key) && (
+              <UsageTable title="By prompt version" rows={r.by_prompt.filter((x) => x.key)} label={(x) => x.key} />
+            )}
           </div>
           {r.total.calls === 0 && <p className="muted small">No AI calls recorded yet.</p>}
         </>

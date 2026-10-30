@@ -20,19 +20,20 @@ from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from . import (accounts, ai, openspec_service, diagram_export, auth, catalog, chat, collab_sync, conversations, decisions, lld, llm,
-               secrets_box, usage, users)
+from . import (accounts, ai, approvals, openspec_service, diagram_export, auth, catalog, chat, collab_sync, comments, conversations,
+               decisions, lld, llm, history, intake, observability, review, secrets_box, suggestions, usage, users, exports, diagrams, jira)
 from .analysis import full_analysis, trace_requirement
 from .codegraph.service import CodeGraphService
 from .codegraph.service import register_routes as register_codegraph_routes
+from .merge import register_routes as register_merge_routes
 from .authz import ROLES, Access, Authz, CSRFMiddleware, can, cap_scopes
 from .diff import diff_states, diff_to_text
 from .mcp_remote import Services, build_remote_mcp
 from .models import ProjectState
-from .ops import ConflictError, OpError, apply_ops, resolve_node
+from .ops import ConflictError, OpError, apply_ops, resolve_node, unique_slug
 from .store import Store, default_store
 from .templates import TEMPLATES, build_template
 from .vibe import TARGETS, build_prompt
@@ -223,6 +224,7 @@ def create_app(store: Store | None = None) -> FastAPI:
             if new_state is not state:
                 store.save_state(pid, branch, new_state)
                 store.log_activity(pid, branch, actor, summary, new_state.rev)
+                history.record(store, pid, branch, actor, state, new_state)
         if new_state is not state:
             await sync_to_live_doc(pid, branch, state, new_state, actor)
         if summary or new_state.rev != state.rev:
@@ -242,8 +244,23 @@ def create_app(store: Store | None = None) -> FastAPI:
     # ---- meta (public: static metadata only) ----
     @app.get("/api/health")
     def api_health():
+        """Liveness: the process answers (no dependency checks, so it is cheap to poll)."""
         return {"ok": True, "ai_mode": ai.MODE, "model": ai.MODEL, "llm": llm.status(),
                 "export": {"interactive": diagram_export.available()}}
+
+    @app.get("/api/ready")
+    def api_ready():
+        """Readiness for load balancers and Kubernetes: the database answers and the schema is current."""
+        from .db import migrate
+
+        try:
+            revision = migrate.current(store.engine)
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            return JSONResponse(status_code=503, content={"ready": False, "database": f"{type(exc).__name__}"})
+        head = migrate.head()
+        ok = revision == head
+        return JSONResponse(status_code=200 if ok else 503,
+                            content={"ready": ok, "database": store.dialect, "schema": revision, "expected": head})
 
     @app.get("/api/catalog")
     def get_catalog():
@@ -256,6 +273,8 @@ def create_app(store: Store | None = None) -> FastAPI:
     # ---- accounts, orgs, members, invites, org AI settings ----
     accounts.register_routes(app, store, authz)
     usage.register_routes(app, store, authz, budgets)
+    observability.install(store)
+    observability.register_routes(app, store, authz)
 
     # ---- projects ----
     @app.get("/api/projects")
@@ -289,6 +308,8 @@ def create_app(store: Store | None = None) -> FastAPI:
     # ---- operations ----
     @app.post("/api/projects/{pid}/ops")
     async def post_ops(pid: str, body: OpsIn, branch: str = "main", a: Access = Depends(edit)):
+        if not a.can("admin") and any(op.get("op") == "purge_requirement" for op in body.ops):
+            raise HTTPException(403, "Only admins can remove a requirement permanently.")
         state, summary = await commit_ops(pid, branch, body.ops, a.actor)
         return {"state": state.model_dump(), "summary": summary}
 
@@ -314,7 +335,7 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     @app.get("/api/projects/{pid}/versions")
     def versions(pid: str, a: Access = Depends(read)):
-        return store.list_versions(pid)
+        return approvals.with_status(store, a.org_id, pid, store.list_versions(pid))
 
     def resolve_ref(pid: str, branch: str, ref: str) -> ProjectState:
         """'working' = branch working state; 'N' or 'vN' = version N; 'branch:<name>' = another branch."""
@@ -342,6 +363,10 @@ def create_app(store: Store | None = None) -> FastAPI:
         v = store.get_version(pid, body.version)
         if not v:
             raise HTTPException(404, "version not found")
+        before = store.get_state(pid, branch)
+        if before is None:
+            raise HTTPException(404, f"branch '{branch}' not found")
+        safety = store.commit(pid, branch, f"Before restoring v{body.version}", a.actor, before)  # undo point
         with store.transaction(pid, branch) as current:
             if current is None:
                 raise HTTPException(404, f"branch '{branch}' not found")
@@ -353,10 +378,12 @@ def create_app(store: Store | None = None) -> FastAPI:
                     item.field_revs = {f: restored.rev for f in item.field_revs}
             store.save_state(pid, branch, restored)
             store.log_activity(pid, branch, a.actor, [f"restored v{body.version}"], restored.rev)
+            history.record(store, pid, branch, f"{a.actor} (restored v{body.version})", current, restored)
         await sync_to_live_doc(pid, branch, current, restored, a.actor)
         await hub.broadcast(Hub.key(pid, branch), {"type": "state", "state": restored.model_dump(),
                                                    "actor": a.actor, "summary": [f"restored v{body.version}"]})
-        return {"state": restored.model_dump()}
+        await hub.broadcast(Hub.key(pid, branch), {"type": "versions", "actor": a.actor})
+        return {"state": restored.model_dump(), "safety_version": safety["number"]}
 
     @app.post("/api/projects/{pid}/branches", status_code=201)
     def create_branch(pid: str, body: BranchIn, a: Access = Depends(edit)):
@@ -380,7 +407,7 @@ def create_app(store: Store | None = None) -> FastAPI:
     @app.get("/api/projects/{pid}/trace/{req_id}")
     def trace(pid: str, req_id: str, branch: str = "main", a: Access = Depends(read)):
         state = state_or_404(pid, branch)
-        if req_id not in state.requirements:
+        if req_id not in state.requirements or state.requirements[req_id].deleted:
             raise HTTPException(404, "requirement not found")
         return trace_requirement(state, req_id)
 
@@ -442,6 +469,31 @@ def create_app(store: Store | None = None) -> FastAPI:
         html = await run_export(diagram_export.export_sequence, flow, f"{node.name}: request flow")
         return export_response(html, f"{node.name}-request-flow")
 
+    # ---- diagrams as text: C4, sequence, ER, deployment, data flow (Mermaid / PlantUML, see diagrams.py) ----
+    @app.get("/api/projects/{pid}/diagrams")
+    async def list_diagrams(pid: str, branch: str = "main", ai: bool = False, a: Access = Depends(read)):
+        """The diagrams this branch's model yields, with alt text (sources via the route below). ``ai=true`` lets the
+        diagrams.sequence agent name the critical flows (when a model is configured)."""
+        state = state_or_404(pid, branch)
+        found = await asyncio.to_thread(diagrams.all_diagrams, state, a.project["name"], a.org_id, ai)
+        return {"branch": branch, "diagrams": [diagrams.summary(d) for d in found]}
+
+    @app.get("/api/projects/{pid}/diagrams/{diagram_id}")
+    async def get_diagram(pid: str, diagram_id: str, branch: str = "main", ai: bool = False,
+                          fmt: str = Query("", alias="format", pattern="^(|mermaid|plantuml)$"),
+                          a: Access = Depends(read)):
+        """One diagram as Mermaid and PlantUML text plus alt text; ``format=mermaid|plantuml`` returns that source
+        alone as a text file."""
+        state = state_or_404(pid, branch)
+        d = await asyncio.to_thread(diagrams.get, state, a.project["name"], diagram_id, a.org_id, ai)
+        if not d:
+            raise HTTPException(404, "diagram not found")
+        if fmt:
+            ext = "mmd" if fmt == "mermaid" else "puml"
+            filename = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{a.project['name']}-{branch}-{diagram_id}").strip("-")[:80]
+            return PlainTextResponse(d[fmt], headers={"Content-Disposition": f'attachment; filename="{filename}.{ext}"'})
+        return d
+
     # ---- vibe coding ----
     @app.get("/api/prompt-targets")
     def prompt_targets():
@@ -477,10 +529,10 @@ def create_app(store: Store | None = None) -> FastAPI:
         except (OpError, ConflictError) as exc:
             await hub.broadcast(room, {"type": "ai_status", "status": "idle"})
             return {"applied": False, "error": str(exc), "explanation": result.explanation,
-                    "questions": result.questions, "engine": result.engine, "ops": result.ops}
+                    "questions": result.questions, "question_options": result.question_options, "engine": result.engine, "ops": result.ops}
         await hub.broadcast(room, {"type": "ai_status", "status": "idle"})
         return {"applied": True, "summary": summary, "explanation": result.explanation,
-                "questions": result.questions, "engine": result.engine, "state": new_state.model_dump()}
+                "questions": result.questions, "question_options": result.question_options, "engine": result.engine, "state": new_state.model_dump()}
 
     @app.post("/api/projects/{pid}/ai/command")
     async def ai_command(pid: str, body: CommandIn, branch: str = "main", a: Access = Depends(edit)):
@@ -563,7 +615,10 @@ def create_app(store: Store | None = None) -> FastAPI:
         conv = design_conversation(pid, body.conversation_id) if body.conversation_id else None
         target = branch
         if body.mode == "branch":
-            target = body.branch_name or f"draft/{chat.slugify(body.option.get('name', 'option'))}"
+            # A derived name is cut at a word boundary and made unique (draft/x, draft/x-2…); an explicit name
+            # that already exists is a conflict.
+            target = body.branch_name or unique_slug(body.option.get("name") or "option",
+                                                     lambda b: store.get_state(pid, b) is not None, prefix="draft/")
             if store.get_state(pid, target) is not None:
                 raise HTTPException(409, f"branch '{target}' already exists")
             store.create_branch(pid, target, state_or_404(pid, branch), store.head_version(pid, branch))
@@ -591,6 +646,18 @@ def create_app(store: Store | None = None) -> FastAPI:
         await hub.broadcast(Hub.key(pid, branch), msg)
 
     decisions.register_routes(app, store, authz=authz, sync_to_live_doc=sync_to_live_doc, broadcast=broadcast_room)
+    comments.register_routes(app, store, authz=authz, broadcast=broadcast_room)
+    approvals.register_routes(app, store, authz=authz, broadcast=broadcast_room)
+    suggestions.register_routes(app, store, authz=authz, state_or_404=state_or_404)
+    review.register_routes(app, store, authz=authz, state_or_404=state_or_404)
+    # branch merge: three-way diff, conflict resolution (optionally AI-assisted), applied as ops (merge.py)
+    register_merge_routes(app, store, authz=authz, commit_ops=commit_ops, broadcast=broadcast_room)
+    history.register_routes(app, store, authz=authz, state_or_404=state_or_404, commit_ops=commit_ops)
+    intake.register_routes(app, store, authz=authz, state_or_404=state_or_404, commit_ops=commit_ops,
+                           broadcast=broadcast_room)
+    # ---- spec exports (Markdown, print/PDF, JSON, YAML) and coding-agent guides (exports.py) ----
+    exports.register_routes(app, store, authz=authz, state_or_404=state_or_404)
+    jira.register_routes(app, store, authz=authz, state_or_404=state_or_404, broadcast=broadcast_room)
 
     # ---- OpenSpec: spec-driven changes stored per project (openspec_service.py) ----
     def openspec_context(pid: str, branch: str) -> dict[str, Any]:
@@ -663,6 +730,7 @@ def create_app(store: Store | None = None) -> FastAPI:
                 store.save_state(pid, branch, merged)
                 actor = ", ".join(sorted(set(body.actors))) or "collaborator"
                 store.log_activity(pid, branch, actor, summary[:30], merged.rev)
+                history.record(store, pid, branch, actor, current, merged)
         if summary:
             await hub.broadcast(Hub.key(pid, branch), {"type": "activity", "actor": body.actors})
         return {"changed": bool(summary), "rev": merged.rev, "dropped": dropped}

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type {
-  ArchitecturesCard, ArchOption, ChatTurn, Conversation, ConversationMessage, ProjectState, QuestionCard, User,
+  ArchitecturesCard, ArchOption, ArchReview, ChatTurn, Conversation, ConversationMessage, ProjectState, QuestionCard, User,
 } from "../types";
+import { useAiSuggestions } from "../aiSuggestions";
 import { TYPE_META } from "./ArchNode";
 
 interface Props {
@@ -14,6 +15,36 @@ interface Props {
   onApplied: (r: { branch: string; version: number; summary: string[]; state: ProjectState }) => void;
   /** Latest "conversation changed" event from the server (a teammate answered in a shared design chat). */
   remote: { id: string; at: number } | null;
+  /** What the project already has, so the starting prompts fit it. */
+  context: DesignContext;
+}
+
+export interface DesignContext { name: string; description: string; requirements: { id: string; title: string }[]; components: number }
+
+/** Offline only (no AI configured): examples for a project that has nothing yet. */
+const EXAMPLES = ["AI customer-support platform on WhatsApp and web", "Food delivery marketplace with live tracking",
+  "Internal knowledge assistant over company documents"];
+
+/** Offline starting prompts built from the project (its requirements, canvas, name and description); with AI the
+ * starting points come from the LLM (useAiSuggestions). The generic examples are shown only for an empty project. */
+export function starters(c: DesignContext): { label: string; prompt: string }[] {
+  const out: { label: string; prompt: string }[] = [];
+  const reqs = c.requirements;
+  if (reqs.length) {
+    const list = reqs.slice(0, 25).map((r) => `${r.id} ${r.title}`).join("; ");
+    out.push({ label: `Design the system for this project's ${reqs.length} requirement${reqs.length === 1 ? "" : "s"}`,
+      prompt: `Design the system for these requirements: ${list}${reqs.length > 25 ? ` (and ${reqs.length - 25} more in the project)` : ""}.` });
+  }
+  if (c.components > 0) {
+    out.push({ label: `Review the current architecture (${c.components} components) and propose improvements`,
+      prompt: `Review the current architecture of ${c.name} (${c.components} components): find gaps against the requirements and propose improved options.` });
+  }
+  const idea = c.description.trim();
+  if (idea) out.push({ label: `${c.name}: ${idea}`, prompt: `${c.name}: ${idea}` });
+  else if (!reqs.length && !c.components && c.name.trim().length > 3 && !/^(test|untitled|new project|demo)/i.test(c.name.trim())) {
+    out.push({ label: `Design ${c.name}`, prompt: `Design ${c.name}.` });
+  }
+  return out;
 }
 
 // Before design chats were stored on the server they lived in this browser only; they are imported once.
@@ -43,7 +74,7 @@ const toTurn = (m: ConversationMessage): ChatTurn => ({
  * Guided design chat: the assistant asks multiple-choice questions, then offers architectures to pick from.
  * Chats are stored on the server (shared with the team, kept across reloads); answers become project memory.
  */
-export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onApplied, remote }: Props) {
+export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onApplied, remote, context }: Props) {
   const [threads, setThreads] = useState<Conversation[]>([]);
   const [conv, setConv] = useState<Conversation | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
@@ -56,6 +87,16 @@ export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onAppl
   const convRef = useRef<Conversation | null>(null);
   convRef.current = conv;
   const busyRef = useRef(false);
+  // Starting ideas written by the LLM for this project; the built-in starters are the offline fallback.
+  const aiStarters = useAiSuggestions(pid, branch, { mode: "design" }, aiAvailable && !loading && turns.length === 0,
+    context.components * 1000 + context.requirements.length);
+  // After options are proposed or applied (not while a multiple-choice question is open): next steps from the LLM.
+  const last = turns[turns.length - 1];
+  const lastUser = [...turns].reverse().find((t) => t.role === "user" && t.content)?.content ?? "";
+  const lastAnswer = last?.role === "assistant" && last.card?.type !== "question"
+    ? [last.content, ...(last.card?.type === "architectures" ? last.card.options.map((o) => `${o.name}: ${o.summary}`) : [])].join("\n") : "";
+  const aiNext = useAiSuggestions(pid, branch, { mode: "design", conversationId: conv?.id, lastQuestion: lastUser, lastAnswer },
+    aiAvailable && !busy && !!lastAnswer, context.components * 1000 + context.requirements.length);
 
   const loadThreads = useCallback(async () => {
     const list = await api.conversations(pid, "design");
@@ -202,10 +243,33 @@ export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onAppl
             <h3>Design with ArchFlow</h3>
             <p className="muted small">Describe what you want to build. I'll ask a few multiple-choice questions, then show
               you architecture options to pick from. Your answers are saved to the project memory.</p>
-            {["AI customer-support platform on WhatsApp and web", "Food delivery marketplace with live tracking",
-              "Internal knowledge assistant over company documents"].map((s) => (
-              <button key={s} className="dc-suggest" onClick={() => step({ role: "user", content: s })}>{s}</button>
-            ))}
+            {(() => {
+              if (aiStarters.items) {
+                return (
+                  <>
+                    <span className="tiny muted dc-starters-label">Start from this project <span className="ai-tag" title="Written by the AI from this project">AI</span></span>
+                    {aiStarters.items.map((s) => (
+                      <button key={s.label} className="dc-suggest" title={s.why || s.prompt} onClick={() => step({ role: "user", content: s.prompt })}>{s.label}</button>
+                    ))}
+                  </>
+                );
+              }
+              if (aiStarters.loading) return <span className="tiny muted dc-starters-label pulse">Finding starting points for this project…</span>;
+              const fromProject = starters(context);
+              return fromProject.length ? (
+                <>
+                  <span className="tiny muted dc-starters-label">Start from this project</span>
+                  {fromProject.map((s) => (
+                    <button key={s.label} className="dc-suggest" title={s.prompt} onClick={() => step({ role: "user", content: s.prompt })}>{s.label}</button>
+                  ))}
+                </>
+              ) : (
+                <>
+                  <span className="tiny muted dc-starters-label">Or try an example</span>
+                  {EXAMPLES.map((s) => <button key={s} className="dc-suggest" onClick={() => step({ role: "user", content: s })}>{s}</button>)}
+                </>
+              );
+            })()}
           </div>
         )}
         {turns.map((t, i) => {
@@ -227,6 +291,15 @@ export function DesignChat({ pid, branch, user, canvasEmpty, aiAvailable, onAppl
             </div>
           );
         })}
+        {!busy && lastAnswer && (aiNext.items?.length || aiNext.loading) ? (
+          <div className="cmd-followups dc-next" aria-label="Next steps">
+            <span className="tiny muted">{aiNext.loading ? "Thinking of next steps…" : "Next"}</span>
+            {(aiNext.items ?? []).map((s) => (
+              <button key={s.label} type="button" className={s.kind === "reply" ? "reply-chip" : "followup-chip"} title={s.why || s.prompt}
+                onClick={() => step({ role: "user", content: s.prompt })}>{s.label}</button>
+            ))}
+          </div>
+        ) : null}
         {busy && <div className="dc-msg bot muted pulse">Thinking…</div>}
         {error && <div className="error small pad">{error}</div>}
       </div>
@@ -327,6 +400,35 @@ function QuestionView({ card, active, answered, onAnswer, onSkip }: {
   );
 }
 
+/** "Reviewed: fixed N issues" with an expandable list of the changes and anything still open. */
+function ReviewNote({ review }: { review: ArchReview }) {
+  const key = (i: { code: string; message: string }) => `${i.code}|${i.message}`;
+  const after = new Set(review.issues_after.map(key));
+  const fixed = review.issues_before.filter((i) => !after.has(key(i))).length;
+  const open = review.issues_after;
+  const by = review.engine === "llm+rules" ? "AI + rules" : "rules";
+  const label = fixed > 0
+    ? `Reviewed: fixed ${fixed} issue${fixed === 1 ? "" : "s"}`
+    : review.fixes.length ? `Reviewed: ${review.fixes.length} improvement${review.fixes.length === 1 ? "" : "s"}` : "Reviewed: no issues found";
+  if (!review.fixes.length && !open.length) return <div className="arch-review tiny ok">✓ {label}</div>;
+  return (
+    <details className="arch-review tiny">
+      <summary>
+        <span className={open.some((i) => i.severity === "error") ? "warn" : "ok"}>✓ {label}</span>
+        {open.length > 0 && <span className="muted"> · {open.length} open</span>}
+        <span className="muted"> · by {by}</span>
+      </summary>
+      {review.fixes.length > 0 && <ul>{review.fixes.map((f, k) => <li key={k}>{f}</li>)}</ul>}
+      {open.length > 0 && (
+        <>
+          <div className="muted">Still open:</div>
+          <ul>{open.map((i, k) => <li key={k} className={`sev-${i.severity}`}>{i.message}</li>)}</ul>
+        </>
+      )}
+    </details>
+  );
+}
+
 function ArchitecturesView({ card, disabled, canvasEmpty, onApply }: {
   card: ArchitecturesCard; disabled: boolean; canvasEmpty: boolean;
   onApply: (o: ArchOption, mode: "replace" | "branch") => void;
@@ -351,6 +453,7 @@ function ArchitecturesView({ card, disabled, canvasEmpty, onApply }: {
               <div className="arch-body">
                 <p className="small">{o.summary}</p>
                 {o.best_for && <p className="tiny muted">Best for: {o.best_for}</p>}
+                {o.review && <ReviewNote review={o.review} />}
                 <div className="pc">
                   <ul className="pros small">{o.pros.map((p) => <li key={p}>{p}</li>)}</ul>
                   <ul className="cons small">{o.cons.map((c) => <li key={c}>{c}</li>)}</ul>

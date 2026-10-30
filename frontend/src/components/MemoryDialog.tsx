@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api";
+import { useEscape } from "../useEscape";
 import { MEMORY_CATEGORIES, type MemoryCategory, type MemoryItem } from "../types";
 
 interface Props {
@@ -13,10 +14,12 @@ interface Props {
 
 const SOURCE: Record<MemoryItem["source"], string> = {
   user: "added by", ai: "learned by AI from a conversation", "design-chat": "answered in the design chat by", mcp: "added over MCP by",
+  import: "imported from a document by",
 };
 
 /** Project memory: facts every AI answer, edit and design takes into account. */
 export function MemoryDialog({ pid, branch, items, readOnly, onChanged, onClose }: Props) {
+  const escRef = useEscape(onClose);
   const [text, setText] = useState("");
   const [category, setCategory] = useState<MemoryCategory>("constraint");
   const [pinned, setPinned] = useState(false);
@@ -43,7 +46,7 @@ export function MemoryDialog({ pid, branch, items, readOnly, onChanged, onClose 
   const learned = items.filter((m) => m.source === "ai").length;
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={onClose} ref={escRef}>
       <div className="modal wide memory" role="dialog" aria-label="Project memory" onClick={(e) => e.stopPropagation()}>
         <div className="row between">
           <h3>Project memory</h3>
@@ -80,7 +83,7 @@ export function MemoryDialog({ pid, branch, items, readOnly, onChanged, onClose 
                   if (await run(() => api.updateMemory(pid, branch, m.id, { text: editing.text.trim(), category: editing.category }))) setEditing(null);
                 }}>
                   <input autoFocus value={editing.text} maxLength={240} onChange={(e) => setEditing({ ...editing, text: e.target.value })}
-                    onKeyDown={(e) => e.key === "Escape" && setEditing(null)} aria-label="Fact" />
+                    onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); setEditing(null); } }} aria-label="Fact" />
                   <select value={editing.category} onChange={(e) => setEditing({ ...editing, category: e.target.value as MemoryCategory })} aria-label="Category">
                     {MEMORY_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
                   </select>

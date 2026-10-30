@@ -43,12 +43,15 @@ def _ops(project_id: str, branch: str, ops: list[dict[str, Any]]) -> dict[str, A
 
 
 def _compact(state: dict[str, Any]) -> dict[str, Any]:
+    deleted = {rid for rid, r in state["requirements"].items() if r.get("deleted")}  # soft-deleted: hidden
     return {
         "rev": state["rev"],
-        "components": [{k: n[k] for k in ("id", "name", "type", "technology", "description", "requirement_ids")}
+        "components": [{**{k: n[k] for k in ("id", "name", "type", "technology", "description")},
+                        "requirement_ids": [r for r in n["requirement_ids"] if r not in deleted]}
                        for n in state["nodes"].values()],
         "connections": [{k: e[k] for k in ("id", "source", "target", "protocol", "label")} for e in state["edges"].values()],
-        "requirements": [{k: v for k, v in r.items() if k not in ("rev", "field_revs")} for r in state["requirements"].values()],
+        "requirements": [{k: v for k, v in r.items() if k not in ("rev", "field_revs", "deleted")}
+                         for rid, r in state["requirements"].items() if rid not in deleted],
     }
 
 

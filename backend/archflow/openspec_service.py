@@ -42,8 +42,8 @@ from typing import Any, Callable
 from fastapi import Depends, FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from . import change_spec, llm
-from .models import ProjectState
+from . import agents, change_spec, llm
+from .models import ProjectState, without_deleted
 from .vibe import resolve_scope
 
 log = logging.getLogger("archflow.openspec")
@@ -160,30 +160,7 @@ class Workspace:
 
 
 # --------------------------------------------------------------------------- prompts
-ARTIFACT_SYSTEM = """You write one OpenSpec artifact for a software change, exactly as a coding agent following \
-OpenSpec would, but you cannot run commands or ask questions: everything you would look up is provided below \
-(the approved design from ArchFlow, the project's existing living specs, and the artifacts already written for \
-this change). Follow OpenSpec's instruction and template for this artifact precisely. Where the instruction tells \
-you to run an `openspec` command, use the provided material instead. Where it tells you to ask the user, make the \
-most reasonable decision the design supports and record it (in design.md under Open Questions if it matters).
-
-Never invent components, technologies or integrations that are not in the design. Respect the project context \
-and rules. Output only the artifact's content (Markdown), without code fences around the whole document and \
-without template comments."""
-
-SPECS_SYSTEM_SUFFIX = """
-
-Return JSON: {"files": [{"path": "specs/<capability-path>/spec.md", "content": "<markdown>"}]}, one file per \
-capability listed in the proposal's Capabilities section."""
-
-REPAIR_SYSTEM = """You fix an OpenSpec change so `openspec validate --strict` passes. You get the validator's \
-issues and the change's files. Change only what is needed to resolve every issue, keep everything else exactly as \
-it is, and follow OpenSpec's format rules: delta headers (## ADDED/MODIFIED/REMOVED/RENAMED Requirements), \
-`### Requirement: <name>` with a SHALL/MUST statement of at most 500 characters, at least one `#### Scenario:` \
-(exactly four #) per requirement with **WHEN**/**THEN** bullets, and `## Purpose` (50+ characters) first in a delta \
-for a new capability. Return JSON {"files": [{"path": "<path relative to the change directory>", "content": \
-"<full new content>"}]} with only the files you changed."""
-
+# Prompts: prompts/openspec.name.yaml, openspec.artifact.yaml, openspec.repair.yaml (versioned).
 _FILES_SCHEMA = {"type": "object", "properties": {"files": {"type": "array", "items": {
     "type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
     "required": ["path", "content"]}}}, "required": ["files"]}
@@ -240,10 +217,7 @@ def _unique_id(store: Any, pid: str, base: str) -> str:
 def _name_change(context: str, scope_title: str, org_id: str | None, use_llm: bool) -> tuple[str, str]:
     if use_llm:
         try:
-            data = llm.complete_json(
-                "Name an OpenSpec change. change_id: kebab-case verb phrase (e.g. add-order-lookup), at most 6 words. "
-                "title: short human title.", [{"role": "user", "content": context[:20000]}], _NAME_SCHEMA,
-                group="fast", org_id=org_id, max_tokens=300)
+            data = agents.run_json("openspec.name", _NAME_SCHEMA, org_id=org_id, variables={"context": context[:20000]})
             cid = change_spec.slug(data.get("change_id", ""), 60)
             if CHANGE_ID_RE.match(cid):
                 return cid, change_spec._clip(data.get("title") or scope_title, 100)
@@ -262,26 +236,21 @@ def _write_artifact(ws: Workspace, change_id: str, artifact: str, design_context
         for rel, text in written.items():
             if rel == pattern or ("*" in pattern and rel.startswith(pattern.split("*")[0])):
                 deps.append(f"<artifact path=\"{rel}\">\n{text}\n</artifact>")
-    system = ARTIFACT_SYSTEM + f"\n\n# OpenSpec instruction for `{artifact}`\n{info['instruction']}"
-    if info.get("context"):
-        system += f"\n\n# Project context\n{info['context']}"
-    if info.get("rules"):
-        system += "\n\n# Project rules for this artifact\n" + "\n".join(f"- {r}" for r in info["rules"])
+    variables = {"artifact": artifact, "instruction": info["instruction"], "project_context": info.get("context") or "",
+                 "rules": list(info.get("rules") or [])}
     user = "\n\n".join(x for x in [
         design_context, specs_context,
         ("Artifacts already written for this change:\n" + "\n".join(deps)) if deps else "",
         f"Template for {info.get('outputPath')}:\n{info.get('template', '')}",
         f"Write `{info.get('outputPath')}` for change `{change_id}` now."] if x)
-    msgs = [{"role": "user", "content": user}]
     if artifact == "specs":
-        data = llm.complete_json(system + SPECS_SYSTEM_SUFFIX, msgs, _FILES_SCHEMA, group="reasoning", org_id=org_id,
-                                 max_tokens=change_spec.MAX_TOKENS)
+        data = agents.run_json("openspec.artifact", _FILES_SCHEMA, variables=variables, user=user, org_id=org_id)
         for f in data.get("files") or []:
             rel = f.get("path", "").replace("\\", "/").lstrip("/")
             if rel.startswith("specs/") and rel.endswith("spec.md") and f.get("content", "").strip():
                 ws.write(f"openspec/changes/{change_id}/{rel}", _strip(f["content"]))
     else:
-        text, _ = llm.complete_tools(system, msgs, [], group="reasoning", org_id=org_id, max_tokens=change_spec.MAX_TOKENS)
+        text = agents.run_text("openspec.artifact", variables=variables, user=user, org_id=org_id)
         if not text.strip():
             raise llm.LLMUnavailable(f"the model returned an empty {artifact}")
         ws.write(f"openspec/changes/{change_id}/{info.get('outputPath') or artifact + '.md'}", _strip(text))
@@ -297,8 +266,7 @@ def _repair(ws: Workspace, change_id: str, result: dict[str, Any], org_id: str |
     files = ws.change_files(change_id)
     issues = "\n".join(f"- [{i.get('level')}] {i.get('path', '')}: {i.get('message')}" for i in result["issues"])
     body = "\n".join(f"<file path=\"{k}\">\n{v}\n</file>" for k, v in files.items())
-    data = llm.complete_json(REPAIR_SYSTEM, [{"role": "user", "content": f"Issues:\n{issues}\n\nFiles:\n{body}"}],
-                             _FILES_SCHEMA, group="reasoning", org_id=org_id, max_tokens=change_spec.MAX_TOKENS)
+    data = agents.run_json("openspec.repair", _FILES_SCHEMA, org_id=org_id, variables={"issues": issues, "files": body})
     changed = False
     for f in data.get("files") or []:
         rel = f.get("path", "").replace("\\", "/").lstrip("/")
@@ -319,6 +287,7 @@ def generate(store: Any, pid: str, state: ProjectState, project_name: str, node_
              extra: str = "", memory: str = "", decisions: list[dict[str, Any]] | None = None,
              org_id: str | None = None, use_llm: bool = True, progress: Progress = lambda s: None) -> dict[str, Any]:
     """Write, validate and store a new change; returns its metadata (see the module docstring)."""
+    state = without_deleted(state)
     scope = resolve_scope(state, node_ids, requirement_ids)
     if not scope.node_ids and not scope.requirement_ids:
         raise ValueError("There is nothing to specify yet: add components or requirements first.")
@@ -420,12 +389,25 @@ def change_files(store: Any, pid: str, change: dict[str, Any]) -> dict[str, str]
             if not f["path"].endswith(".openspec.yaml")}
 
 
-def zip_tree(store: Any, pid: str) -> bytes:
+def zip_tree(store: Any, pid: str, extra: dict[str, str] | None = None) -> bytes:
+    """The project's openspec/ tree, plus ``extra`` files at the root (the coding-agent guides)."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for f in store.list_openspec_files(pid):
             z.writestr(f["path"], f["content"])
+        for path, content in (extra or {}).items():
+            z.writestr(path, content)
     return buf.getvalue()
+
+
+def guide_files(store: Any, pid: str) -> dict[str, str]:
+    """CLAUDE.md, AGENTS.md and .cursorrules derived from the main branch (no AI: the download stays instant)."""
+    from . import exports
+
+    try:
+        return exports.guide_files(exports.collect(store, pid, "main"), use_llm=False)["files"]
+    except KeyError:  # no main branch
+        return {}
 
 
 # --------------------------------------------------------------------------- REST
@@ -566,5 +548,5 @@ def register_routes(app: FastAPI, store: Any, *, authz: Any, project_context: Ca
     @app.get("/api/projects/{pid}/openspec.zip")
     def download(pid: str, a=Depends(read)):
         name = re.sub(r"[^A-Za-z0-9._-]+", "-", a.project["name"]).strip("-") or "project"
-        return Response(zip_tree(store, pid), media_type="application/zip",
+        return Response(zip_tree(store, pid, guide_files(store, pid)), media_type="application/zip",
                         headers={"Content-Disposition": f'attachment; filename="{name}-openspec.zip"'})

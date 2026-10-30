@@ -33,11 +33,17 @@ Environment:
     ARCHFLOW_LLM_MAX_ATTEMPTS (5), ARCHFLOW_LLM_BACKOFF_BASE (0.5), ARCHFLOW_LLM_BACKOFF_CAP (20),
     ARCHFLOW_LLM_DEADLINE seconds (120), ARCHFLOW_LLM_ROUTER_RETRIES (2), ARCHFLOW_LLM_TIMEOUT (120)
     ARCHFLOW_LLM_BREAKER_FAILS (5), ARCHFLOW_LLM_BREAKER_COOLDOWN seconds (30)
+    ARCHFLOW_REDACT                 on (PII and secrets) | secrets | off: what ``redact`` removes from requests
     LANGFUSE_PUBLIC_KEY             enables LiteLLM's langfuse callback when set
 
 Per-org keys (BYOK): ``set_org_key_resolver`` (wired in main.create_app to the encrypted org_ai_keys table) lets
 a call made with ``org_id`` use that org's own provider keys through a per-org Router (rebuilt when the keys
 change); providers the org has not configured fall back to the environment keys above.
+
+Before a request leaves, ``_dispatch`` replaces personal data and secrets in its messages with placeholders
+(``redact``) and puts the personal data back into the answer; secrets never come back, and secrets in an answer are
+masked. Untrusted blocks and user/tool messages are scanned for prompt injection (``untrusted``). Counts and
+signals go to ``redact.observe`` observers (the agent traces), never the values.
 
 Logging goes to the ``archflow.llm`` logger. API keys and prompt contents are never logged.
 """
@@ -53,20 +59,20 @@ import random
 import re
 import threading
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Protocol
 
-from . import ai_providers
+from . import ai_providers, redact, untrusted
 
 log = logging.getLogger("archflow.llm")
 
 __all__ = ["LLMUnavailable", "LLMRefused", "LLMInvalidOutput", "available", "status",
            "complete_json", "complete_tools", "stream_text", "set_org_key_resolver", "invalidate_org",
            "LLMBudgetExceeded", "usage_scope", "set_usage_scope", "set_usage_hooks", "budget_block", "estimate_cost",
-           "set_org_config_resolver", "test_connection"]
+           "set_org_config_resolver", "test_connection", "observe_calls"]
 
 
 # Thinking models (Gemini 3.x, Claude, GPT-5) spend output tokens on reasoning before answering; a small
@@ -297,6 +303,11 @@ def usage_scope(**fields: str) -> Iterator[None]:
         _usage_scope.reset(token)
 
 
+def current_scope() -> dict[str, str]:
+    """The attribution (project_id, feature, prompt) of calls made in the current context."""
+    return dict(_usage_scope.get())
+
+
 def set_usage_scope(**fields: str) -> None:
     """Set the attribution for the rest of the current context (one request)."""
     _usage_scope.set({**_usage_scope.get(), **{k: v for k, v in fields.items() if v}})
@@ -364,18 +375,43 @@ def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int, resp: 
     return (prompt_tokens * pin + completion_tokens * pout) / 1_000_000, "table"
 
 
+# Observers of every model call made in the current context (agents.tracing uses them to attach the model,
+# tokens and cost of each call to the trace of the agent run that made it).
+CallObserver = Callable[[dict[str, Any]], None]
+_call_observers: ContextVar[tuple[CallObserver, ...]] = ContextVar("archflow_llm_call_observers", default=())
+
+
+@contextmanager
+def observe_calls(observer: CallObserver) -> Iterator[None]:
+    token = _call_observers.set((*_call_observers.get(), observer))
+    try:
+        yield
+    finally:
+        _call_observers.reset(token)
+
+
 def _record(org_id: str | None, group: str, model: str, prompt_tokens: int, completion_tokens: int,
             latency_ms: float, resp: Any = None, estimated: bool = False) -> None:
-    if _usage_recorder is None:
+    observers = _call_observers.get()
+    if _usage_recorder is None and not observers:
         return
     cost, source = estimate_cost(model, prompt_tokens, completion_tokens, resp)
     scope = _usage_scope.get()
+    event = {"org_id": org_id or "", "project_id": scope.get("project_id", ""),
+             "feature": scope.get("feature", "other"), "prompt": scope.get("prompt", ""),
+             "user_id": scope.get("user_id", ""), "group": group,
+             "model": model, "prompt_tokens": int(prompt_tokens or 0), "completion_tokens": int(completion_tokens or 0),
+             "cost_usd": round(cost, 6), "cost_source": "estimate" if estimated else source,
+             "latency_ms": int(latency_ms)}
+    for observe in observers:
+        try:
+            observe(event)
+        except Exception:  # noqa: BLE001 - tracing must never fail a model call
+            log.exception("LLM call observer failed")
+    if _usage_recorder is None:
+        return
     try:
-        _usage_recorder({"org_id": org_id or "", "project_id": scope.get("project_id", ""),
-                         "feature": scope.get("feature", "other"), "group": group, "model": model,
-                         "prompt_tokens": int(prompt_tokens or 0), "completion_tokens": int(completion_tokens or 0),
-                         "cost_usd": round(cost, 6), "cost_source": "estimate" if estimated else source,
-                         "latency_ms": int(latency_ms)})
+        _usage_recorder(event)
     except Exception:  # noqa: BLE001 - never fail a model call because usage could not be stored
         log.exception("recording LLM usage failed")
 
@@ -676,6 +712,10 @@ def _dispatch(group: str, org_id: str | None, **kwargs) -> Any:
     if blocked:
         raise LLMBudgetExceeded(blocked)
     _acquire_org(org_id)
+    guard = redact.Redactor()
+    if guard.mode != "off":
+        kwargs = {**kwargs, "messages": _redact_messages(kwargs.get("messages") or [], guard)}
+    redact.report({"redacted": dict(guard.counts), "injection": untrusted.scan(kwargs.get("messages") or [])})
 
     own = bool(org_keys) or _has_chains(org_cfg)
     router = _get_router(org_keys, org_id, org_cfg) if own else _get_router()
@@ -743,12 +783,101 @@ def _dispatch(group: str, org_id: str | None, **kwargs) -> Any:
             else:
                 _record(org_id, group, tier.model, getattr(usage, "prompt_tokens", 0) or 0,
                         getattr(usage, "completion_tokens", 0) or 0, (time.monotonic() - t0) * 1000, resp)
-            return resp
+            return _restore_response(resp, guard, group)
         if time.monotonic() > deadline:
             break
 
     log.error("llm exhausted group=%s org=%s calls=%d errors=%s", group, org_id, total_calls, errors)
     raise LLMUnavailable("All LLM providers failed: " + "; ".join(errors[-6:])) from last_exc
+
+
+# --------------------------------------------------------------------------- redaction
+def _redact_messages(messages: list[dict], guard: redact.Redactor) -> list[dict]:
+    """Copies of the messages with PII and secrets replaced: string and list-of-parts content, tool-call arguments."""
+    out: list[dict] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        m = dict(m)
+        content = m.get("content")
+        if isinstance(content, str):
+            m["content"] = guard.redact(content)
+        elif isinstance(content, list):
+            m["content"] = [{**p, "text": guard.redact(p["text"])} if isinstance(p, dict) and isinstance(p.get("text"), str)
+                            else guard.redact(p) if isinstance(p, str) else p for p in content]
+        if m.get("tool_calls"):
+            calls = []
+            for tc in m["tool_calls"]:
+                fn = tc.get("function") if isinstance(tc, dict) else None
+                if isinstance(fn, dict) and fn.get("arguments") is not None:
+                    tc = {**tc, "function": {**fn, "arguments": guard.redact_value(fn["arguments"])}}
+                calls.append(tc)
+            m["tool_calls"] = calls
+        out.append(m)
+    return out
+
+
+def _set(obj: Any, name: str, value: Any) -> None:
+    if isinstance(obj, dict):
+        obj[name] = value
+    else:
+        try:
+            setattr(obj, name, value)
+        except Exception:  # noqa: BLE001 - an immutable response object keeps its text
+            log.warning("could not rewrite %s on %s", name, type(obj).__name__)
+
+
+def _restore_response(resp: Any, guard: redact.Redactor, group: str) -> Any:
+    """Put PII back into the answer (text and tool-call arguments) and mask secrets the model wrote."""
+    if guard.mode == "off":
+        return resp
+    if _get(resp, "choices") is None:  # a stream: restored chunk by chunk as it is read
+        return _RestoredStream(resp, redact.StreamRestorer(guard.mapping), group)
+    masked: Counter[str] = Counter()
+    for choice in _get(resp, "choices") or []:
+        msg = _get(choice, "message")
+        if msg is None:
+            continue
+        content = _get(msg, "content")
+        if isinstance(content, str) and content:
+            _set(msg, "content", redact.mask_secrets(redact.restore(content, guard.mapping), masked))
+        for tc in _get(msg, "tool_calls") or []:
+            fn = _get(tc, "function")
+            args = _get(fn, "arguments") if fn is not None else None
+            if args:
+                _set(fn, "arguments", redact.mask_value(redact.restore_value(args, guard.mapping), masked))
+    _report_masked(masked, group)
+    return resp
+
+
+def _report_masked(masked: Counter[str], group: str) -> None:
+    if masked:
+        log.warning("llm output contained secrets; masked group=%s kinds=%s", group, dict(masked))
+        redact.report({"masked": dict(masked)})
+
+
+class _RestoredStream:
+    """A provider stream whose text chunks have PII restored and secrets masked (see ``redact.StreamRestorer``)."""
+
+    def __init__(self, inner: Any, restorer: redact.StreamRestorer, group: str):
+        self._inner, self._restorer, self._group = inner, restorer, group
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def __iter__(self) -> Iterator[Any]:
+        for chunk in self._inner:
+            choices = _get(chunk, "choices") or []
+            delta = _get(choices[0], "delta") if choices else None
+            text = _get(delta, "content") if delta is not None else None
+            if isinstance(text, str) and text:
+                _set(delta, "content", self._restorer.feed(text))
+            yield chunk
+        tail = self._restorer.flush()
+        if tail:
+            yield {"choices": [{"delta": {"content": tail}, "finish_reason": None}]}
+        _report_masked(self._restorer.masked, self._group)
 
 
 # --------------------------------------------------------------------------- helpers

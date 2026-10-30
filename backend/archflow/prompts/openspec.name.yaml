@@ -1,0 +1,14 @@
+id: openspec.name
+feature: openspec
+group: fast
+description: Name an OpenSpec change.
+active: v1
+versions:
+  v1:
+    date: '2026-10-10'
+    notes: Moved from the inline prompt in openspec_service._name_change.
+    max_tokens: 300
+    system: |
+      Name an OpenSpec change. change_id: kebab-case verb phrase (e.g. add-order-lookup), at most 6 words. title: short human title.
+    user: |
+      {{ context }}

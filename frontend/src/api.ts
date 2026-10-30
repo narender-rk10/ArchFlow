@@ -1,11 +1,13 @@
 import type { Activity, Analysis, ArchOption, Branch, ChatCard, ChatTurn, ApiToken, Catalog, Diff, Op, Org, Project, ProjectState, Version } from "./types";
-import type { Decision, Evaluation } from "./types";
+import type { AppNotification, Comment, CommentTarget, Decision, Evaluation } from "./types";
 import type { AIConfig, AIGroup, AIProvider, AISettings, AITestResult, Invite, InviteInfo, Me, Member, Role } from "./types";
-import type { ComponentViews, LldResult } from "./types";
+import type { ComponentViews, IntakeNote, IntakeResult, LldResult, RequirementRevision, MergePreview, MergeResolution, MergeResult, MergeSuggestion, Diagram, DiagramInfo } from "./types";
 import type { CodeGraphRecord, CodeJob, CodeOverview, DriftResult, ImpactResult, ReconstructResult } from "./types";
 import type { Conversation, ConversationKind, ConversationMessage, MemoryCategory, MemoryItem } from "./types";
 import type { OpenSpecChange, OpenSpecJob, OpenSpecOverview } from "./types";
-import type { AIUsageReport } from "./types";
+import type { ApprovalPolicy, VersionReview } from "./types";
+import type { AIUsageReport, AiSuggestion, AiTrace, AiTraceList, PromptInfo, ReviewResult, SuggestionMode } from "./types";
+import type { JiraLinks, JiraPlan, JiraPushResult, JiraSettings, JiraTestResult } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, public data: any) {
@@ -17,10 +19,10 @@ export class ApiError extends Error {
 export const UNAUTHORIZED_EVENT = "archflow:unauthorized";
 
 /** Upload a file as the raw request body (the code-graph JSON can be large; no parsing in the browser). */
-async function upload<T>(path: string, file: Blob, params?: Record<string, string>): Promise<T> {
+async function upload<T>(path: string, file: Blob, params?: Record<string, string>, type = "application/json"): Promise<T> {
   const qs = params && Object.keys(params).length ? "?" + new URLSearchParams(params).toString() : "";
   const res = await fetch(`/api${path}${qs}`, {
-    method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: file,
+    method: "POST", credentials: "include", headers: { "Content-Type": type }, body: file,
   });
   const data = await res.json().catch(() => null);
   if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
@@ -124,6 +126,10 @@ export const api = {
     call<AISettings>("PUT", `/orgs/${org}/ai-settings`, keys),
   saveAiConfig: (org: string, config: AIConfig) => call<AISettings>("PUT", `/orgs/${org}/ai-config`, config),
   testAi: (org: string, group: AIGroup) => call<AITestResult>("POST", `/orgs/${org}/ai-test`, { group }),
+  aiTraces: (org: string, filters: Record<string, string> = {}) =>
+    call<AiTraceList>("GET", `/orgs/${org}/ai/traces`, undefined, filters),
+  aiTrace: (org: string, id: string) => call<AiTrace>("GET", `/orgs/${org}/ai/traces/${id}`),
+  aiPrompts: (org: string) => call<{ prompts: PromptInfo[]; problems: string[] }>("GET", `/orgs/${org}/ai/prompts`),
   aiUsage: (org: string, days = 30) => call<AIUsageReport>("GET", `/orgs/${org}/ai-usage`, undefined, { days: String(days) }),
   setAiBudget: (org: string, monthly_limit_usd: number | null, alert_percent: number) =>
     call<AIUsageReport>("PUT", `/orgs/${org}/ai-budget`, { monthly_limit_usd, alert_percent }),
@@ -163,7 +169,20 @@ export const api = {
     call<{ state: ProjectState }>("POST", `/projects/${pid}/restore`, { version, actor }, b(branch)),
   createBranch: (pid: string, name: string, from_branch: string, from_version: number | null) =>
     call<{ name: string }>("POST", `/projects/${pid}/branches`, { name, from_branch, from_version }),
+  // ---- branch merge ----
+  mergePreview: (pid: string, source: string, target: string) =>
+    call<MergePreview>("POST", `/projects/${pid}/merge/preview`, { source, target }),
+  /** AI-proposed resolution per conflict; engine "none" when no AI is configured. */
+  mergeSuggest: (pid: string, source: string, target: string) =>
+    call<{ suggestions: MergeSuggestion[]; engine: "llm" | "none" }>("POST", `/projects/${pid}/merge/suggest`, { source, target }),
+  mergeApply: (pid: string, source: string, target: string, resolutions: MergeResolution[], source_rev: number, target_rev: number) =>
+    call<MergeResult>("POST", `/projects/${pid}/merge/apply`, { source, target, resolutions, source_rev, target_rev }),
   analysis: (pid: string, branch: string) => call<Analysis>("GET", `/projects/${pid}/analysis`, undefined, b(branch)),
+  requirementHistory: (pid: string, branch: string, rid: string) =>
+    call<RequirementRevision[]>("GET", `/projects/${pid}/requirements/${encodeURIComponent(rid)}/history`, undefined, b(branch)),
+  /** Admins: remove a deleted requirement permanently (its history is kept). */
+  purgeRequirement: (pid: string, branch: string, rid: string) =>
+    call<{ summary: string[]; rev: number }>("DELETE", `/projects/${pid}/requirements/${encodeURIComponent(rid)}`, undefined, b(branch)),
   promptTargets: () => call<{ key: string; name: string }[]>("GET", "/prompt-targets"),
   prompt: (pid: string, branch: string, node_ids: string[], requirement_ids: string[], target: string, extra: string) =>
     call<{ prompt: string }>("POST", `/projects/${pid}/prompt`, { node_ids, requirement_ids, target, extra }, b(branch)),
@@ -220,8 +239,32 @@ export const api = {
   updateMemory: (pid: string, branch: string, id: string, changes: Partial<Pick<MemoryItem, "text" | "category" | "pinned">>) =>
     call<MemoryItem>("PATCH", `/projects/${pid}/memory/${id}`, changes, b(branch)),
   deleteMemory: (pid: string, branch: string, id: string) => call<null>("DELETE", `/projects/${pid}/memory/${id}`, undefined, b(branch)),
+  /** Specialist agents review the design in parallel (security, reliability, performance, cost). */
+  review: (pid: string, branch: string) => call<ReviewResult>("POST", `/projects/${pid}/ai/review`, undefined, b(branch)),
+  /** LLM suggestions (starting prompts or follow-ups); engine "none" when no AI is configured. */
+  suggestions: (pid: string, branch: string, body: { mode: SuggestionMode; selection?: string[]; conversation_id?: string | null;
+    last_question?: string; last_answer?: string }) =>
+    call<{ suggestions: AiSuggestion[]; engine: "llm" | "none"; cached?: boolean }>("POST", `/projects/${pid}/ai/suggestions`, body, b(branch)),
   ask: (pid: string, branch: string, question: string) =>
     call<{ answer: string }>("POST", `/projects/${pid}/ai/ask`, { question }, b(branch)),
+  // ---- comments and notifications ----
+  comments: (pid: string, branch: string) => call<Comment[]>("GET", `/projects/${pid}/comments`, undefined, b(branch)),
+  addComment: (pid: string, branch: string, data: { body: string; target_type?: CommentTarget; target_id?: string; parent_id?: string; mentions?: string[] }) =>
+    call<Comment>("POST", `/projects/${pid}/comments`, data, b(branch)),
+  updateComment: (pid: string, id: string, changes: { body?: string; mentions?: string[]; resolved?: boolean }) =>
+    call<Comment>("PATCH", `/projects/${pid}/comments/${id}`, changes),
+  deleteComment: (pid: string, id: string) => call<null>("DELETE", `/projects/${pid}/comments/${id}`),
+  notifications: () => call<{ items: AppNotification[]; unread: number }>("GET", "/notifications"),
+  readNotifications: (ids?: number[]) => call<{ unread: number }>("POST", "/notifications/read", { ids: ids ?? null }),
+
+  // ---- version approvals ----
+  versionReview: (pid: string, version: number) => call<VersionReview>("GET", `/projects/${pid}/versions/${version}/review`),
+  reviewVersion: (pid: string, version: number, action: "request-review" | "approve" | "request-changes", comment = "") =>
+    call<VersionReview>("POST", `/projects/${pid}/versions/${version}/${action}`, { comment }),
+  approvalPolicy: (org: string) => call<ApprovalPolicy>("GET", `/orgs/${org}/approval-policy`),
+  setApprovalPolicy: (org: string, required_approvals: number, require_for_adopt: boolean) =>
+    call<ApprovalPolicy>("PUT", `/orgs/${org}/approval-policy`, { required_approvals, require_for_adopt }),
+
   // ---- architecture decisions ----
   decisions: (pid: string) => call<Decision[]>("GET", `/projects/${pid}/decisions`),
   decision: (pid: string, id: string) => call<Decision>("GET", `/projects/${pid}/decisions/${id}`),
@@ -234,15 +277,39 @@ export const api = {
       "POST", `/projects/${pid}/decisions/${id}/adopt`, { target_branch, actor }),
   evaluate: (pid: string, branches: string[], actor: string, create_decision = false) =>
     call<Evaluation & { decision?: Decision }>("POST", `/projects/${pid}/evaluate`, { branches, actor, create_decision }),
+  askComparison: (pid: string, branches: string[], question: string, evaluation: Evaluation | null) =>
+    call<{ answer: string; follow_ups: string[] }>("POST", `/projects/${pid}/evaluate/ask`, { branches, question, evaluation: evaluation ? { ...evaluation, raw: undefined } : null }),
   generateLld: (pid: string, branch: string, nodeId: string, actor: string, replace = false) =>
     call<LldResult>("POST", `/projects/${pid}/nodes/${encodeURIComponent(nodeId)}/lld`, { actor, replace }, b(branch)),
   /** Interactive diagram of one level (system, or a component's internals), rendered by Archify on the server. */
   exportDiagram: (pid: string, branch: string, level = "") =>
     download(`/projects/${pid}/export/diagram`, { branch, level }, "diagram.html"),
+  /** Spec exports derived from the branch: Markdown, print-ready HTML (Save as PDF), full project JSON / YAML. */
+  exportSpec: (pid: string, branch: string, format: "spec.md" | "spec.html" | "project.json" | "project.yaml") =>
+    download(`/projects/${pid}/export/${format}`, { branch }, format),
+  /** The print-ready spec as HTML text, to open in a new tab and print to PDF. */
+  exportPrintHtml: async (pid: string, branch: string): Promise<string> => {
+    const res = await fetch(`/api/projects/${pid}/export/spec.html?${new URLSearchParams({ branch, inline: "true" })}`,
+      { credentials: "include" });
+    if (!res.ok) {
+      if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+      throw new ApiError(res.status, await res.json().catch(() => null));
+    }
+    return res.text();
+  },
+  /** CLAUDE.md, AGENTS.md and .cursorrules: derived skeleton, plus AI-written guidance when ``use_ai``. */
+  exportGuides: (pid: string, branch: string, use_ai: boolean) =>
+    call<{ files: Record<string, string>; engine: "llm" | "offline"; notes: string[] }>(
+      "POST", `/projects/${pid}/export/guides`, { use_ai }, b(branch)),
   exportSequence: (pid: string, branch: string, nodeId: string) =>
     download(`/projects/${pid}/nodes/${encodeURIComponent(nodeId)}/export/sequence`, { branch }, "request-flow.html"),
   views: (pid: string, branch: string, nodeId: string) =>
     call<ComponentViews>("GET", `/projects/${pid}/nodes/${encodeURIComponent(nodeId)}/views`, undefined, b(branch)),
+  /** Diagrams derived from the model (C4, sequence per flow, ER, deployment, data flow) with alt text; ai = let the AI name the flows. */
+  diagrams: (pid: string, branch: string, ai = false) =>
+    call<{ branch: string; diagrams: DiagramInfo[] }>("GET", `/projects/${pid}/diagrams`, undefined, { branch, ai: String(ai) }),
+  diagram: (pid: string, branch: string, id: string, ai = false) =>
+    call<Diagram>("GET", `/projects/${pid}/diagrams/${encodeURIComponent(id)}`, undefined, { branch, ai: String(ai) }),
   // ---- repository analysis (code graph) ----
   codeOverview: (pid: string) => call<CodeOverview>("GET", `/projects/${pid}/codegraph`),
   codeAnalyze: (pid: string, repo_url: string) => call<CodeJob>("POST", `/projects/${pid}/codegraph/analyze`, { repo_url }),
@@ -252,7 +319,28 @@ export const api = {
       Object.fromEntries(Object.entries({ repo_url, commit_sha }).filter(([, v]) => v)) as Record<string, string>),
   codeReconstruct: (pid: string, id: string) =>
     call<ReconstructResult>("POST", `/projects/${pid}/codegraph/${id}/reconstruct`, { refine: true }),
+  /** Read a document into proposed requirements (nothing is applied yet). */
+  importRequirements: (pid: string, branch: string, file: File) =>
+    upload<IntakeResult>(`/projects/${pid}/requirements/import`, file, { filename: file.name, branch }, "application/octet-stream"),
+  /** Add the accepted (possibly edited) proposals with their source; optionally save notes to project memory. */
+  acceptImport: (pid: string, branch: string, file: IntakeResult["file"], requirements: Record<string, unknown>[],
+    memory: (IntakeNote & { category: MemoryCategory })[]) =>
+    call<{ added: string[]; summary: string[]; memory: MemoryItem[] }>(
+      "POST", `/projects/${pid}/requirements/import/accept`, { file, requirements, memory }, b(branch)),
   codeDrift: (pid: string, branch: string) => call<DriftResult>("GET", `/projects/${pid}/codegraph/drift`, undefined, b(branch)),
   codeImpact: (pid: string, branch: string, files: string[]) =>
     call<ImpactResult>("POST", `/projects/${pid}/codegraph/impact`, { files, branch }),
+  // ---- Jira Cloud push (connection: admins; preview and push: developers and up) ----
+  jiraSettings: (org: string) => call<JiraSettings>("GET", `/orgs/${org}/jira`),
+  saveJiraSettings: (org: string, body: { site_url: string; email: string; api_token: string | null; project_key: string }) =>
+    call<JiraSettings>("PUT", `/orgs/${org}/jira`, body),
+  deleteJiraSettings: (org: string) => call<null>("DELETE", `/orgs/${org}/jira`),
+  testJira: (org: string) => call<JiraTestResult>("POST", `/orgs/${org}/jira/test`),
+  jiraLinks: (pid: string) => call<JiraLinks>("GET", `/projects/${pid}/jira/links`),
+  jiraPlan: (pid: string, branch: string, project_key?: string, ai = true) =>
+    call<JiraPlan>("POST", `/projects/${pid}/jira/plan`, { project_key: project_key || null, ai }, b(branch)),
+  jiraPush: (pid: string, branch: string, project_key?: string, ai = true) =>
+    call<JiraPushResult>("POST", `/projects/${pid}/jira/push`, { project_key: project_key || null, ai, confirm: true }, b(branch)),
+  jiraRefresh: (pid: string, branch: string) =>
+    call<{ updated: number; links: JiraLinks["links"] }>("POST", `/projects/${pid}/jira/refresh`, undefined, b(branch)),
 };

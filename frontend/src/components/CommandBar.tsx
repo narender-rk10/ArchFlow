@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Assistant } from "../assistant";
-import type { ConversationMessage } from "../types";
+import type { AiSuggestion, ConversationMessage } from "../types";
 import { Markdown, type EntityLinks } from "./Markdown";
 
 interface Props {
@@ -16,14 +16,30 @@ interface Props {
   userName: string;
   /** Viewer/reviewer: only "Ask" (questions about the project) is available. */
   readOnly?: boolean;
+  /** Design (guided: questions, then architecture options), Edit (change the canvas) or Ask. */
+  mode: ChatMode;
+  onMode: (mode: ChatMode) => void;
+  /** Where the panel lives: docked in the left or right sidebar, or floating over the canvas. */
+  dock: ChatDock;
+  onDock: (dock: ChatDock) => void;
+  /** The guided design conversation, shown in Design mode (absent for read-only roles). */
+  designSlot?: React.ReactNode;
+  /** For the current mode: starting prompts (empty conversation) or follow-ups to the last answer, written by the
+   * LLM for this project (aiSuggestions.ts), or the offline ones built from the canvas (suggestions.ts). */
+  suggestions: AiSuggestion[];
+  suggestionsSource: "ai" | "offline";
+  suggestionsLoading?: boolean;
+  /** Text handed over from elsewhere (e.g. "Fix with AI" in Health); it fills the box for the person to review. */
+  prefill?: { text: string; at: number } | null;
 }
 
-const SUGGESTIONS = [
-  "Add Redis between Order Service and Orders DB",
-  "Add a payment service connected to API Gateway",
-  "Convert this to an event-driven architecture with Kafka",
-  "Add authentication and PII protection requirements",
+export type ChatMode = "design" | "command" | "ask";
+export type ChatDock = "left" | "float" | "right";
+const DOCKS: { id: ChatDock; icon: string; label: string }[] = [
+  { id: "left", icon: "◧", label: "Dock left" }, { id: "float", icon: "▭", label: "Float over the canvas" },
+  { id: "right", icon: "◨", label: "Dock right" },
 ];
+
 
 function ago(iso: string): string {
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -35,10 +51,11 @@ function ago(iso: string): string {
 
 /** The project assistant: ask questions or edit the canvas in a shared, remembered conversation. */
 export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount, onOpenMemory, meId, isAdmin,
-  userName, readOnly = false }: Props) {
+  userName, readOnly = false, mode: modeProp, onMode: setMode, dock, onDock, designSlot, suggestions, suggestionsSource,
+  suggestionsLoading = false, prefill = null }: Props) {
   const [text, setText] = useState("");
-  const [modeState, setMode] = useState<"command" | "ask">(readOnly ? "ask" : "command");
-  const mode = readOnly ? "ask" : modeState;
+  const mode: ChatMode = readOnly ? "ask" : modeProp === "design" && !designSlot ? "command" : modeProp;
+  const docked = dock !== "float";
   const [expanded, setExpanded] = useState(true);
   const [tall, setTall] = useState(false);
   const [full, setFull] = useState(false);
@@ -52,6 +69,7 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
   const conv = a.current;
   const owns = (createdById: string | null) => createdById === meId || isAdmin;
   const hasLog = a.messages.length > 0 || a.draft !== null || !!a.error;
+  const showLog = hasLog || full || docked;
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
@@ -68,6 +86,11 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
     return () => window.removeEventListener("keydown", onKey);
   }, [full, history, editingTitle]);
   useEffect(() => { if (full) { setExpanded(true); inputRef.current?.focus(); } }, [full]);
+  useEffect(() => {
+    if (!prefill) return;
+    setText(prefill.text); setExpanded(true);
+    window.setTimeout(() => inputRef.current?.focus(), 0);
+  }, [prefill?.at]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -78,6 +101,16 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
     setHistory(false);
     const ok = mode === "command" ? await a.command(t, selection) : await a.ask(t);
     if (!ok) setText(t); // not sent: keep what was typed
+  };
+
+  /** Send right away: an answer tapped in a question bubble, or a follow-up question in Ask mode. (Suggested edits are
+   * only put in the box, so the person checks them before anything changes on the canvas.) */
+  const tap = async (t: string, as: ChatMode = mode) => {
+    if (a.busy) return;
+    if (as !== mode) setMode(as);
+    setExpanded(true);
+    const ok = as === "command" ? await a.command(t, selection) : await a.ask(t);
+    if (!ok) setText(t);
   };
 
   const copy = async (m: ConversationMessage) => {
@@ -95,11 +128,23 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
         <ul className="small cmd-changes">{m.data.summary.map((s, i) => <li key={i}>{s}</li>)}</ul>
       )}
       {m.data.questions && m.data.questions.length > 0 && (
-        <div className="cmd-questions small">
-          <b>Questions from ArchFlow:</b>
-          <ul>{m.data.questions.map((q, i) => <li key={i}>
-            <button className="link" onClick={() => { setText(`${q} → `); setMode("command"); inputRef.current?.focus(); }}>{q}</button>
-          </li>)}</ul>
+        <div className="ask-bubbles" aria-label="Questions from ArchFlow">
+          {m.data.questions.map((q, i) => {
+            const options = m.data.question_options?.[q] ?? [];
+            return (
+              <div key={i} className="ask-bubble">
+                <div className="ask-q small"><span className="ask-avatar" aria-hidden>✦</span>{q}</div>
+                <div className="ask-options">
+                  {options.map((o) => (
+                    <button key={o} type="button" className="reply-chip" disabled={a.busy || !isLast}
+                      onClick={() => tap(`${q} ${o}`, "command")} title="Answer and continue">{o}</button>
+                  ))}
+                  <button type="button" className="reply-chip other" disabled={a.busy}
+                    onClick={() => { setText(`${q} `); setMode("command"); inputRef.current?.focus(); }}>{options.length ? "Other…" : "Answer…"}</button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
       {m.data.error && <div className="error small">{m.data.error}</div>}
@@ -108,6 +153,16 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
         {m.content && <button className="ghost tiny-btn" onClick={() => copy(m)} title="Copy answer">{copied === m.seq ? "Copied" : "Copy"}</button>}
         {isLast && canRegenerate && <button className="ghost tiny-btn" onClick={a.regenerate} title="Answer again">↻ {m.data.error ? "Retry" : "Regenerate"}</button>}
       </div>
+      {isLast && !a.busy && !m.data.error && suggestionsSource === "ai" && (suggestions.length > 0 || suggestionsLoading) && (
+        <div className="cmd-followups" aria-label={suggestions.some((s) => s.kind === "reply") ? "Quick replies" : "Suggested follow-ups"}>
+          <span className="tiny muted">{suggestionsLoading ? "Thinking of follow-ups…"
+            : suggestions.some((s) => s.kind === "reply") ? "Reply" : mode === "command" ? "Next edits" : "You could ask"}</span>
+          {suggestions.map((s) => (
+            <button key={s.label} type="button" className={s.kind === "reply" ? "reply-chip" : "followup-chip"} title={s.why || s.prompt}
+              onClick={() => (mode === "command" ? (setText(s.prompt), inputRef.current?.focus()) : tap(s.prompt, "ask"))}>{s.label}</button>
+          ))}
+        </div>
+      )}
     </div>
   );
 
@@ -121,9 +176,46 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
     </div>
   );
 
+  const top = (
+    <div className="cmd-top">
+      <div className="seg" role="tablist" aria-label="Assistant mode">
+        {designSlot && <button type="button" role="tab" aria-selected={mode === "design"} className={mode === "design" ? "on" : ""}
+          onClick={() => setMode("design")} title="Start from an idea: ArchFlow asks a few questions, then proposes architectures">Design</button>}
+        {!readOnly && <button type="button" role="tab" aria-selected={mode === "command"} className={mode === "command" ? "on" : ""}
+          onClick={() => setMode("command")} title="Tell ArchFlow what to change on the canvas">Edit</button>}
+        <button type="button" role="tab" aria-selected={mode === "ask"} className={mode === "ask" ? "on" : ""}
+          onClick={() => setMode("ask")} title="Ask questions about the project">Ask</button>
+      </div>
+      <span className="spacer" />
+      {!full && (
+        <div className="dock-switch" role="group" aria-label="Assistant position">
+          {DOCKS.map((d) => (
+            <button key={d.id} type="button" className={`ghost tiny-btn ${dock === d.id ? "on" : ""}`} title={d.label} aria-label={d.label}
+              aria-pressed={dock === d.id} onClick={() => onDock(d.id)}>{d.icon}</button>
+          ))}
+        </div>
+      )}
+      {!docked && hasLog && !full && mode !== "design" && (
+        <button type="button" className="ghost tiny-btn" onClick={() => setExpanded(!expanded)} aria-label="Toggle conversation"
+          title={expanded ? "Collapse" : "Expand"}>{expanded ? "▾" : "▴"}</button>
+      )}
+    </div>
+  );
+
+  if (mode === "design" && designSlot) {
+    return (
+      <div className={`command-bar design-mode ${docked ? `docked ${dock}` : "tall"}`}>
+        {top}
+        <div className="cmd-design">{designSlot}</div>
+        {aiBusy && <div className="ai-busy small">✦ {aiBusy}</div>}
+      </div>
+    );
+  }
+
   return (
-    <div className={`command-bar ${full ? "full" : tall && expanded ? "tall" : ""}`}
+    <div className={`command-bar ${full ? "full" : docked ? `docked ${dock}` : tall && expanded ? "tall" : ""}`}
       role={full ? "dialog" : undefined} aria-modal={full || undefined} aria-label={full ? "Conversation" : undefined}>
+      {top}
       {history && (
         <div className="cmd-history" role="dialog" aria-label="Conversation history">
           <div className="row between">
@@ -147,7 +239,7 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
           </ul>
         </div>
       )}
-      {expanded && (conv || hasLog || full) && (
+      {(expanded || docked) && (conv || showLog) && (
         <div className="cmd-head">
           {editingTitle !== null ? (
             <form className="row gap grow" onSubmit={(e) => { e.preventDefault(); a.rename(editingTitle); setEditingTitle(null); }}>
@@ -167,16 +259,31 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
               onClick={() => { if (window.confirm("Clear this conversation for everyone?")) a.clear(); }}>Clear</button>
           )}
           <button className="ghost tiny-btn" onClick={() => { a.open(null); inputRef.current?.focus(); }} disabled={a.busy}>+ New chat</button>
-          {!full && <button className="ghost tiny-btn" onClick={() => setTall(!tall)} title={tall ? "Smaller" : "Taller"}>{tall ? "⤓" : "⤒"}</button>}
+          {!full && !docked && <button className="ghost tiny-btn" onClick={() => setTall(!tall)} title={tall ? "Smaller" : "Taller"}>{tall ? "⤓" : "⤒"}</button>}
         </div>
       )}
-      {expanded && (hasLog || full) && (
+      {(expanded || docked) && showLog && (
         <div className="cmd-log" ref={logRef} aria-live="polite">
           {!hasLog && (
             <div className="cmd-empty muted">
-              <h3>Ask ArchFlow</h3>
-              <p className="small">Ask about the project or tell it what to change on the canvas. The conversation is saved
-                and shared with your team; press Esc to leave full screen.</p>
+              <h3>{mode === "command" ? "Edit with ArchFlow" : "Ask ArchFlow"}</h3>
+              <p className="small">{mode === "command"
+                ? "Tell ArchFlow what to change: it edits the canvas and lists every change. Select components first to focus the edit."
+                : "Ask anything about this project: requirements, components, decisions or trade-offs."} The conversation is saved
+                and shared with your team.</p>
+              {(suggestions.length > 0 || suggestionsLoading) && (
+                <div className="cmd-suggest">
+                  <span className="tiny muted dc-starters-label">
+                    {suggestionsLoading && !suggestions.length ? "Finding the most useful next steps…"
+                      : selection.length ? "For your selection and this project" : "For this project"}
+                    {suggestionsSource === "ai" && <span className="ai-tag" title="Written by the AI from this project">AI</span>}
+                  </span>
+                  {suggestions.map((s) => (
+                    <button key={s.label} type="button" className="dc-suggest" title={s.why || undefined}
+                      onClick={() => { setText(s.prompt); inputRef.current?.focus(); }}>{s.label}</button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
           {conv?.summary && (
@@ -207,10 +314,6 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
         </div>
       )}
       <form className="cmd-form" onSubmit={submit}>
-        <div className="seg">
-          {!readOnly && <button type="button" className={mode === "command" ? "on" : ""} onClick={() => setMode("command")}>Edit</button>}
-          <button type="button" className={mode === "ask" ? "on" : ""} onClick={() => setMode("ask")}>Ask</button>
-        </div>
         <input
           ref={inputRef}
           list="cmd-suggestions"
@@ -218,9 +321,9 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
           onChange={(e) => setText(e.target.value)}
           placeholder={mode === "command"
             ? (selection.length ? `Tell ArchFlow what to change (${selection.length} selected)…` : "Tell ArchFlow what to change, or describe your product idea…")
-            : a.messages.length ? "Ask a follow-up…" : "Ask about the project: “Why was Redis added?”, “Which components handle PII?”"}
+            : a.messages.length ? "Ask a follow-up…" : suggestions[0] ? `Ask about the project, e.g. “${suggestions[0].label}”` : "Ask about the project…"}
         />
-        <datalist id="cmd-suggestions">{SUGGESTIONS.map((s) => <option key={s} value={s} />)}</datalist>
+        <datalist id="cmd-suggestions">{suggestions.map((s) => <option key={s.label} value={s.prompt} />)}</datalist>
         <button className="primary" disabled={!text.trim() || a.busy}>{mode === "command" ? "Apply" : "Ask"}</button>
         <button type="button" className={`ghost ${history ? "on" : ""}`} onClick={() => { setHistory(!history); a.refreshThreads(); }}
           title="Conversation history" aria-label="Conversation history">☰</button>
@@ -229,9 +332,6 @@ export function CommandBar({ assistant: a, selection, aiBusy, links, memoryCount
           aria-pressed={full}>⛶</button>
         <button type="button" className="ghost mem-btn" onClick={onOpenMemory}
           title="Project memory: facts every AI answer, edit and design takes into account">◎ {memoryCount}</button>
-        {hasLog && !full && (
-          <button type="button" className="ghost" onClick={() => setExpanded(!expanded)} aria-label="toggle conversation">{expanded ? "▾" : "▴"}</button>
-        )}
       </form>
       {aiBusy && <div className="ai-busy small">✦ {aiBusy}</div>}
     </div>

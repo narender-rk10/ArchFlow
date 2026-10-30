@@ -55,9 +55,7 @@ def scaled_state() -> ProjectState:
 def pg_store():
     if not PG_URL:
         pytest.skip("TEST_DATABASE_URL not set")
-    from archflow.store_pg import PostgresStore
-
-    s = PostgresStore(PG_URL)
+    s = Store(PG_URL)
     yield s
     s.close()
 
@@ -137,7 +135,7 @@ def test_llm_engine_then_heuristic_fallback(monkeypatch):
     out = evaluation.evaluate(REQS, ALTS)
     assert out["engine"] == "llm" and out["recommended"] == "draft/scaled"
     assert out["scores"]["draft/scaled"]["performance"] == 5 and "cache" in out["rationale"]
-    assert out["notes"] == []
+    assert out["notes"] == ["Jev not configured"]
     assert seen["schema"]["properties"]["recommended"]["enum"] == ["A", "B"] and seen["group"] == "reasoning"
 
     def llm_down(*a, **kw):
@@ -146,6 +144,36 @@ def test_llm_engine_then_heuristic_fallback(monkeypatch):
     monkeypatch.setattr(llm, "complete_json", llm_down)
     out = evaluation.evaluate(REQS, ALTS)
     assert out["engine"] == "heuristic" and any("LLM evaluation failed" in n for n in out["notes"])
+
+
+def test_heuristic_decision_support_details():
+    out = evaluation.evaluate(REQS, ALTS)
+    simple, scaled = out["details"]["draft/simple"], out["details"]["draft/scaled"]
+    assert set(simple["reasons"]) == set(evaluation.CRITERIA)
+    assert "No cache in front of the data stores" in simple["risks"]
+    assert "Has a cache" in scaled["strengths"] and "Has a cache" not in simple["strengths"]
+    assert out["weights"]["performance"] > out["weights"]["cost"]  # the high-priority performance NFR
+
+
+def test_llm_decision_support_details(monkeypatch):
+    def fake_complete_json(system, messages, schema, **kw):
+        row = {c: 3 for c in evaluation.CRITERIA}
+        detail = {"reasons": {"performance": "Redis cache in front of PostgreSQL"}, "summary": "Scaled",
+                  "strengths": ["Cache", " ", "Queue"], "risks": ["Kafka to operate"], "best_when": "Traffic grows"}
+        return {"recommended": "B", "rationale": "B is faster.", "confidence": 1.7,
+                "deciding_factors": ["p95 latency NFR"], "flip_conditions": "If the budget is fixed, A wins.",
+                "scores": [{"alternative": "A", **row, "reasons": {}, "summary": "", "strengths": [], "risks": [],
+                            "best_when": ""},
+                           {"alternative": "B", **row, "performance": 5, **detail}]}
+
+    monkeypatch.setattr(llm, "available", lambda *a, **k: True)
+    monkeypatch.setattr(llm, "complete_json", fake_complete_json)
+    out = evaluation.evaluate(REQS, ALTS)
+    d = out["details"]["draft/scaled"]
+    assert d["strengths"] == ["Cache", "Queue"] and d["best_when"] == "Traffic grows"
+    assert d["reasons"] == {"performance": "Redis cache in front of PostgreSQL"}
+    assert out["confidence"] == 1.0 and out["deciding_factors"] == ["p95 latency NFR"]
+    assert out["flip_conditions"].startswith("If the budget")
 
 
 # ---------------------------------------------------------------- REST API
@@ -240,6 +268,38 @@ def test_evaluate_create_and_adopt(client):
     assert r.status_code == 422
     assert client.post(f"/api/projects/{pid}/decisions/ADR-001/adopt",
                        json={"target_branch": "nope"}).status_code == 404
+
+
+def test_heuristic_risks_become_decision_cons(client):
+    pid = make_project(client)
+    r = client.post(f"/api/projects/{pid}/evaluate", json={"branches": ["draft/simple", "draft/scaled"],
+                                                           "create_decision": True})
+    simple = r.json()["decision"]["alternatives"][0]
+    assert "No cache in front of the data stores" in simple["cons"]
+
+
+def test_ask_about_a_comparison(client, monkeypatch):
+    pid = make_project(client)
+    url = f"/api/projects/{pid}/evaluate/ask"
+    branches = ["draft/simple", "draft/scaled"]
+    assert client.post(url, json={"branches": branches, "question": "Why?"}).status_code == 503  # no LLM
+    seen = {}
+
+    def fake_complete_json(system, messages, schema, **kw):
+        seen["prompt"] = messages[0]["content"]
+        return {"answer": "Pick draft/simple if cost matters most.",
+                "follow_ups": ["How much cheaper is draft/simple per month?", " ", "When would we outgrow it?"]}
+
+    monkeypatch.setattr(llm, "available", lambda *a, **k: True)
+    monkeypatch.setattr(llm, "complete_json", fake_complete_json)
+    assert client.post(url, json={"branches": ["draft/simple"], "question": "Why?"}).status_code == 422
+    assert client.post(url, json={"branches": ["draft/simple", "nope"], "question": "Why?"}).status_code == 404
+    r = client.post(url, json={"branches": branches, "question": "What if cost matters most?",
+                               "evaluation": {"recommended": "draft/scaled", "totals": {"draft/scaled": 4}}})
+    assert r.status_code == 200 and r.json()["answer"].startswith("Pick draft/simple")
+    assert r.json()["follow_ups"] == ["How much cheaper is draft/simple per month?", "When would we outgrow it?"]
+    assert "What if cost matters most?" in seen["prompt"] and '"draft/scaled"' in seen["prompt"]
+    assert '"recommended": "draft/scaled"' in seen["prompt"] and "Handle 10k rps" in seen["prompt"]
 
 
 # ---------------------------------------------------------------- MCP

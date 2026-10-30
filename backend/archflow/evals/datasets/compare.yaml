@@ -1,0 +1,165 @@
+suite: compare
+description: Architecture comparison (compare.evaluate) must pick the option the requirements favour and justify it.
+cases:
+  - id: latency-nfr-favours-cache
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Checkout p95 latency under 300 ms at 2,000 rps", kind: non_functional, category: performance, priority: critical}}
+        - {op: add_requirement, requirement: {title: "Customers can check out a cart", kind: functional, priority: high}}
+    alternatives:
+      draft/simple:
+        ops:
+          - {op: add_node, node: {name: Web App, type: client, technology: React}}
+          - {op: add_node, node: {name: Checkout API, type: service, technology: Django}}
+          - {op: add_node, node: {name: Orders DB, type: database, technology: PostgreSQL}}
+          - {op: add_edge, edge: {source: Web App, target: Checkout API, protocol: REST}}
+          - {op: add_edge, edge: {source: Checkout API, target: Orders DB, protocol: SQL}}
+      draft/cached:
+        ops:
+          - {op: add_node, node: {name: Web App, type: client, technology: React}}
+          - {op: add_node, node: {name: Load Balancer, type: gateway, technology: NGINX}}
+          - {op: add_node, node: {name: Checkout API, type: service, technology: Django, props: {replicas: "4"}}}
+          - {op: add_node, node: {name: Cart Cache, type: cache, technology: Redis}}
+          - {op: add_node, node: {name: Orders DB, type: database, technology: PostgreSQL, props: {replicas: "2"}}}
+          - {op: add_edge, edge: {source: Web App, target: Load Balancer, protocol: HTTPS}}
+          - {op: add_edge, edge: {source: Load Balancer, target: Checkout API, protocol: REST}}
+          - {op: add_edge, edge: {source: Checkout API, target: Cart Cache, protocol: RESP}}
+          - {op: add_edge, edge: {source: Checkout API, target: Orders DB, protocol: SQL}}
+    expect:
+      recommended: draft/cached
+      scores_higher: [[draft/cached, draft/simple, performance], [draft/cached, draft/simple, scalability]]
+      mentions_any: [cache, Redis, latency, p95, "300"]
+    ragas: [faithfulness]
+
+  - id: tight-budget-favours-simple
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Infrastructure costs under $150 per month", kind: non_functional, category: cost, priority: critical}}
+        - {op: add_requirement, requirement: {title: "A team of two ships the MVP in six weeks", kind: non_functional, category: maintainability, priority: high}}
+        - {op: add_requirement, requirement: {title: "Studio owners manage class bookings", kind: functional, priority: high}}
+    alternatives:
+      draft/monolith:
+        ops:
+          - {op: add_node, node: {name: Web App, type: client, technology: Next.js}}
+          - {op: add_node, node: {name: Booking App, type: service, technology: Rails}}
+          - {op: add_node, node: {name: App DB, type: database, technology: PostgreSQL}}
+          - {op: add_edge, edge: {source: Web App, target: Booking App, protocol: HTTPS}}
+          - {op: add_edge, edge: {source: Booking App, target: App DB, protocol: SQL}}
+      draft/microservices:
+        ops:
+          - {op: add_node, node: {name: Web App, type: client, technology: Next.js}}
+          - {op: add_node, node: {name: API Gateway, type: gateway, technology: Kong}}
+          - {op: add_node, node: {name: Booking Service, type: service, technology: Go}}
+          - {op: add_node, node: {name: Studio Service, type: service, technology: Go}}
+          - {op: add_node, node: {name: Billing Service, type: service, technology: Go}}
+          - {op: add_node, node: {name: Notification Service, type: service, technology: Go}}
+          - {op: add_node, node: {name: Event Bus, type: queue, technology: Kafka}}
+          - {op: add_node, node: {name: Booking DB, type: database, technology: PostgreSQL}}
+          - {op: add_node, node: {name: Studio DB, type: database, technology: PostgreSQL}}
+          - {op: add_node, node: {name: Cluster, type: service, technology: Kubernetes}}
+          - {op: add_edge, edge: {source: Web App, target: API Gateway, protocol: HTTPS}}
+          - {op: add_edge, edge: {source: API Gateway, target: Booking Service, protocol: gRPC}}
+          - {op: add_edge, edge: {source: API Gateway, target: Studio Service, protocol: gRPC}}
+          - {op: add_edge, edge: {source: Booking Service, target: Event Bus, protocol: Kafka}}
+          - {op: add_edge, edge: {source: Event Bus, target: Billing Service, protocol: Kafka}}
+          - {op: add_edge, edge: {source: Event Bus, target: Notification Service, protocol: Kafka}}
+          - {op: add_edge, edge: {source: Booking Service, target: Booking DB, protocol: SQL}}
+          - {op: add_edge, edge: {source: Studio Service, target: Studio DB, protocol: SQL}}
+    expect:
+      recommended: draft/monolith
+      scores_higher: [[draft/monolith, draft/microservices, cost], [draft/monolith, draft/microservices, delivery_speed]]
+      mentions_any: [cost, budget, "$150", team, six weeks, MVP]
+    ragas: [faithfulness]
+
+  - id: security-nfr-favours-identity
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Every request is authenticated with company SSO (OIDC)", kind: non_functional, category: security, priority: critical}}
+        - {op: add_requirement, requirement: {title: "Patient records are encrypted at rest and access is audited", kind: non_functional, category: privacy, priority: critical}}
+    alternatives:
+      draft/open:
+        ops:
+          - {op: add_node, node: {name: Clinic Portal, type: client, technology: React}}
+          - {op: add_node, node: {name: Records API, type: service, technology: FastAPI}}
+          - {op: add_node, node: {name: Records DB, type: database, technology: PostgreSQL}}
+          - {op: add_edge, edge: {source: Clinic Portal, target: Records API, protocol: REST}}
+          - {op: add_edge, edge: {source: Records API, target: Records DB, protocol: SQL}}
+      draft/secured:
+        ops:
+          - {op: add_node, node: {name: Clinic Portal, type: client, technology: React}}
+          - {op: add_node, node: {name: API Gateway, type: gateway, technology: Envoy}}
+          - {op: add_node, node: {name: Identity Provider, type: security, technology: Keycloak (OIDC)}}
+          - {op: add_node, node: {name: Records API, type: service, technology: FastAPI}}
+          - {op: add_node, node: {name: Audit Log, type: storage, technology: S3 Object Lock}}
+          - {op: add_node, node: {name: Records DB, type: database, technology: "PostgreSQL (TDE, KMS keys)"}}
+          - {op: add_edge, edge: {source: Clinic Portal, target: API Gateway, protocol: HTTPS}}
+          - {op: add_edge, edge: {source: API Gateway, target: Identity Provider, protocol: OIDC}}
+          - {op: add_edge, edge: {source: API Gateway, target: Records API, protocol: REST}}
+          - {op: add_edge, edge: {source: Records API, target: Records DB, protocol: SQL}}
+          - {op: add_edge, edge: {source: Records API, target: Audit Log, protocol: HTTPS}}
+    expect:
+      recommended: draft/secured
+      scores_higher: [[draft/secured, draft/open, security]]
+      mentions_any: [SSO, OIDC, Keycloak, audit, encrypt]
+    ragas: [faithfulness]
+
+  - id: iot-throughput-favours-streaming
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Ingest 50,000 sensor readings per second with bursts to 3x", kind: non_functional, category: scalability, priority: critical}}
+        - {op: add_requirement, requirement: {title: "No reading is lost when the database is slow or down for 10 minutes", kind: non_functional, category: reliability, priority: high}}
+    alternatives:
+      draft/direct:
+        ops:
+          - {op: add_node, node: {name: Sensors, type: client, technology: HTTP devices}}
+          - {op: add_node, node: {name: Ingest API, type: service, technology: Express}}
+          - {op: add_node, node: {name: Telemetry DB, type: database, technology: PostgreSQL}}
+          - {op: add_edge, edge: {source: Sensors, target: Ingest API, protocol: HTTPS}}
+          - {op: add_edge, edge: {source: Ingest API, target: Telemetry DB, protocol: SQL}}
+      draft/streaming:
+        ops:
+          - {op: add_node, node: {name: Sensors, type: client, technology: MQTT devices}}
+          - {op: add_node, node: {name: MQTT Broker, type: gateway, technology: EMQX cluster}}
+          - {op: add_node, node: {name: Readings Stream, type: queue, technology: Apache Kafka (7-day retention)}}
+          - {op: add_node, node: {name: Stream Processor, type: service, technology: Apache Flink, props: {replicas: "6"}}}
+          - {op: add_node, node: {name: Telemetry DB, type: database, technology: TimescaleDB}}
+          - {op: add_edge, edge: {source: Sensors, target: MQTT Broker, protocol: MQTT}}
+          - {op: add_edge, edge: {source: MQTT Broker, target: Readings Stream, protocol: Kafka}}
+          - {op: add_edge, edge: {source: Readings Stream, target: Stream Processor, protocol: Kafka}}
+          - {op: add_edge, edge: {source: Stream Processor, target: Telemetry DB, protocol: "SQL (batched)"}}
+    expect:
+      recommended: draft/streaming
+      scores_higher: [[draft/streaming, draft/direct, scalability], [draft/streaming, draft/direct, reliability]]
+      mentions_any: [Kafka, buffer, backpressure, burst, retention, "50,000"]
+    ragas: [faithfulness]
+
+  - id: fintech-consistency-favours-ledger
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Balances are strongly consistent; no transfer is lost or applied twice", kind: non_functional, category: reliability, priority: critical}}
+        - {op: add_requirement, requirement: {title: "RPO 0 and RTO under 15 minutes for the ledger", kind: non_functional, category: availability, priority: critical}}
+        - {op: add_requirement, requirement: {title: "Customers transfer money between their accounts", kind: functional, priority: high}}
+    alternatives:
+      draft/eventual:
+        ops:
+          - {op: add_node, node: {name: Mobile App, type: client, technology: Flutter}}
+          - {op: add_node, node: {name: Transfer Function, type: service, technology: AWS Lambda}}
+          - {op: add_node, node: {name: Balances Table, type: database, technology: "DynamoDB (eventually consistent reads, single region)"}}
+          - {op: add_edge, edge: {source: Mobile App, target: Transfer Function, protocol: HTTPS}}
+          - {op: add_edge, edge: {source: Transfer Function, target: Balances Table, protocol: AWS SDK}}
+      draft/ledger:
+        ops:
+          - {op: add_node, node: {name: Mobile App, type: client, technology: Flutter}}
+          - {op: add_node, node: {name: Transfers API, type: service, technology: Java, description: "Idempotency keys on every transfer"}}
+          - {op: add_node, node: {name: Ledger DB, type: database, technology: "PostgreSQL (double-entry, synchronous standby)", props: {replicas: "2"}}}
+          - {op: add_node, node: {name: Outbox Relay, type: service, technology: Debezium}}
+          - {op: add_node, node: {name: Ledger Events, type: queue, technology: Apache Kafka}}
+          - {op: add_edge, edge: {source: Mobile App, target: Transfers API, protocol: HTTPS}}
+          - {op: add_edge, edge: {source: Transfers API, target: Ledger DB, protocol: SQL}}
+          - {op: add_edge, edge: {source: Outbox Relay, target: Ledger DB, protocol: CDC}}
+          - {op: add_edge, edge: {source: Outbox Relay, target: Ledger Events, protocol: Kafka}}
+    expect:
+      recommended: draft/ledger
+      scores_higher: [[draft/ledger, draft/eventual, reliability]]
+      mentions_any: [consisten, double-entry, idempoten, RPO, synchronous, ledger]
+    ragas: [faithfulness]

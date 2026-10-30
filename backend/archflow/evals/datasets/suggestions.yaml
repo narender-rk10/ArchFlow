@@ -1,0 +1,70 @@
+suite: suggestions
+description: Suggested next steps (assistant.suggestions) are grounded in the project and technically sensible.
+cases:
+  - id: edit-support-project
+    project: {template: ai-customer-support}
+    mode: edit
+    expect:
+      grounded_share: 0.75
+      forbid:
+        - "CDN[^\\n]*(WhatsApp|Orders DB|Order Service|Claude|Helpdesk|Kafka)"
+        - "(WhatsApp|Orders DB|Order Service|Claude|Helpdesk)[^\\n]*CDN"
+    ragas: [technically_sound, grounded_in_project]
+
+  - id: ask-follow-up-builds-on-answer
+    project: {template: ai-customer-support}
+    mode: ask
+    last_question: What happens if Claude is unavailable?
+    last_answer: >-
+      Support Agent calls to Claude fail and customers get no answer: there is no fallback model, no timeout and
+      no queue, so REQ-005 (response latency) is missed and nothing escalates to the Helpdesk automatically.
+    expect:
+      mentions_any: [fallback, Claude, Support Agent, Helpdesk, REQ-005, timeout]
+    ragas: [grounded_in_project]
+
+  - id: empty-project-design-starts
+    project: {template: blank}
+    mode: design
+    expect: {}
+
+  - id: fintech-edit-is-grounded
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "A customer is never charged twice for one payment", kind: non_functional, category: reliability, priority: critical}}
+        - {op: add_requirement, requirement: {title: "Card data is handled in a PCI DSS compliant way", kind: non_functional, category: security, priority: critical}}
+        - {op: add_node, node: {name: Mobile App, type: client, technology: React Native}}
+        - {op: add_node, node: {name: Payments API, type: service, technology: Go, requirement_ids: [REQ-001, REQ-002]}}
+        - {op: add_node, node: {name: Card Processor, type: external, technology: Stripe}}
+        - {op: add_node, node: {name: Ledger DB, type: database, technology: PostgreSQL}}
+        - {op: add_edge, edge: {source: Mobile App, target: Payments API, protocol: HTTPS}}
+        - {op: add_edge, edge: {source: Payments API, target: Card Processor, protocol: REST}}
+        - {op: add_edge, edge: {source: Payments API, target: Ledger DB, protocol: SQL}}
+    mode: edit
+    expect:
+      grounded_share: 0.75
+      not_mentions: [CDN]
+    ragas: [technically_sound, grounded_in_project]
+
+  - id: iot-ask-mode-questions
+    project:
+      ops:
+        - {op: add_requirement, requirement: {title: "Ingest 50,000 sensor readings per second", kind: non_functional, category: scalability, priority: critical}}
+        - {op: add_node, node: {name: Smart Meters, type: client, technology: MQTT devices}}
+        - {op: add_node, node: {name: MQTT Broker, type: queue, technology: EMQX}}
+        - {op: add_node, node: {name: Ingest Service, type: service, technology: Node.js, requirement_ids: [REQ-001]}}
+        - {op: add_node, node: {name: Telemetry DB, type: database, technology: TimescaleDB}}
+        - {op: add_edge, edge: {source: Smart Meters, target: MQTT Broker, protocol: MQTT}}
+        - {op: add_edge, edge: {source: MQTT Broker, target: Ingest Service, protocol: MQTT}}
+        - {op: add_edge, edge: {source: Ingest Service, target: Telemetry DB, protocol: SQL}}
+    mode: ask
+    expect:
+      grounded_share: 0.75
+    ragas: [grounded_in_project]
+
+  - id: selection-focuses-suggestions
+    project: {template: ai-customer-support}
+    mode: edit
+    selection: [orders-db]
+    expect:
+      mentions_any: [Orders DB]
+    ragas: [technically_sound]
