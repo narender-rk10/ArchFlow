@@ -342,7 +342,8 @@ def stream(*items):
 
 def test_stream_text_yields_chunks(monkeypatch, all_keys):
     router = install(monkeypatch, {"reasoning": [stream("Hel", "lo ", None, "world")]})
-    assert list(llm.stream_text("sys", [{"role": "user", "content": "hi"}])) == ["Hel", "lo ", "world"]
+    # Text is forwarded word by word: redaction holds back a partial word until it is complete (redact.StreamRestorer)
+    assert list(llm.stream_text("sys", [{"role": "user", "content": "hi"}])) == ["Hello ", "world"]
     assert router.calls[0]["stream"] is True
 
 
