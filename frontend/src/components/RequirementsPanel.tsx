@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { Issue, Op, ProjectState, Requirement, RequirementRevision } from "../types";
+import type { Issue, JiraLink, Op, ProjectState, Requirement, RequirementRevision } from "../types";
 import { Field } from "./Field";
 import { ImportRequirementsDialog, sourceLabel } from "./ImportRequirementsDialog";
 
@@ -18,6 +18,21 @@ interface Props {
   readOnly?: boolean;
   /** Admins may remove a deleted requirement permanently. */
   isAdmin?: boolean;
+  /** Jira stories pushed for requirements, by requirement id. */
+  jira?: Record<string, JiraLink>;
+  /** Open the Jira push dialog (shown when the org has Jira connected and you may push). */
+  onJira?: () => void;
+}
+
+/** A requirement's Jira issue key, linked, with the status last read from Jira. */
+export function JiraBadge({ link }: { link: JiraLink }) {
+  return (
+    <a className={`jira-badge ${link.status_category || "unknown"}`} href={link.external_url || undefined} target="_blank" rel="noreferrer"
+      title={link.status ? `Jira status: ${link.status}` : "Pushed to Jira (refresh status from the Jira dialog)"}
+      onClick={(e) => e.stopPropagation()}>
+      {link.external_key}{link.status && <span className="muted"> · {link.status}</span>}
+    </a>
+  );
 }
 
 const splitList = (s: string, sep: string | RegExp) => s.split(sep).map((x) => x.trim()).filter(Boolean);
@@ -69,7 +84,7 @@ function History({ pid, branch, req }: { pid: string; branch: string; req: Requi
 }
 
 export function RequirementsPanel({ pid, branch, toast, onMemoryChanged, state, issues, traced, onTrace, send, onPrompt,
-  readOnly = false, isAdmin = false }: Props) {
+  readOnly = false, isAdmin = false, jira = {}, onJira }: Props) {
   const [open, setOpen] = useState<string | null>(null);
   const [detail, setDetail] = useState<"edit" | "history">("edit");
   const [importing, setImporting] = useState(false);
@@ -120,6 +135,7 @@ export function RequirementsPanel({ pid, branch, toast, onMemoryChanged, state, 
             <button className="small primary" onClick={() => add("functional")} title="A feature the system must provide">+ Functional</button>
             <button className="small" onClick={() => add("non_functional")} title="A quality target: performance, security, cost…">+ Non-functional</button>
             <button className="small" onClick={() => setImporting(true)} title="Import requirements from a document (PDF, Word, Markdown, text)">⇪ Import</button>
+            {onJira && all.length > 0 && <button className="small" onClick={onJira} title="Preview, then push requirements to Jira as epics and stories">Jira ↗</button>}
           </div>
         )}
       </div>
@@ -168,6 +184,7 @@ export function RequirementsPanel({ pid, branch, toast, onMemoryChanged, state, 
                 {sourceLabel(r.source) && (
                   <span title={`Imported${r.source?.at ? ` on ${new Date(r.source.at).toLocaleString()}` : ""}`}> · from {sourceLabel(r.source)}</span>
                 )}
+                {jira[r.id] && <> · <JiraBadge link={jira[r.id]} /></>}
               </div>
               {isOpen && (
                 <div className="req-edit">

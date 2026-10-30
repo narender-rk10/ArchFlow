@@ -29,10 +29,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from .db import migrate
-from .db.models import (Activity, AITrace, AIUsage, ApiToken, Approval, Base, Branch, CodeGraph, Comment, Conversation,
-                        ConversationMessage, Decision, Invite, Membership, Notification, OAuthClient, OAuthCode,
-                        OpenSpecChange, OpenSpecFile, Org, OrgAIBudget, OrgApprovalPolicy, OrgAIConfig, OrgAIKey, Project, ProjectMemory,
-                        RequirementRevision, User, UserSession, Version, YDoc)
+from .db.models import (Activity, AITrace, AIUsage, ApiToken, Approval, Base, Branch, CodeGraph, Comment, Conversation, ConversationMessage,
+                        Decision, Invite, Membership, Notification, OAuthClient, OAuthCode, OpenSpecChange, OpenSpecFile, Org, OrgAIBudget,
+                        OrgApprovalPolicy, OrgAIConfig, OrgAIKey, Project, ProjectMemory, RequirementRevision, User, UserSession, Version,
+                        YDoc, ExternalLink, OrgJiraConnection)
 from .db.types import now
 from .models import ProjectState
 
@@ -81,6 +81,9 @@ USER_COLS = ("id", "email", "name", "created_at", "last_login_at")
 INVITE_COLS = ("id", "org_id", "email", "role", "created_by", "created_at", "expires_at", "accepted_at",
                "accepted_by", "revoked")
 PROJECT_COLS = ("id", "name", "description", "created_at", "org_id")
+EXTERNAL_LINK_COLS = ("object_kind", "object_id", "external_key", "external_url", "content_hash", "status",
+                      "status_category", "status_checked_at", "updated_at")
+JIRA_CONNECTION_COLS = ("org_id", "site_url", "email", "ciphertext", "last4", "project_key", "updated_by", "updated_at")
 TOKEN_COLS = ("id", "kind", "org_id", "user_name", "user_id", "scopes", "client_id", "name", "resource",
               "created_at", "expires_at", "last_used_at", "revoked")
 
@@ -379,6 +382,53 @@ class Store:
         with self._s() as s:
             rows = s.scalars(select(OrgAIKey).where(OrgAIKey.org_id == org_id).order_by(OrgAIKey.provider))
             return [k.to_dict("provider", "ciphertext", "last4", "updated_by", "updated_at") for k in rows]
+
+    # ---- per-org Jira connection (token encrypted by the caller, see jira.py) ----------
+    def set_jira_connection(self, org_id: str, *, site_url: str, email: str, ciphertext: str, last4: str,
+                            project_key: str, user_id: str | None) -> None:
+        with self._s() as s:
+            self._upsert(s, OrgJiraConnection, {"org_id": org_id, "site_url": site_url, "email": email,
+                                                "ciphertext": ciphertext, "last4": last4, "project_key": project_key,
+                                                "updated_by": user_id, "updated_at": now()}, ["org_id"])
+
+    def get_jira_connection(self, org_id: str) -> dict[str, Any] | None:
+        with self._s() as s:
+            c = s.get(OrgJiraConnection, org_id)
+            return c.to_dict(*JIRA_CONNECTION_COLS) if c else None
+
+    def delete_jira_connection(self, org_id: str) -> None:
+        with self._s() as s:
+            s.execute(delete(OrgJiraConnection).where(OrgJiraConnection.org_id == org_id))
+
+    # ---- links to external trackers (Jira issues) ---------------------------------
+    def list_external_links(self, pid: str, system: str = "jira") -> list[dict[str, Any]]:
+        with self._s() as s:
+            rows = s.scalars(select(ExternalLink).where(ExternalLink.project_id == pid, ExternalLink.system == system)
+                             .order_by(ExternalLink.object_kind, ExternalLink.object_id))
+            return [x.to_dict(*EXTERNAL_LINK_COLS) for x in rows]
+
+    def save_external_link(self, pid: str, object_kind: str, object_id: str, *, external_key: str,
+                           external_url: str = "", content_hash: str = "", system: str = "jira") -> None:
+        """Insert or update the link of one object (keyed by project, system, kind and id)."""
+        with self._s() as s:
+            self._upsert(s, ExternalLink, {"project_id": pid, "system": system, "object_kind": object_kind,
+                                           "object_id": object_id, "external_key": external_key,
+                                           "external_url": external_url, "content_hash": content_hash,
+                                           "updated_at": now()},
+                         ["project_id", "system", "object_kind", "object_id"])
+
+    def set_external_status(self, pid: str, external_key: str, status: str, category: str,
+                            system: str = "jira") -> None:
+        with self._s() as s:
+            s.execute(update(ExternalLink).where(ExternalLink.project_id == pid, ExternalLink.system == system,
+                                                 ExternalLink.external_key == external_key)
+                      .values(status=status, status_category=category, status_checked_at=now()))
+
+    def delete_external_link(self, pid: str, object_kind: str, object_id: str, system: str = "jira") -> None:
+        with self._s() as s:
+            s.execute(delete(ExternalLink).where(ExternalLink.project_id == pid, ExternalLink.system == system,
+                                                 ExternalLink.object_kind == object_kind,
+                                                 ExternalLink.object_id == object_id))
 
     # ---- projects -------------------------------------------------------
     def create_project(self, name: str, description: str = "", state: ProjectState | None = None,

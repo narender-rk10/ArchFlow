@@ -425,6 +425,7 @@ Any feature calls llm.py
 | **Cloud documentation (MCP)** | Microsoft Learn MCP server, AWS Knowledge MCP server (hosted), AWS Documentation MCP server (local, optional) |
 | **Code analysis** | Public Git repositories (HTTPS), local graphs via `archflow-codegraph`; ~30 languages through tree-sitter |
 | **Observability** | Langfuse (optional LLM tracing) |
+| **Issue tracking** | Jira Cloud: preview, then push requirements as epics (one per owning component), stories with Given/When/Then criteria and story points, sub-tasks from the low-level design and "blocks" links from connections; idempotent re-push, 429 backoff, status read back next to requirements. Admins connect it per organization (API token encrypted); developers push |
 
 ---
 
@@ -763,7 +764,8 @@ The full production plan is in [docs/production-plan.md](docs/production-plan.md
 
 1. **Per-project role overrides, SSO** and approvals on more objects than versions
 2. **Repository analysis**: GitHub App, drift on every push/PR, PR review comments
-3. **Jira sync** — epics/stories from requirements, with status reflected on the canvas
+3. **Jira sync** — ✅ push (epics, stories, sub-tasks, links) with dry-run preview and status pull are done; next: Jira
+   webhooks for live status, status shown on canvas components, and pulling new Jira issues back as requirements
 4. **More diagrams** from the same model: ~~sequence, C4, ER, deployment, data flow~~ (done, with Mermaid / PlantUML export); still to do: agent graph, MCP topology
 5. **Document intake** — ~~SRS/PDF/Word/Markdown → requirements~~ (done); meeting transcripts → live canvas
 6. **Generation** of tests, infrastructure as code and documentation (SRS/BRD/runbooks)

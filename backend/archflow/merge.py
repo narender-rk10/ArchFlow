@@ -375,8 +375,32 @@ class _Merger:
 
 def merge_states(base: ProjectState, ours: ProjectState, theirs: ProjectState,
                  resolutions: dict[str, dict[str, Any]] | None = None) -> MergeResult:
-    """Three-way merge. Conflicts without a resolution keep ours and are listed in ``unresolved``."""
-    return _Merger(base, ours, theirs, resolutions).run()
+    """Three-way merge. Conflicts without a resolution keep ours and are listed in ``unresolved``.
+
+    Soft-deleted requirements merge as if they were absent (so a delete on one side meets a change on the other as a
+    delete-vs-modify conflict); one that stays deleted is put back as deleted, with its links, so it can be restored."""
+    result = _Merger(_live(base), _live(ours), _live(theirs), resolutions).run()
+    st = result.state
+    for side in (ours, theirs):
+        for rid, r in side.requirements.items():
+            if r.deleted and rid not in st.requirements:
+                st.requirements[rid] = r.model_copy(deep=True)
+    for side in (ours, theirs):
+        for nid, n in st.nodes.items():
+            if nid in side.nodes:
+                n.requirement_ids += [rid for rid in side.nodes[nid].requirement_ids
+                                      if rid in st.requirements and st.requirements[rid].deleted
+                                      and rid not in n.requirement_ids]
+    return result
+
+
+def _live(state: ProjectState) -> ProjectState:
+    """``state`` without soft-deleted requirements (components keep their links; the merge drops dangling ones)."""
+    if not any(r.deleted for r in state.requirements.values()):
+        return state
+    out = state.model_copy(deep=True)
+    out.requirements = {rid: r for rid, r in out.requirements.items() if not r.deleted}
+    return out
 
 
 # --------------------------------------------------------------------------- merged state → ops
@@ -406,10 +430,17 @@ def plan_ops(cur: ProjectState, new: ProjectState) -> list[dict[str, Any]]:
             readd.add(eid)
     # 2. requirements first, so components can link to them
     for rid, r in new.requirements.items():
-        if rid not in cur.requirements:
-            ops.append({"op": "add_requirement", "requirement": _fields(r) | {"id": rid}})
-        elif changes := _changes(cur.requirements[rid], r):
+        old = cur.requirements.get(rid)
+        if old is None:
+            if not r.deleted:
+                ops.append({"op": "add_requirement", "requirement": _fields(r) | {"id": rid}})
+            continue
+        if old.deleted and not r.deleted:
+            ops.append({"op": "restore_requirement", "id": rid})
+        if changes := {k: v for k, v in _changes(old, r).items() if k != "deleted"}:
             ops.append({"op": "update_requirement", "id": rid, "changes": changes, "base_rev": base_rev})
+        if r.deleted and not old.deleted:
+            ops.append({"op": "remove_requirement", "id": rid})
     # 3. new components, containers before their contents
     for nid in sorted((n for n in new.nodes if n not in cur.nodes), key=lambda n: _depth(new, n)):
         ops.append({"op": "add_node", "node": _fields(new.nodes[nid]) | {"id": nid}})
@@ -429,7 +460,8 @@ def plan_ops(cur: ProjectState, new: ProjectState) -> list[dict[str, Any]]:
             p = parent(p)
         if not (p and p in gone):
             ops.append({"op": "remove_node", "id": nid})
-    ops += [{"op": "remove_requirement", "id": rid} for rid in cur.requirements if rid not in new.requirements]
+    ops += [{"op": "remove_requirement", "id": rid} for rid, r in cur.requirements.items()
+            if rid not in new.requirements and not r.deleted]
     # 5. connections
     for eid, e in new.edges.items():
         if eid not in cur.edges or eid in readd:

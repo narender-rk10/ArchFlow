@@ -1091,3 +1091,19 @@ button.danger.ghost { color: var(--danger); }
 .intake-badge.conflict { background: color-mix(in srgb, var(--danger) 18%, var(--panel)); color: var(--danger); }
 .intake-notes { border-top: 1px solid var(--border); padding-top: 6px; display: flex; flex-direction: column; gap: 6px; }
 .intake-notes h4 { margin: 0; }
+
+
+/* ---- Jira push ---- */
+.jira-badge { font-family: var(--mono, monospace); font-size: 11px; padding: 0 5px; border-radius: 6px; border: 1px solid var(--border); text-decoration: none; color: var(--text); }
+.jira-badge.indeterminate { border-color: color-mix(in srgb, var(--primary) 50%, var(--border)); }
+.jira-badge.done { border-color: var(--ok); color: var(--ok); }
+.jira-plan { list-style: none; margin: 8px 0; padding: 0; max-height: 46vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+.jira-item + .jira-item { border-top: 1px solid var(--border); }
+.jira-item.story .jira-row { padding-left: 16px; }
+.jira-item.subtask .jira-row { padding-left: 28px; }
+.jira-row { width: 100%; display: flex; align-items: center; gap: 8px; text-align: left; padding: 6px 8px; white-space: normal; }
+.jira-action { font-size: 11px; min-width: 72px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
+.jira-action.create { color: var(--ok); }
+.jira-action.update { color: var(--warn); }
+.jira-detail { padding: 4px 12px 10px 28px; }
+.jira-desc { white-space: pre-wrap; font-size: 11px; max-height: 220px; overflow: auto; background: var(--panel-2); padding: 8px; border-radius: 6px; }

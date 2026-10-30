@@ -1,4 +1,5 @@
-import { activeRequirements, NODE_TYPES, type Catalog, type Op, type ProjectState, type StaleLink } from "../types";
+import { activeRequirements, NODE_TYPES, type Catalog, type Op, type ProjectState, type StaleLink, type JiraLink } from "../types";
+import { JiraBadge } from "./RequirementsPanel";
 import { VENDOR_STYLE } from "./Palette";
 import { Field } from "./Field";
 import { TYPE_META } from "./ArchNode";
@@ -41,6 +42,8 @@ interface Props {
   stale?: StaleLink[];
   /** Confirm the component still fits a changed requirement (all of its stale links when ``requirementId`` is omitted). */
   onReviewed?: (nodeId: string, requirementId?: string) => void;
+  /** Jira issues pushed for this project (epics per component, sub-tasks per low-level element). */
+  jira?: JiraLink[];
 }
 
 /** "Changed since this component": linked requirements edited after the component was, with Mark reviewed. */
@@ -65,7 +68,7 @@ function StaleLinks({ links, state, readOnly, onReviewed }: { links: StaleLink[]
 }
 
 export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pid, branch, onOpenInternals, readOnly = false,
-  stale = [], onReviewed }: Props) {
+  stale = [], onReviewed, jira = [] }: Props) {
   if (nodeIds.length === 1 && edgeIds.length === 0) {
     const n = state.nodes[nodeIds[0]];
     if (!n) return null;
@@ -140,6 +143,15 @@ export function Inspector({ catalog, state, nodeIds, edgeIds, send, onPrompt, pi
         </fieldset>
         <StaleLinks links={stale.filter((l) => l.node_id === n.id)} state={state} readOnly={readOnly} onReviewed={onReviewed} />
         {n.props && <CodeTrace props={n.props} />}
+        {(() => {
+          const mine = jira.filter((l) => (l.object_kind === "epic" && l.object_id === n.id)
+            || (l.object_kind === "subtask" && l.object_id.endsWith(`:${n.id}`)));
+          return mine.length > 0 && (
+            <div className="field"><span>Jira</span>
+              <div className="req-links">{mine.map((l) => <JiraBadge key={`${l.object_kind}:${l.object_id}`} link={l} />)}</div>
+            </div>
+          );
+        })()}
         <div className="insp-actions">
           {onOpenInternals && n.type !== "note" && (
             <button onClick={() => onOpenInternals(n.id)} title="Open this component's internal (low-level) diagram">

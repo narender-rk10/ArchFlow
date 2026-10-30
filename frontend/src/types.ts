@@ -473,3 +473,36 @@ export interface IntakeResult {
   requirements: IntakeProposal[]; assumptions: IntakeNote[]; constraints: IntakeNote[]; open_questions: IntakeNote[];
   stakeholders: string[];
 }
+
+// ---- Jira Cloud push ----
+export interface JiraSettings {
+  /** False when the server cannot encrypt the token (no ARCHFLOW_SECRET_KEY): the connection cannot be saved. */
+  enabled: boolean; configured: boolean; site_url: string; email: string; project_key: string;
+  last4: string | null; updated_at: string | null;
+}
+export interface JiraTestResult {
+  ok: boolean; account?: string; error?: string;
+  project?: { key: string; name: string; issue_types: string[]; story_points: boolean };
+}
+export type JiraObjectKind = "epic" | "requirement" | "subtask" | "link";
+export interface JiraLink {
+  object_kind: JiraObjectKind; object_id: string; external_key: string; external_url: string; content_hash: string;
+  status: string; status_category: string; status_checked_at: string | null; updated_at: string;
+}
+export interface JiraLinks { connected: boolean; site_url: string; project_key: string; links: JiraLink[] }
+export interface JiraGwt { given: string; when: string; then: string }
+export interface JiraPlanItem {
+  ref: string; type: "epic" | "story" | "subtask" | "link"; object_kind: JiraObjectKind; object_id: string;
+  summary: string; description?: string; labels?: string[]; components?: string[]; parent: string | null;
+  acceptance_criteria?: JiraGwt[]; story_points?: number; points_basis?: string;
+  action: "create" | "update" | "skip"; external_key: string; external_url: string;
+}
+export interface JiraPlan {
+  engine: "llm" | "offline"; items: JiraPlanItem[]; counts: Record<"create" | "update" | "skip", number>;
+  by_type: Record<"epic" | "story" | "subtask" | "link", number>; mapping: string; project_key: string; site_url: string;
+}
+export interface JiraPushResult {
+  project_key: string; engine: string;
+  counts: { created: number; updated: number; unchanged: number; failed: number };
+  results: { ref: string; type: string; summary: string; action: string; status: "ok" | "skipped" | "error"; key: string; url: string; error: string }[];
+}

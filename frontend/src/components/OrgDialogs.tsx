@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ApiError, api } from "../api";
 import { useEscape } from "../useEscape";
-import { ROLES, ROLE_HELP, can, type AIConfig, type ApprovalPolicy, type AIGroup, type AISettings, type AITestResult, type AIUsageReport, type AIUsageRow, type Invite, type Member, type Role } from "../types";
+import { ROLES, ROLE_HELP, can, type AIConfig, type ApprovalPolicy, type AIGroup, type AISettings, type AITestResult, type AIUsageReport, type AIUsageRow, type Invite, type Member, type Role, type JiraSettings, type JiraTestResult } from "../types";
 import { Copy } from "./ConnectDialog";
 
 interface Base { orgId: string; orgName: string; role: Role; selfId: string; onClose: () => void; onChanged?: () => void }
@@ -349,10 +349,90 @@ export function AISettingsDialog({ orgId, orgName, onClose }: Base) {
   );
 }
 
+/**
+ * Jira Cloud connection for an organization (admins): site, account email, API token (write-only, encrypted) and the
+ * default project. Developers then preview and push requirements from a project's Requirements panel.
+ */
+export function JiraSettingsDialog({ orgId, orgName, onClose }: Base) {
+  const [s, setS] = useState<JiraSettings | null>(null);
+  const [form, setForm] = useState({ site_url: "", email: "", api_token: "", project_key: "" });
+  const [test, setTest] = useState<JiraTestResult | "running" | null>(null);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState("");
+
+  const load = (next: JiraSettings) => {
+    setS(next);
+    setForm({ site_url: next.site_url, email: next.email, api_token: "", project_key: next.project_key });
+  };
+  useEffect(() => { api.jiraSettings(orgId).then(load).catch((e) => setError(e.message)); }, [orgId]);
+  const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, [k]: e.target.value });
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(""); setTest(null);
+    try {
+      load(await api.saveJiraSettings(orgId, { ...form, api_token: form.api_token.trim() || null }));
+      setSaved("Saved"); window.setTimeout(() => setSaved(""), 2500);
+    } catch (err) { setError((err as Error).message); }
+  };
+  const runTest = async () => {
+    setTest("running");
+    try { setTest(await api.testJira(orgId)); } catch (err) { setTest({ ok: false, error: (err as Error).message }); }
+  };
+  const disconnect = async () => {
+    if (!window.confirm(`Disconnect Jira from ${orgName}? Issues already pushed stay in Jira and stay linked.`)) return;
+    try { await api.deleteJiraSettings(orgId); load(await api.jiraSettings(orgId)); } catch (err) { setError((err as Error).message); }
+  };
+
+  return (
+    <Modal title={`Jira · ${orgName}`} onClose={onClose}>
+      {!s && !error && <p className="muted small">Loading…</p>}
+      {s && (
+        <form onSubmit={save}>
+          {!s.enabled && <p className="warn small">The token cannot be stored: set ARCHFLOW_SECRET_KEY in the API's environment and restart it.</p>}
+          <p className="muted small">Requirements become stories under one epic per component, with Given/When/Then acceptance criteria, story
+            points and sub-tasks from the low-level design. Pushes always show a preview first and update existing issues instead of
+            duplicating them. The API token is encrypted at rest and never shown again (only its last 4 characters).</p>
+          <label className="field"><span>Site URL</span>
+            <input value={form.site_url} onChange={set("site_url")} placeholder="https://your-team.atlassian.net" required />
+          </label>
+          <label className="field"><span>Account email</span>
+            <input type="email" value={form.email} onChange={set("email")} placeholder="jira-bot@your-company.com" required />
+          </label>
+          <label className="field"><span>API token <span className="muted tiny">
+            {s.configured ? `Stored token …${s.last4}. Leave empty to keep it.` : <>Create one at <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer">id.atlassian.com</a></>}</span></span>
+            <input type="password" autoComplete="off" value={form.api_token} onChange={set("api_token")}
+              placeholder={s.configured ? "Enter a new token to replace it" : "Paste API token"} disabled={!s.enabled} />
+          </label>
+          <label className="field"><span>Default project key <span className="muted tiny">e.g. SHOP; a push can pick another</span></span>
+            <input className="mono" value={form.project_key} onChange={(e) => setForm({ ...form, project_key: e.target.value.toUpperCase() })} maxLength={10} />
+          </label>
+          <div className="row between">
+            <span className="row gap">
+              {s.configured && <button type="button" className="small" onClick={runTest} disabled={test === "running"}
+                title="Uses the saved settings">Test connection</button>}
+              {test === "running" ? <span className="muted small pulse">Testing…</span>
+                : test ? <span className={`small ${test.ok ? "ok" : "error"}`}>
+                  {test.ok ? `✓ Signed in as ${test.account}${test.project ? ` · ${test.project.key} (${test.project.name}): ${test.project.issue_types.join(", ")}${test.project.story_points ? ", story points" : ""}` : ""}`
+                    : `✗ ${test.error}`}</span> : null}
+            </span>
+            <span className="row gap">
+              {saved && <span className="small ok">{saved}</span>}
+              {s.configured && <button type="button" className="small danger" onClick={disconnect}>Disconnect</button>}
+              <button className="primary" disabled={!s.enabled}>Save</button>
+            </span>
+          </div>
+        </form>
+      )}
+      {error && <p className="error small">{error}</p>}
+    </Modal>
+  );
+}
+
 export const FEATURE_LABEL: Record<string, string> = {
   assistant: "Assistant (Ask)", "canvas-edit": "Canvas edits", "design-chat": "Design chat", openspec: "Vibe code (OpenSpec)",
   "low-level-design": "Low-level design", decisions: "Decisions", "code-analysis": "Code analysis", memory: "Memory & summaries",
-  mcp: "MCP agents", suggestions: "Suggestions & follow-ups", review: "AI review", intake: "Document import", eval: "Evals", other: "Other",
+  mcp: "MCP agents", suggestions: "Suggestions & follow-ups", review: "AI review", intake: "Document import", eval: "Evals", jira: "Jira stories", other: "Other",
 };
 export const usd = (n: number) => (n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`);
 export const tokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));

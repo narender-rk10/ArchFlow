@@ -7,6 +7,7 @@ import type { Conversation, ConversationKind, ConversationMessage, MemoryCategor
 import type { OpenSpecChange, OpenSpecJob, OpenSpecOverview } from "./types";
 import type { ApprovalPolicy, VersionReview } from "./types";
 import type { AIUsageReport, AiSuggestion, AiTrace, AiTraceList, PromptInfo, ReviewResult, SuggestionMode } from "./types";
+import type { JiraLinks, JiraPlan, JiraPushResult, JiraSettings, JiraTestResult } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, public data: any) {
@@ -329,4 +330,17 @@ export const api = {
   codeDrift: (pid: string, branch: string) => call<DriftResult>("GET", `/projects/${pid}/codegraph/drift`, undefined, b(branch)),
   codeImpact: (pid: string, branch: string, files: string[]) =>
     call<ImpactResult>("POST", `/projects/${pid}/codegraph/impact`, { files, branch }),
+  // ---- Jira Cloud push (connection: admins; preview and push: developers and up) ----
+  jiraSettings: (org: string) => call<JiraSettings>("GET", `/orgs/${org}/jira`),
+  saveJiraSettings: (org: string, body: { site_url: string; email: string; api_token: string | null; project_key: string }) =>
+    call<JiraSettings>("PUT", `/orgs/${org}/jira`, body),
+  deleteJiraSettings: (org: string) => call<null>("DELETE", `/orgs/${org}/jira`),
+  testJira: (org: string) => call<JiraTestResult>("POST", `/orgs/${org}/jira/test`),
+  jiraLinks: (pid: string) => call<JiraLinks>("GET", `/projects/${pid}/jira/links`),
+  jiraPlan: (pid: string, branch: string, project_key?: string, ai = true) =>
+    call<JiraPlan>("POST", `/projects/${pid}/jira/plan`, { project_key: project_key || null, ai }, b(branch)),
+  jiraPush: (pid: string, branch: string, project_key?: string, ai = true) =>
+    call<JiraPushResult>("POST", `/projects/${pid}/jira/push`, { project_key: project_key || null, ai, confirm: true }, b(branch)),
+  jiraRefresh: (pid: string, branch: string) =>
+    call<{ updated: number; links: JiraLinks["links"] }>("POST", `/projects/${pid}/jira/refresh`, undefined, b(branch)),
 };

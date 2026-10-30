@@ -24,7 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Red
 from pydantic import BaseModel, Field
 
 from . import (accounts, ai, approvals, openspec_service, diagram_export, auth, catalog, chat, collab_sync, comments, conversations,
-               decisions, lld, llm, history, intake, observability, review, secrets_box, suggestions, usage, users, exports, diagrams)
+               decisions, lld, llm, history, intake, observability, review, secrets_box, suggestions, usage, users, exports, diagrams, jira)
 from .analysis import full_analysis, trace_requirement
 from .codegraph.service import CodeGraphService
 from .codegraph.service import register_routes as register_codegraph_routes
@@ -654,6 +654,7 @@ def create_app(store: Store | None = None) -> FastAPI:
                            broadcast=broadcast_room)
     # ---- spec exports (Markdown, print/PDF, JSON, YAML) and coding-agent guides (exports.py) ----
     exports.register_routes(app, store, authz=authz, state_or_404=state_or_404)
+    jira.register_routes(app, store, authz=authz, state_or_404=state_or_404, broadcast=broadcast_room)
 
     # ---- OpenSpec: spec-driven changes stored per project (openspec_service.py) ----
     def openspec_context(pid: str, branch: str) -> dict[str, Any]:

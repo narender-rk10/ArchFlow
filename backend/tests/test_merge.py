@@ -161,7 +161,7 @@ def test_requirement_merges():
     req = r.state.requirements["REQ-001"]
     assert (req.priority, req.category) == ("critical", "performance")
     assert req.acceptance_criteria == ["p95 < 300 ms", "Load test in CI"]
-    assert "REQ-002" not in r.state.requirements
+    assert r.state.requirements["REQ-002"].deleted  # a soft delete stays a soft delete (restorable)
     # both added REQ-003 with different titles: theirs is renumbered and its links follow
     assert r.renumbered == [{"from": "REQ-003", "to": "REQ-004", "title": "Customers get e-mail receipts"}]
     assert r.state.requirements["REQ-003"].title == "Admins export orders"
@@ -177,6 +177,22 @@ def test_kept_requirement_keeps_its_links():
     r = merge.merge_states(base, ours, theirs, {"requirements/REQ-002": {"choice": "ours"}})
     assert r.conflicts[0]["kind"] == "deleted-in-theirs"
     assert r.state.requirements["REQ-002"].priority == "high" and r.state.nodes["app"].requirement_ids == ["REQ-002"]
+
+
+def test_soft_delete_merges_and_applies_as_a_restorable_delete():
+    base = branch(base_state(), [{"op": "update_node", "id": "app", "changes": {"requirement_ids": ["REQ-002"]}}])
+    ours = branch(base, [{"op": "update_node", "id": "db", "changes": {"technology": "Aurora"}}])
+    theirs = branch(base, [{"op": "remove_requirement", "id": "REQ-002"}])
+    r = merge.merge_states(base, ours, theirs)
+    assert r.conflicts == [] and r.state.requirements["REQ-002"].deleted
+    applied, _ = apply_ops(ours, merge.plan_ops(ours, r.state))
+    assert applied.requirements["REQ-002"].deleted and applied.nodes["app"].requirement_ids == ["REQ-002"]
+    # and a requirement deleted on the target comes back when the merge keeps the other side's change
+    again = merge.merge_states(base, theirs, branch(base, [{"op": "update_requirement", "id": "REQ-002",
+                                                            "changes": {"priority": "high"}}]),
+                               {"requirements/REQ-002": {"choice": "theirs"}})
+    restored, _ = apply_ops(theirs, merge.plan_ops(theirs, again.state))
+    assert not restored.requirements["REQ-002"].deleted and restored.requirements["REQ-002"].priority == "high"
 
 
 # ---------------------------------------------------------------- merged state → ops

@@ -27,6 +27,12 @@ EXPECT_KEYS = {  # what each suite's runner checks; a typo would otherwise silen
                       "flags_any"},
     "lld": TEXT | {"element_types_all", "endpoints_any", "tables_any", "events_any", "components_any",
                    "links_requirements", "max_elements"},
+    "merge": TEXT | {"choices"},
+    "intake": TEXT | {"min_requirements", "max_requirements", "nfr_categories", "duplicates", "conflicts",
+                      "has_assumptions", "has_constraints", "has_open_questions", "sections"},
+    "guide": TEXT | {"grounded_share"},
+    "diagrams": TEXT | {"min_flows", "requirement_share"},
+    "jira": TEXT | {"min_points", "max_points"},
 }
 CASE_KEYS = {
     "compare": {"alternatives"},
@@ -36,6 +42,11 @@ CASE_KEYS = {
     "suggestions": {"mode", "selection", "last_question", "last_answer"},
     "review": {"focuses"},
     "lld": {"component"},
+    "merge": {"ours", "theirs"},
+    "intake": {"document"},
+    "guide": {"name", "memory", "decisions"},
+    "diagrams": set(),
+    "jira": set(),
 }
 
 

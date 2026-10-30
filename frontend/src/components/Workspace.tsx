@@ -24,7 +24,8 @@ import { AISettingsDialog } from "./OrgDialogs";
 import { CommandBar, type ChatDock, type ChatMode } from "./CommandBar";
 import { CommentsPanel } from "./CommentsPanel";
 import { NotificationBell } from "./NotificationBell";
-import type { AppNotification, Comment, Member } from "../types";
+import type { AppNotification, Comment, JiraLinks, Member } from "../types";
+import { JiraDialog } from "./JiraDialog";
 import { ConnectDialog } from "./ConnectDialog";
 import { ExportDialog } from "./ExportDialog";
 import { DiagramsDialog } from "./DiagramsDialog";
@@ -136,6 +137,8 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const [toolsOpen, setToolsOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
+  const [jiraOpen, setJiraOpen] = useState(false);
+  const [jira, setJira] = useState<JiraLinks | null>(null);
   const toolsRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!toolsOpen) return;
@@ -279,6 +282,10 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
   const loadMemory = useCallback(() => { api.memory(pid).then(setMemory).catch(() => {}); }, [pid]);
   const loadComments = useCallback(() => { api.comments(pid, branch).then(setComments).catch(() => {}); }, [pid, branch]);
   useEffect(() => { setComments([]); loadComments(); }, [loadComments]);
+  // Jira issues pushed for this project: keys and pulled status next to requirements and components.
+  const loadJira = useCallback(() => { api.jiraLinks(pid).then(setJira).catch(() => setJira(null)); }, [pid]);
+  useEffect(loadJira, [loadJira]);
+  const jiraByReq = Object.fromEntries((jira?.links ?? []).filter((l) => l.object_kind === "requirement").map((l) => [l.object_id, l]));
   // People you can @mention: refreshed when comments open and when someone new comes online (they may have just joined).
   const peerNames = live.peers.map((p) => p.name).sort().join("|");
   useEffect(() => {
@@ -868,7 +875,8 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         {state && tab === "requirements" && (
           <RequirementsPanel state={state} issues={analysis?.requirement_issues ?? []} traced={traced} onTrace={setTraced} readOnly={readOnly}
             send={send} onPrompt={(rid) => setPromptFor({ nodeIds: [], requirementIds: [rid] })}
-            pid={pid} branch={branch} isAdmin={can(role, "admin")} toast={toast} onMemoryChanged={loadMemory} />
+            pid={pid} branch={branch} isAdmin={can(role, "admin")} toast={toast} onMemoryChanged={loadMemory}
+            jira={jiraByReq} onJira={jira?.connected && can(role, "edit") ? () => setJiraOpen(true) : undefined} />
         )}
         {tab === "issues" && (
           <IssuesPanel pid={pid} branch={branch} analysis={analysis} aiAvailable={!!ai?.available} onFocus={focusIssue}
@@ -980,7 +988,7 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
         {dock === "right" && rightTab === "chat" && chatPanel}
         {state && (dock !== "right" || rightTab === "props") && (
           <Inspector catalog={catalog} state={state} nodeIds={selectedNodeIds} edgeIds={selectedEdgeIds} send={send}
-            pid={pid} branch={branch} onOpenInternals={openLevel} readOnly={readOnly}
+            pid={pid} branch={branch} onOpenInternals={openLevel} readOnly={readOnly} jira={jira?.links}
             stale={analysis?.stale_links} onReviewed={markReviewed}
             onPrompt={() => setPromptFor({ nodeIds: selectedNodeIds, requirementIds: [] })} />
         )}
@@ -988,6 +996,10 @@ function WorkspaceInner({ pid, branch, user, me, colorMode, themeToggle, onBranc
 
       {exportOpen && (
         <ExportDialog pid={pid} branch={branch} aiAvailable={!!ai?.available} toast={toast} onClose={() => setExportOpen(false)} />
+      )}
+      {jiraOpen && jira && (
+        <JiraDialog pid={pid} branch={branch} defaultKey={jira.project_key} aiAvailable={!!ai?.available}
+          onClose={() => setJiraOpen(false)} onChanged={loadJira} />
       )}
       {connectOpen && project && (
         <ConnectDialog orgId={project.org_id ?? "org-default"} canManage={can(role, "admin")} onClose={() => setConnectOpen(false)} />
