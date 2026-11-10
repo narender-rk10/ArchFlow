@@ -28,6 +28,8 @@ picks. With no AI configured there is no suggestion.
 
 from __future__ import annotations
 
+import functools
+
 import asyncio
 import json
 import logging
@@ -38,10 +40,11 @@ from typing import Any, Awaitable, Callable
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field, ValidationError
 
-from . import agents, llm
+from . import agents, approvals, llm
+
 from .collab_sync import state_patch
 from .diff import diff_states, diff_to_text
-from .models import Edge, Node, ProjectState, Requirement
+from .models import Edge, Node, ProjectState, Requirement, keep_requirement_seq
 from .ops import next_requirement_id
 
 log = logging.getLogger("archflow.merge")
@@ -175,7 +178,10 @@ class _Merger:
         self.res = resolutions or {}
         self.names = {**{k: n.name for k, n in base.nodes.items()}, **{k: n.name for k, n in theirs.nodes.items()},
                       **{k: n.name for k, n in ours.nodes.items()}}
-        self.out = MergeResult(state=ProjectState(rev=ours.rev))
+        self.out = MergeResult(state=keep_requirement_seq(ProjectState(rev=ours.rev), base, ours, theirs))
+        # the prefix: theirs if they changed it, else ours
+        self.out.state.requirement_prefix = (theirs.requirement_prefix if theirs.requirement_prefix
+                                             != base.requirement_prefix else ours.requirement_prefix)
 
     # -- resolutions
     def _pick(self, cid: str, ours: Any, theirs: Any, allow_custom: bool = True) -> Any:
@@ -258,7 +264,9 @@ class _Merger:
     # -- requirement ids both sides added
     def _renumber(self) -> ProjectState:
         theirs = self.theirs.model_copy(deep=True)
-        taken = ProjectState(requirements={**self.base.requirements, **self.ours.requirements, **theirs.requirements})
+        taken = keep_requirement_seq(
+            ProjectState(requirements={**self.base.requirements, **self.ours.requirements, **theirs.requirements}),
+            self.base, self.ours, theirs)
         renames: dict[str, str] = {}
         for rid, req in list(theirs.requirements.items()):
             mine = self.ours.requirements.get(rid)
@@ -429,6 +437,8 @@ def plan_ops(cur: ProjectState, new: ProjectState) -> list[dict[str, Any]]:
             ops.append({"op": "remove_edge", "id": eid})
             readd.add(eid)
     # 2. requirements first, so components can link to them
+    if new.requirement_prefix != cur.requirement_prefix:
+        ops.append({"op": "set_requirement_prefix", "prefix": new.requirement_prefix})
     for rid, r in new.requirements.items():
         old = cur.requirements.get(rid)
         if old is None:
@@ -505,7 +515,7 @@ def preview(store: Any, pid: str, source: str, target: str,
 
 async def apply(store: Any, pid: str, source: str, target: str, resolutions: dict[str, dict[str, Any]], actor: str,
                 commit_ops: Callable[..., Awaitable[tuple[ProjectState, list[str]]]],
-                expect: tuple[int | None, int | None] = (None, None)) -> dict[str, Any]:
+                expect: tuple[int | None, int | None] = (None, None), actor_id: str | None = None) -> dict[str, Any]:
     """Apply a merge whose every conflict is resolved. Raises MergeError (unresolved or stale) and KeyError."""
     payload, result, ours = preview(store, pid, source, target, resolutions)
     source_rev, target_rev = expect
@@ -519,10 +529,10 @@ async def apply(store: Any, pid: str, source: str, target: str, resolutions: dic
     theirs = store.get_state(pid, source)
     head = store.head_version(pid, source)
     if head is None or state_patch(store.get_version(pid, head)["state"], theirs):
-        head = store.commit(pid, source, f"Snapshot for merging into {target}", actor, theirs)["number"]
-    safety = store.commit(pid, target, f"Before merging {source}", actor, ours) if ops else None
+        head = store.commit(pid, source, f"Snapshot for merging into {target}", actor, theirs, actor_id)["number"]
+    safety = store.commit(pid, target, f"Before merging {source}", actor, ours, actor_id) if ops else None
     new_state, summary = await commit_ops(pid, target, ops, f"{actor} (merge from {source})") if ops else (ours, [])
-    version = store.commit(pid, target, merge_message(source, head, target), actor, new_state)
+    version = store.commit(pid, target, merge_message(source, head, target), actor, new_state, actor_id)
     return {"version": version["number"], "safety_version": safety["number"] if safety else None,
             "source_version": head, "branch": target, "source_branch": source, "summary": summary,
             "conflicts_resolved": len(result.conflicts), "dropped": result.dropped,
@@ -636,9 +646,12 @@ def register_routes(app: FastAPI, store: Any, *, authz: Any,
     @app.post("/api/projects/{pid}/merge/apply")
     async def merge_apply(pid: str, body: MergeApplyIn, a=Depends(edit)):
         resolutions = {r.id: r.model_dump() for r in body.resolutions}
+        if approvals.is_protected(store, a.org_id, body.target):  # only an approved branch merges into it
+            approvals.check_adopt(store, a.org_id, pid, body.source, body.target, "merging into a protected branch")
         try:
-            out = await apply(store, pid, body.source, body.target, resolutions, a.actor, commit_ops,
-                              (body.source_rev, body.target_rev))
+            out = await apply(store, pid, body.source, body.target, resolutions, a.actor,
+                              functools.partial(commit_ops, via_review=True),
+                              (body.source_rev, body.target_rev), a.user["id"])
         except KeyError as exc:
             raise HTTPException(404, f"branch '{exc.args[0]}' not found") from exc
         except StaleMerge as exc:

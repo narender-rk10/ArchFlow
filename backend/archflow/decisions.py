@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from . import approvals
 from . import evaluation as evaluation_mod
 from . import history, llm
-from .models import ProjectState
+from .models import ProjectState, keep_requirement_seq
 from .store import DECISION_STATUSES
 
 LOG_BRANCH = "main"
@@ -188,7 +188,7 @@ def chosen_branch(store: Any, pid: str, decision: dict[str, Any]) -> str | None:
 
 def with_bumped_revs(new: ProjectState, current: ProjectState) -> ProjectState:
     """Copy of ``new`` whose revisions all follow ``current`` (keeps conflict detection valid), as restore does."""
-    out = new.model_copy(deep=True)
+    out = keep_requirement_seq(new.model_copy(deep=True), current)
     out.rev = current.rev + 1
     for coll in (out.nodes, out.edges, out.requirements):
         for item in coll.values():
@@ -279,12 +279,12 @@ def register_routes(app: FastAPI, store: Any, *, authz: Any,
         target = body.target_branch
         if source == target:
             raise HTTPException(422, f"the chosen branch is already '{target}'")
-        approvals.check_adopt(store, a.org_id, pid, source)  # 409 unless approved, when the org requires it
+        approvals.check_adopt(store, a.org_id, pid, source, target)  # 409 unless approved, when required
         chosen_state = store.get_state(pid, source)
         current = store.get_state(pid, target)
         if current is None:
             raise HTTPException(404, f"branch '{target}' not found")
-        safety = store.commit(pid, target, f"Before adopting {source} ({did})", actor, current)
+        safety = store.commit(pid, target, f"Before adopting {source} ({did})", actor, current, a.user["id"])
         with store.transaction(pid, target) as current:
             if current is None:
                 raise HTTPException(404, f"branch '{target}' not found")
@@ -294,7 +294,7 @@ def register_routes(app: FastAPI, store: Any, *, authz: Any,
             store.log_activity(pid, target, actor, summary, adopted.rev)
             history.record(store, pid, target, actor, current, adopted)
         await sync_to_live_doc(pid, target, current, adopted, actor)
-        version = store.commit(pid, target, f"Adopted {source} ({did})", actor, adopted)
+        version = store.commit(pid, target, f"Adopted {source} ({did})", actor, adopted, a.user["id"])
         decision = update_decision(store, pid, did, {"status": "accepted"}, actor)
         await broadcast(pid, target, {"type": "state", "state": adopted.model_dump(), "actor": actor,
                                       "summary": summary})

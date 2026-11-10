@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from archflow.db.types import to_seconds
 from archflow.models import ProjectState
 from archflow.ops import apply_ops
 from archflow.store import DEFAULT_ORG_ID, Store
@@ -177,7 +178,7 @@ def test_versions_and_branches(store, org):
     assert store.get_version(pid, 99) is None
     listed = store.list_versions(pid)
     assert [v["number"] for v in listed] == [2, 1]
-    assert set(listed[0]) == {"number", "branch", "message", "author", "parent", "created_at"}
+    assert set(listed[0]) == {"number", "branch", "message", "author", "author_id", "parent", "created_at"}
 
     # branch from v1: first commit on the branch has parent = base_version
     store.create_branch(pid, "exp/x", full["state"], 1)
@@ -312,7 +313,7 @@ def test_migrations_build_the_same_schema_as_the_models(tmp_path):
     from archflow.db import migrate
 
     fresh = Store(tmp_path / "fresh.db")
-    assert migrate.current(fresh.engine) == "0009" and _schema_drift(fresh.engine) == []
+    assert migrate.current(fresh.engine) == "0013" and _schema_drift(fresh.engine) == []
     fresh.close()
     engine = create_engine(f"sqlite:///{tmp_path / 'migrated.db'}")
     cfg = migrate.config()
@@ -330,7 +331,7 @@ def test_migrations_build_the_same_schema_as_the_models(tmp_path):
 def test_pg_schema_matches_the_models(pg_store):
     from archflow.db import migrate
 
-    assert migrate.current(pg_store.engine) == "0009" and _schema_drift(pg_store.engine) == []
+    assert migrate.current(pg_store.engine) == "0013" and _schema_drift(pg_store.engine) == []
 
 
 # ---------------------------------------------------------------- sqlite migration
@@ -364,13 +365,30 @@ def test_sqlite_migrates_pre_org_db(tmp_path):
     Store(path).close()  # re-opening an already-migrated DB is a no-op
 
 
+def test_created_at_is_stored_precise_and_returned_to_the_second(tmp_path):
+    """SQLite keeps microseconds (so rows created in the same second sort in order); the store returns whole seconds.
+    Comparing a raw column with store output therefore needs to_seconds, as the dev-DB test below does."""
+    path = tmp_path / "archflow.db"
+    store = Store(path)
+    pid = store.create_project("Timestamps")["id"]
+    returned = {p["id"]: p["created_at"] for p in store.list_projects()}[pid]
+    store.close()
+    raw = sqlite3.connect(path)
+    stored = raw.execute("SELECT created_at FROM projects WHERE id = ?", (pid,)).fetchone()[0]
+    raw.close()
+    assert "." in stored, stored  # microseconds kept on disk
+    assert "." not in returned and returned.endswith("+00:00"), returned  # whole seconds, UTC, from the store
+    assert to_seconds(stored) == returned
+
+
 @pytest.mark.skipif(not DEV_DB.exists(), reason="no dev DB at backend/data/archflow.db")
 def test_sqlite_migrates_copy_of_dev_db(tmp_path):
     """Migrate a COPY of the real dev DB; the original is never opened for writing."""
     copy = tmp_path / "archflow.db"
     shutil.copy2(DEV_DB, copy)
     raw = sqlite3.connect(copy)
-    before = {r[0]: r for r in raw.execute("SELECT id, name, description, created_at FROM projects")}
+    # Stored with microseconds (newer databases) or to the second (older ones); the store returns seconds either way.
+    before = {r[0]: (*r[:3], to_seconds(r[3])) for r in raw.execute("SELECT id, name, description, created_at FROM projects")}
     cols = {r[1] for r in raw.execute("PRAGMA table_info(projects)")}
     orgs_before = ({r[0]: r[1] for r in raw.execute("SELECT id, org_id FROM projects")}
                    if "org_id" in cols else {pid: DEFAULT_ORG_ID for pid in before})
@@ -458,5 +476,5 @@ def test_ready_endpoint_reports_the_schema():
     with TestClient(create_app(Store(":memory:"))) as c:
         r = c.get("/api/ready")
         body = r.json()
-        assert r.status_code == 200 and {k: body[k] for k in ("ready", "database", "schema", "expected")} == {"ready": True, "database": "sqlite", "schema": "0009", "expected": "0009"}
+        assert r.status_code == 200 and {k: body[k] for k in ("ready", "database", "schema", "expected")} == {"ready": True, "database": "sqlite", "schema": "0013", "expected": "0013"}
         assert "redis" in body  # reported, never required

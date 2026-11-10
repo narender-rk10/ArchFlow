@@ -7,6 +7,8 @@ MCP agent — goes through the same operation pipeline in ``ops.py``.
 
 from __future__ import annotations
 
+import re
+
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -90,6 +92,10 @@ class Requirement(Versioned):
     deleted: bool = False
 
 
+REQ_PREFIX_PATTERN = r"^[A-Z][A-Z0-9]{0,9}$"
+REQ_PREFIX_RE = re.compile(REQ_PREFIX_PATTERN[1:-1])
+
+
 class ProjectState(BaseModel):
     """The whole editable model of one branch."""
 
@@ -97,6 +103,25 @@ class ProjectState(BaseModel):
     nodes: dict[str, Node] = Field(default_factory=dict)
     edges: dict[str, Edge] = Field(default_factory=dict)
     requirements: dict[str, Requirement] = Field(default_factory=dict)
+    # Highest REQ-n ever issued on this branch. It never goes down, so a permanently removed requirement's id is not
+    # handed out again: its history rows and Jira/GitHub links are keyed by that id and would attach to the new one.
+    requirement_seq: int = 0
+    # New requirement ids are "<prefix>-n" (e.g. PAY-001). Changing it keeps existing ids and continues the numbering.
+    requirement_prefix: str = Field("REQ", pattern=REQ_PREFIX_PATTERN)
+
+
+def requirement_number(rid: str) -> int:
+    """n for "<PREFIX>-n" (any project prefix, e.g. REQ-7 or PAY-012), else 0."""
+    head, _, num = rid.partition("-")
+    return int(num) if REQ_PREFIX_RE.fullmatch(head) and num.isdigit() else 0
+
+
+def keep_requirement_seq(new: ProjectState, *previous: ProjectState) -> ProjectState:
+    """Set ``new.requirement_seq`` to the highest of its own, ``previous`` states' and every id present (in place).
+    For code that replaces a branch's state wholesale (restore, adopt, merge, the collab projection)."""
+    new.requirement_seq = max([new.requirement_seq, *(p.requirement_seq for p in previous),
+                               *(requirement_number(r) for s in (new, *previous) for r in s.requirements)], default=0)
+    return new
 
 
 # Fields that clients may not set directly through an update op.

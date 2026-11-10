@@ -159,7 +159,8 @@ class Version(Base):
     number: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     branch: Mapped[str] = mapped_column(Text, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
-    author: Mapped[str] = mapped_column(Text, nullable=False)
+    author: Mapped[str] = mapped_column(Text, nullable=False)  # display name, for listings
+    author_id: Mapped[str | None] = mapped_column(Text)  # who saved it (user id); None for system snapshots and old rows
     parent: Mapped[int | None] = mapped_column(Integer)
     state_json: Mapped[ProjectState] = mapped_column(StateJSON, nullable=False)
     created_at: Mapped[str] = created()
@@ -238,6 +239,11 @@ class ApiToken(Base):
     expires_at: Mapped[float | None] = mapped_column(Double)
     last_used_at: Mapped[str | None] = mapped_column(UTCDateTime)
     revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    # How the user had signed in when the token was granted: "password" or "sso:<org_id>" (None: before this was
+    # recorded, treated as "password"). MCP calls apply the org's require-SSO rule to it, as the web does to sessions.
+    auth_method: Mapped[str | None] = mapped_column(Text)
+    # Personal access tokens may be limited to some projects (None: every project in the org).
+    project_ids: Mapped[list[str] | None] = mapped_column(JSONType)
 
 
 # --------------------------------------------------------------------------- decisions, code graphs
@@ -329,7 +335,7 @@ class ProjectMemory(Base):
 class Comment(Base):
     """A comment thread (``parent_id`` empty) or a reply, on a component, a decision or the whole project."""
     __tablename__ = "comments"
-    __table_args__ = (CheckConstraint("target_type IN ('project', 'node', 'decision')", name="ck_comments_target"),
+    __table_args__ = (CheckConstraint("target_type IN ('project', 'node', 'decision', 'requirement', 'edge')", name="ck_comments_target"),
                       Index("idx_comments_project", "project_id", "branch", "created_at"),
                       Index("idx_comments_parent", "parent_id"))
     id: Mapped[str] = mapped_column(Text, primary_key=True)  # cm-<hex>
@@ -393,6 +399,8 @@ class OrgApprovalPolicy(Base):
     org_id: Mapped[str] = mapped_column(Text, _fk("orgs.id"), primary_key=True)
     required_approvals: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     require_for_adopt: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    # main changes only through an approved merge or adoption (no direct edits, AI, imports or restores)
+    protect_main: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     updated_by: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[str] = mapped_column(UTCDateTime, nullable=False, default=now, onupdate=now)
 

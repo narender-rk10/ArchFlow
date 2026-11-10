@@ -72,7 +72,7 @@ AI_TRACE_FILTERS = ("project_id", "feature", "prompt", "status", "user_id", "par
 AI_TRACE_LIST_COLS = ("id", "org_id", "project_id", "parent_id", "user_id", "user_name", "feature", "prompt", "agent",
                       "status", "error", "question", "answer", "models", "prompt_tokens", "completion_tokens",
                       "cost_usd", "latency_ms", "model_calls", "tool_calls", "created_at")
-COMMENT_TARGETS = ("project", "node", "decision")
+COMMENT_TARGETS = ("project", "node", "decision", "requirement", "edge")
 COMMENT_COLS = ("id", "project_id", "branch", "target_type", "target_id", "parent_id", "author_id", "author_name",
                 "body", "mentions", "resolved", "resolved_by", "created_at", "edited_at")
 NOTIFICATION_COLS = ("id", "project_id", "branch", "comment_id", "thread_id", "version", "kind", "actor_name", "preview",
@@ -96,7 +96,7 @@ AUTH_SETTINGS_COLS = ("org_id", "sso_enabled", "issuer", "client_id", "ciphertex
                       "require_sso", "require_mfa", "updated_by", "updated_at")
 AUTH_SETTINGS_FIELDS = AUTH_SETTINGS_COLS[1:-2]
 TOKEN_COLS = ("id", "kind", "org_id", "user_name", "user_id", "scopes", "client_id", "name", "resource",
-              "created_at", "expires_at", "last_used_at", "revoked")
+              "created_at", "expires_at", "last_used_at", "revoked", "auth_method", "project_ids")
 
 
 def code_graph_id() -> str:
@@ -179,6 +179,9 @@ class Store:
         # within a process; the row lock covers other processes.
         self.lock = threading.RLock()
         self._local = threading.local()  # .session = the active transaction() session on this thread
+        # Called with the user ids that just received notifications (after the rows are committed); the API pushes
+        # a live "notifications changed" message to those users' open tabs (main.py).
+        self.on_notify: Any = None
         migrate.upgrade(self.engine)
         with self._s() as s:
             if s.get(Org, DEFAULT_ORG_ID) is None:
@@ -727,15 +730,18 @@ class Store:
             s.add(Branch(project_id=pid, name=name, state_json=state, base_version=base_version, created_at=now()))
 
     # ---- versions -------------------------------------------------------
-    def commit(self, pid: str, branch: str, message: str, author: str, state: ProjectState) -> dict[str, Any]:
+    def commit(self, pid: str, branch: str, message: str, author: str, state: ProjectState,
+               author_id: str | None = None) -> dict[str, Any]:
+        """Save ``state`` as the next version. ``author`` is the display name; ``author_id`` the user who saved it
+        (None for system snapshots), which the self-approval rule compares."""
         with self._s() as s:
             self._lock_row(s, select(Project.id).where(Project.id == pid))  # serializes version numbers
             number = (s.scalar(select(func.max(Version.number)).where(Version.project_id == pid)) or 0) + 1
             parent = s.scalar(select(func.max(Version.number)).where(Version.project_id == pid, Version.branch == branch))
             if parent is None:
                 parent = s.scalar(select(Branch.base_version).where(Branch.project_id == pid, Branch.name == branch))
-            s.add(Version(project_id=pid, number=number, branch=branch, message=message, author=author, parent=parent,
-                          state_json=state, created_at=now()))
+            s.add(Version(project_id=pid, number=number, branch=branch, message=message, author=author,
+                          author_id=author_id, parent=parent, state_json=state, created_at=now()))
         return self.get_version(pid, number, with_state=False)
 
     def head_version(self, pid: str, branch: str) -> int | None:
@@ -744,7 +750,7 @@ class Store:
 
     def list_versions(self, pid: str) -> list[dict[str, Any]]:
         with self._s() as s:
-            rows = s.execute(select(Version.number, Version.branch, Version.message, Version.author, Version.parent,
+            rows = s.execute(select(Version.number, Version.branch, Version.message, Version.author, Version.author_id, Version.parent,
                                     Version.created_at).where(Version.project_id == pid).order_by(Version.number.desc()))
             return [dict(r._mapping) for r in rows]
 
@@ -753,7 +759,7 @@ class Store:
             v = s.get(Version, (pid, number))
             if v is None:
                 return None
-            out = v.to_dict("project_id", "number", "branch", "message", "author", "parent", "created_at")
+            out = v.to_dict("project_id", "number", "branch", "message", "author", "author_id", "parent", "created_at")
             if with_state:
                 out["state"] = v.state_json
             return out
@@ -840,12 +846,14 @@ class Store:
 
     def create_token(self, token_hash: str, kind: str, org_id: str, user_name: str, scopes: list[str],
                      client_id: str | None = None, name: str = "", expires_at: float | None = None,
-                     resource: str | None = None, user_id: str | None = None) -> dict[str, Any]:
+                     resource: str | None = None, user_id: str | None = None,
+                     auth_method: str | None = None, project_ids: list[str] | None = None) -> dict[str, Any]:
         tid = f"tok-{secrets.token_hex(6)}"
         with self._s() as s:
             s.add(ApiToken(id=tid, token_hash=token_hash, kind=kind, org_id=org_id, user_name=user_name,
                            user_id=user_id, scopes=list(scopes), client_id=client_id, name=name, resource=resource,
-                           created_at=now(), expires_at=expires_at, revoked=False))
+                           created_at=now(), expires_at=expires_at, revoked=False, auth_method=auth_method,
+                           project_ids=list(project_ids) if project_ids else None))
         return self.get_token_by_id(tid)
 
     def get_token(self, token_hash: str) -> dict[str, Any] | None:
@@ -1134,6 +1142,7 @@ class Store:
                 s.add(Notification(user_id=uid, project_id=comment["project_id"], branch=comment["branch"],
                                    comment_id=comment["id"], thread_id=thread, kind=kind, actor_name=actor_name,
                                    preview=preview, created_at=now()))
+        self._notified(user_ids)
 
     def add_review_notifications(self, user_ids: list[str], *, pid: str, branch: str, version: int, kind: str,
                                  actor_name: str, preview: str = "") -> None:
@@ -1143,18 +1152,33 @@ class Store:
                 s.add(Notification(user_id=uid, project_id=pid, branch=branch, comment_id=None, thread_id="",
                                    version=version, kind=kind, actor_name=actor_name, preview=preview[:200],
                                    created_at=now()))
+        self._notified(user_ids)
+
+    def _notified(self, user_ids: list[str]) -> None:
+        if user_ids and self.on_notify:
+            try:
+                self.on_notify(list(dict.fromkeys(user_ids)))
+            except Exception:  # noqa: BLE001 - a live push is best effort; the bell also polls
+                pass
+
+    @staticmethod
+    def _visible_notifications(user_id: str):
+        """The user's notifications on projects in orgs they still belong to (removed members keep their rows, but
+        must not see them, nor have them counted as unread with no way to open or clear them)."""
+        return (select(Notification).join(Project, Project.id == Notification.project_id)
+                .join(Membership, (Membership.org_id == Project.org_id) & (Membership.user_id == user_id))
+                .where(Notification.user_id == user_id))
 
     def list_notifications(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        q = (self._visible_notifications(user_id).add_columns(Project.name)
+             .order_by(Notification.created_at.desc(), Notification.id.desc()).limit(limit))
         with self._s() as s:
-            rows = s.execute(select(Notification, Project.name).join(Project, Project.id == Notification.project_id)
-                             .where(Notification.user_id == user_id)
-                             .order_by(Notification.created_at.desc(), Notification.id.desc()).limit(limit))
-            return [{**n.to_dict(*NOTIFICATION_COLS), "project_name": name} for n, name in rows]
+            return [{**n.to_dict(*NOTIFICATION_COLS), "project_name": name} for n, name in s.execute(q)]
 
     def count_unread_notifications(self, user_id: str) -> int:
+        q = self._visible_notifications(user_id).where(Notification.read == False)  # noqa: E712
         with self._s() as s:
-            return s.scalar(select(func.count()).select_from(Notification)
-                            .where(Notification.user_id == user_id, Notification.read == False)) or 0  # noqa: E712
+            return s.scalar(select(func.count()).select_from(q.subquery())) or 0
 
     def mark_notifications_read(self, user_id: str, ids: list[int] | None = None) -> int:
         """Mark the given notifications (default: all of them) read; returns how many changed."""
@@ -1188,14 +1212,16 @@ class Store:
         with self._s() as s:
             p = s.get(OrgApprovalPolicy, org_id)
             if p is None:
-                return {"required_approvals": 1, "require_for_adopt": False, "updated_by": None, "updated_at": None}
-            return p.to_dict("required_approvals", "require_for_adopt", "updated_by", "updated_at")
+                return {"required_approvals": 1, "require_for_adopt": False, "protect_main": False,
+                        "updated_by": None, "updated_at": None}
+            return p.to_dict("required_approvals", "require_for_adopt", "protect_main", "updated_by", "updated_at")
 
     def set_approval_policy(self, org_id: str, required_approvals: int, require_for_adopt: bool,
-                            user: str) -> dict[str, Any]:
+                            user: str, protect_main: bool = False) -> dict[str, Any]:
         with self._s() as s:
             self._upsert(s, OrgApprovalPolicy, {"org_id": org_id, "required_approvals": required_approvals,
-                                                "require_for_adopt": require_for_adopt, "updated_by": user,
+                                                "require_for_adopt": require_for_adopt,
+                                                "protect_main": protect_main, "updated_by": user,
                                                 "updated_at": now()}, ["org_id"])
         return self.get_approval_policy(org_id)
 

@@ -33,7 +33,7 @@ from .merge import register_routes as register_merge_routes
 from .authz import ROLES, Access, Authz, CSRFMiddleware, can, cap_scopes
 from .diff import diff_states, diff_to_text
 from .mcp_remote import Services, build_remote_mcp
-from .models import ProjectState
+from .models import ProjectState, keep_requirement_seq
 from .ops import ConflictError, OpError, apply_ops, resolve_node, unique_slug
 from .store import Store, default_store
 from .templates import TEMPLATES, build_template
@@ -101,6 +101,7 @@ class TokenIn(BaseModel):
     user_name: str = ""  # ignored: tokens are created for the signed-in user
     access: str = Field("write", pattern="^(read|write)$")
     expires_in_days: int | None = Field(None, ge=1, le=3650)
+    project_ids: list[str] | None = Field(None, max_length=100)  # None or empty: every project in the org
 
 
 class ChatIn(BaseModel):
@@ -151,6 +152,17 @@ class Hub:
         await self.bus.present(room, id(ws), user)
         await self.broadcast_presence(room)
 
+    async def subscribe(self, room: str, ws: WebSocket) -> None:
+        """Join a room for server messages only (no presence), e.g. a user's notification channel."""
+        self.rooms.setdefault(room, {})[ws] = {}
+
+    def unsubscribe(self, room: str, ws: WebSocket) -> None:
+        self.rooms.get(room, {}).pop(ws, None)
+
+    @staticmethod
+    def user_room(user_id: str) -> str:
+        return f"user:{user_id}"
+
     async def leave(self, room: str, ws: WebSocket) -> None:
         self.rooms.get(room, {}).pop(ws, None)
         await self.bus.absent(room, id(ws))
@@ -194,6 +206,14 @@ def create_app(store: Store | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         # The remote MCP endpoint's session manager must run for the lifetime of the app.
         hub.bus.start(hub.deliver)  # cross-instance fan-out (only with ARCHFLOW_REDIS_URL)
+        loop = asyncio.get_running_loop()
+
+        def push_notifications(user_ids: list[str]) -> None:
+            # Called from route handlers (event loop) and from worker threads (sync routes): schedule on the loop.
+            for uid in user_ids:
+                asyncio.run_coroutine_threadsafe(hub.broadcast(Hub.user_room(uid), {"type": "notifications"}), loop)
+
+        store.on_notify = push_notifications
         try:
             async with app.state.mcp.session_manager.run():
                 yield
@@ -231,9 +251,13 @@ def create_app(store: Store | None = None) -> FastAPI:
             # Collab server unreachable: drop the persisted document so it is rebuilt from this state.
             store.delete_ydoc(pid, branch)
 
-    async def commit_ops(pid: str, branch: str, ops: list[dict[str, Any]], actor: str) -> tuple[ProjectState, list[str]]:
-        """The one place state changes: apply atomically, persist, log, broadcast."""
-        project_or_404(pid)
+    async def commit_ops(pid: str, branch: str, ops: list[dict[str, Any]], actor: str,
+                         via_review: bool = False) -> tuple[ProjectState, list[str]]:
+        """The one place state changes: apply atomically, persist, log, broadcast. A protected branch only changes
+        through an approved merge (``via_review``)."""
+        project = project_or_404(pid)
+        if not via_review:
+            approvals.check_writable(store, project["org_id"], pid, branch)
         with store.transaction(pid, branch) as state:  # row lock: safe across server processes
             if state is None:
                 raise HTTPException(404, f"branch '{branch}' not found")
@@ -309,13 +333,51 @@ def create_app(store: Store | None = None) -> FastAPI:
                for p in store.list_projects(o["id"])]
         return sorted(out, key=lambda p: p["created_at"], reverse=True)
 
+    @app.get("/api/search")
+    def search_everything(q: str = Query(..., min_length=2, max_length=100), limit: int = Query(40, ge=1, le=100),
+                          user: dict = Depends(authz.current_user)):
+        """Search the main branch of every project you can open: components, requirements, decisions and comments.
+        Plain case-insensitive substring match, best (title) matches first."""
+        needle = q.strip().lower()
+        hits: list[tuple[int, dict[str, Any]]] = []
+
+        def add(project: dict[str, Any], kind: str, item_id: str, title: str, *more: str) -> None:
+            text = " ".join(m for m in more if m)
+            if needle in title.lower():
+                rank = 0
+            elif needle in text.lower():
+                rank = 1
+            else:
+                return
+            at = text.lower().find(needle)
+            snippet = text[max(0, at - 40): at + 80].strip() if rank else text[:120]
+            hits.append((rank, {"project_id": project["id"], "project_name": project["name"], "kind": kind,
+                                "id": item_id, "title": title, "snippet": snippet}))
+
+        projects = [p for o in store.list_user_orgs(user["id"]) if not authz.policy_block(user, o["id"], o["role"])
+                    for p in store.list_projects(o["id"])][:500]
+        for p in projects:
+            add(p, "project", p["id"], p["name"], p.get("description") or "")
+            state = store.get_state(p["id"], "main")
+            if state is not None:
+                for n in state.nodes.values():
+                    add(p, "component", n.id, n.name, n.technology, n.description)
+                for r in state.requirements.values():
+                    add(p, "requirement", r.id, f"{r.id} {r.title}", r.description, " ".join(r.acceptance_criteria))
+            for d in store.list_decisions(p["id"]):
+                add(p, "decision", d["id"], f"{d['id']} {d['title']}", d.get("context") or "", d.get("decision") or "")
+            for c in store.list_comments(p["id"], "main"):
+                add(p, "comment", str(c["id"]), c["author_name"], c["body"])
+        hits.sort(key=lambda h: h[0])
+        return {"query": q, "results": [h for _, h in hits[:limit]], "total": len(hits)}
+
     @app.post("/api/projects", status_code=201)
     def create_project(body: ProjectIn, user: dict = Depends(authz.current_user)):
         a = authz.check_org(user, body.org_id, "edit")
         project = store.create_project(body.name, body.description, build_template(body.template), org_id=a.org_id)
         state = store.get_state(project["id"], "main")
         if state.nodes or state.requirements:
-            store.commit(project["id"], "main", f"Created from template '{body.template}'", a.actor, state)
+            store.commit(project["id"], "main", f"Created from template '{body.template}'", a.actor, state, a.user["id"])
         return project
 
     @app.delete("/api/projects/{pid}", status_code=204)
@@ -327,7 +389,8 @@ def create_app(store: Store | None = None) -> FastAPI:
         state = state_or_404(pid, branch)
         return {"project": a.project, "branch": branch, "branches": store.list_branches(pid),
                 "head_version": store.head_version(pid, branch), "state": state.model_dump(),
-                "role": a.role, "ai_available": llm.available(a.org_id)}
+                "role": a.role, "ai_available": llm.available(a.org_id),
+                "protected": approvals.is_protected(store, a.org_id, branch)}
 
     # ---- operations ----
     @app.post("/api/projects/{pid}/ops")
@@ -342,9 +405,9 @@ def create_app(store: Store | None = None) -> FastAPI:
         return store.list_activity(pid, branch, limit)
 
     # ---- versions & branches ----
-    async def commit_version(pid: str, branch: str, message: str, author: str) -> dict[str, Any]:
+    async def commit_version(pid: str, branch: str, message: str, author: str, author_id: str | None = None) -> dict[str, Any]:
         state = state_or_404(pid, branch)
-        version = store.commit(pid, branch, message, author, state)
+        version = store.commit(pid, branch, message, author, state, author_id)
         await hub.broadcast(Hub.key(pid, branch), {"type": "versions", "actor": author})
         integrations.notify(store, project_or_404(pid).get("org_id"), pid, "version",
                             f"{author} saved v{version['number']} on {branch}", message, branch=branch)
@@ -358,7 +421,7 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     @app.post("/api/projects/{pid}/commit", status_code=201)
     async def commit(pid: str, body: CommitIn, branch: str = "main", a: Access = Depends(edit)):
-        return await commit_version(pid, branch, body.message, a.actor)
+        return await commit_version(pid, branch, body.message, a.actor, a.user["id"])
 
     @app.get("/api/projects/{pid}/versions")
     def versions(pid: str, a: Access = Depends(read)):
@@ -387,17 +450,18 @@ def create_app(store: Store | None = None) -> FastAPI:
 
     @app.post("/api/projects/{pid}/restore")
     async def restore(pid: str, body: RestoreIn, branch: str = "main", a: Access = Depends(edit)):
+        approvals.check_writable(store, a.org_id, pid, branch)
         v = store.get_version(pid, body.version)
         if not v:
             raise HTTPException(404, "version not found")
         before = store.get_state(pid, branch)
         if before is None:
             raise HTTPException(404, f"branch '{branch}' not found")
-        safety = store.commit(pid, branch, f"Before restoring v{body.version}", a.actor, before)  # undo point
+        safety = store.commit(pid, branch, f"Before restoring v{body.version}", a.actor, before, a.user["id"])  # undo point
         with store.transaction(pid, branch) as current:
             if current is None:
                 raise HTTPException(404, f"branch '{branch}' not found")
-            restored = v["state"].model_copy(deep=True)
+            restored = keep_requirement_seq(v["state"].model_copy(deep=True), current)  # never reissue a purged id
             restored.rev = current.rev + 1  # keep revisions monotonic so conflict detection stays valid
             for coll in (restored.nodes, restored.edges, restored.requirements):
                 for item in coll.values():
@@ -657,7 +721,7 @@ def create_app(store: Store | None = None) -> FastAPI:
                                     replace=body.mode != "merge")
         new_state, summary = await commit_ops(pid, target, ops, f"{a.actor} (design chat)")
         version = store.commit(pid, target, f"Applied architecture option: {body.option.get('name', 'option')}",
-                               a.actor, new_state)
+                               a.actor, new_state, a.user["id"])
         await hub.broadcast(Hub.key(pid, target), {"type": "versions", "actor": a.actor})
         if conv:  # record the choice; a design chat follows the draft branch it created
             name = body.option.get("name", "option")
@@ -724,7 +788,7 @@ def create_app(store: Store | None = None) -> FastAPI:
         read-only connection (the collab server rejects their document updates)."""
         state_or_404(pid, branch)
         doc = collab_sync.doc_name(pid, branch)
-        read_only = not a.can("edit")
+        read_only = not a.can("edit") or approvals.is_protected(store, a.org_id, branch)
         try:
             ticket = collab_sync.sign_ticket({"uid": a.user["id"], "name": a.user["name"][:40],
                                               "color": color if COLOR_RE.match(color) else "#888888",
@@ -819,6 +883,28 @@ def create_app(store: Store | None = None) -> FastAPI:
             pass
         finally:
             await hub.leave(room, ws)
+
+    @app.websocket("/ws/notifications")
+    async def ws_notifications(ws: WebSocket):
+        """Live "your notifications changed" messages for the signed-in user (the bell reloads on each)."""
+        origin = ws.headers.get("origin")
+        if origin and users.origin_of(origin) not in origins:
+            await ws.close(code=4403)
+            return
+        user = authz.user_from_token(ws.cookies.get(users.SESSION_COOKIE))
+        if not user:
+            await ws.close(code=4401)
+            return
+        await ws.accept()
+        room = Hub.user_room(user["id"])
+        await hub.subscribe(room, ws)
+        try:
+            while True:
+                await ws.receive_text()  # nothing to receive; keeps the socket open until the client goes
+        except WebSocketDisconnect:
+            pass
+        finally:
+            hub.unsubscribe(room, ws)
 
     # ---- remote MCP server (Streamable HTTP + OAuth 2.1) ----
     mcp = build_remote_mcp(Services(store=store, commit_ops=commit_ops, commit_version=commit_version,
@@ -945,7 +1031,11 @@ def create_app(store: Store | None = None) -> FastAPI:
         scopes = cap_scopes(a.role, requested)
         if not scopes:
             raise HTTPException(403, "Your role cannot create tokens")
-        secret, record = auth.create_pat(store, org_id, a.user, body.name, scopes, body.expires_in_days)
+        projects = list(dict.fromkeys(body.project_ids or []))
+        in_org = {p["id"] for p in store.list_projects(org_id)}
+        if unknown := [p for p in projects if p not in in_org]:
+            raise HTTPException(422, f"Not projects of this organization: {', '.join(unknown[:5])}")
+        secret, record = auth.create_pat(store, org_id, a.user, body.name, scopes, body.expires_in_days, projects or None)
         return {"token": secret, **record}
 
     @app.delete("/api/orgs/{org_id}/tokens/{token_id}", status_code=204)

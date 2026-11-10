@@ -13,6 +13,7 @@ os.environ["ARCHFLOW_AI"] = "offline"
 import pytest  # noqa: E402
 from authhelp import ORIGIN, member_client, new_client, signup  # noqa: E402
 
+from archflow import auth  # noqa: E402
 from archflow.main import create_app  # noqa: E402
 from archflow.store import Store  # noqa: E402
 
@@ -346,3 +347,45 @@ def test_generate_change_spec_tool(env, monkeypatch):
     path = next(k for k in files if k.endswith("/proposal.md"))
     err, _, text = tool(client, rw["access_token"], "get_openspec_file", project_id=pid, path=path)
     assert not err and "## Why" in text
+
+
+def test_org_sign_in_rules_apply_to_agents(env):
+    """Tokens granted before an admin turned on "require two-step sign-in" or "require SSO" used to keep working over
+    MCP, although the same person's browser session was blocked."""
+    client, store = env
+    pid = client.post("/api/projects", json={"name": "P", "template": "blank"}).json()["id"]
+    dev = member_client(client.app, client, "developer", "dev@example.com", "Dev")
+    _, dev_tokens = oauth_login(dev)  # granted from a password session
+    _, owner_tokens = oauth_login(client)
+    assert not tool(client, dev_tokens["access_token"], "get_architecture", project_id=pid)[0]
+
+    store.set_auth_settings("org-default", None, require_mfa=True)  # Dev has no second factor
+    err, _, text = tool(client, dev_tokens["access_token"], "get_architecture", project_id=pid)
+    assert err and "two-step sign-in" in text
+    store.set_auth_settings("org-default", None, require_mfa=False, sso_enabled=True, require_sso=True)
+    err, _, text = tool(client, dev_tokens["access_token"], "get_architecture", project_id=pid)
+    assert err and "single sign-on" in text and "Reconnect" in text
+    # owners stay exempt from require-SSO, as on the web (break-glass)
+    assert not tool(client, owner_tokens["access_token"], "get_architecture", project_id=pid)[0]
+    # the token remembers how its user had signed in when it was granted
+    assert store.get_token(auth.hash_secret(dev_tokens["access_token"]))["auth_method"] == "password"
+
+
+def test_a_token_limited_to_one_project_sees_only_that_project(env):
+    client, store = env
+    a = client.post("/api/projects", json={"name": "A", "template": "blank"}).json()["id"]
+    b = client.post("/api/projects", json={"name": "B", "template": "blank"}).json()["id"]
+    r = client.post("/api/orgs/org-default/tokens", json={"name": "CI", "access": "read", "project_ids": ["p-nope"]})
+    assert r.status_code == 422  # only projects of this organization
+    created = client.post("/api/orgs/org-default/tokens", json={"name": "CI", "access": "read", "project_ids": [a]}).json()
+    assert created["project_ids"] == [a]
+    pat = created["token"]
+    err, out, _ = tool(client, pat, "list_projects")
+    assert not err and [p["id"] for p in out["result"]] == [a]
+    assert not tool(client, pat, "get_architecture", project_id=a)[0]
+    err, _, text = tool(client, pat, "get_architecture", project_id=b)
+    assert err and "not found" in text
+    # An unrestricted token still sees both
+    everything = client.post("/api/orgs/org-default/tokens", json={"name": "all", "access": "read"}).json()
+    assert everything["project_ids"] is None
+    assert {p["id"] for p in tool(client, everything["token"], "list_projects")[1]["result"]} >= {a, b}

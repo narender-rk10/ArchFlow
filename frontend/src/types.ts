@@ -69,6 +69,8 @@ export interface ProjectState {
   nodes: Record<string, ArchNode>;
   edges: Record<string, ArchEdge>;
   requirements: Record<string, Requirement>;
+  /** New requirement ids are "<prefix>-n" (default REQ). */
+  requirement_prefix?: string;
 }
 
 export interface Project { id: string; name: string; description: string; created_at: string; org_id?: string }
@@ -122,13 +124,25 @@ export interface AISettings {
 }
 export interface AITestResult { ok: boolean; group: AIGroup; model?: string; chain?: string[]; latency_ms?: number; reply?: string; error?: string }
 
+/** What a sign-in rule change would block (GET /orgs/{id}/auth-settings/impact). */
+export interface AuthImpact {
+  members_without_mfa: string[];
+  members_needing_sso: string[];
+  tokens_blocked: { id: string; kind: "pat" | "refresh"; name: string; user_name: string; reason: string }[];
+}
 export interface ApiToken {
   id: string; kind: "pat" | "refresh"; name: string; user_name: string; access: "read" | "write";
   client_name: string; created_at: string; expires_at: number | null; last_used_at: string | null;
+  /** How the user had signed in when the token was granted ("password" or "sso:<org>"). */
+  auth_method?: string | null;
+  /** Projects the token is limited to (null: every project in the org). */
+  project_ids?: string[] | null;
 }
 export interface Branch { name: string; base_version: number | null; created_at: string }
 export interface Version {
   number: number; branch: string; message: string; author: string; parent: number | null; created_at: string;
+  /** The user who saved it (null for versions saved by the system or before authors were recorded). */
+  author_id?: string | null;
   review?: { status: ReviewStatus; approvals: number; required: number };
 }
 // ---- version approvals ----
@@ -141,17 +155,17 @@ export interface VersionReview {
   version: number; status: ReviewStatus; required: number; approvals: { id: string; name: string; at: string }[];
   requested_by: { id: string; name: string } | null; history: ReviewEntry[];
 }
-export interface ApprovalPolicy { required_approvals: number; require_for_adopt: boolean; updated_by: string | null; updated_at: string | null }
+/** One hit of the cross-project search (GET /search). */
+export interface SearchHit {
+  project_id: string; project_name: string; kind: "project" | "component" | "requirement" | "decision" | "comment";
+  id: string; title: string; snippet: string;
+}
+export interface ApprovalPolicy { required_approvals: number; require_for_adopt: boolean; protect_main: boolean; updated_by: string | null; updated_at: string | null }
 /** Roles that may approve a version or request changes (developers request reviews but do not approve). */
 export const APPROVER_ROLES: Role[] = ["reviewer", "architect", "admin", "owner"];
 export interface Activity { actor: string; summary: string[]; rev: number; created_at: string }
 
 export type Op = Record<string, unknown> & { op: string };
-
-export interface Conflict {
-  kind: string; id: string; name: string | null; field: string;
-  theirs: unknown; yours: unknown; base_rev: number; changed_at_rev: number;
-}
 
 export interface Issue {
   severity: "error" | "warning" | "info";
@@ -209,7 +223,6 @@ export interface MergeResult {
 }
 
 export interface User { name: string; color: string }
-export interface PresenceUser extends User { client_id: number }
 
 // ---- guided design chat ----
 export interface ChatOption { id: string; label: string; description: string; recommended?: boolean }
@@ -455,7 +468,7 @@ export interface PromptInfo {
 }
 
 // ---- comments and notifications ----
-export type CommentTarget = "project" | "node" | "decision";
+export type CommentTarget = "project" | "node" | "decision" | "requirement" | "edge";
 export interface Comment {
   id: string; project_id: string; branch: string; target_type: CommentTarget; target_id: string; parent_id: string;
   author_id: string; author_name: string; body: string; mentions: string[]; resolved: boolean; resolved_by: string;

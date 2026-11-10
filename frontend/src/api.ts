@@ -1,4 +1,4 @@
-import type { Activity, Analysis, ArchOption, Branch, ChatCard, ChatTurn, ApiToken, Catalog, Diff, Op, Org, Project, ProjectState, Version } from "./types";
+import type { SearchHit, Activity, Analysis, ArchOption, AuthImpact, Branch, ChatCard, ChatTurn, ApiToken, Catalog, Diff, Op, Org, Project, ProjectState, Version } from "./types";
 import type { AppNotification, Comment, CommentTarget, Decision, Evaluation } from "./types";
 import type { AIConfig, AIGroup, AIProvider, AISettings, AITestResult, Invite, InviteInfo, Me, Member, Role } from "./types";
 import type { ComponentViews, IntakeNote, IntakeResult, IntakeStep, LldResult, RequirementRevision, MergePreview, MergeResolution, MergeResult, MergeSuggestion, Diagram, DiagramInfo } from "./types";
@@ -215,17 +215,22 @@ export const api = {
   orgs: () => call<Org[]>("GET", "/orgs"),
   mcpInfo: () => call<{ url: string; issuer: string; scopes: string[] }>("GET", "/mcp-info"),
   tokens: (org: string) => call<ApiToken[]>("GET", `/orgs/${org}/tokens`),
-  createToken: (org: string, name: string, access: "read" | "write", expires_in_days: number | null) =>
-    call<ApiToken & { token: string }>("POST", `/orgs/${org}/tokens`, { name, access, expires_in_days }),
+  authImpact: (org: string, rules: { require_mfa?: boolean; require_sso?: boolean } = {}) =>
+    call<AuthImpact>("GET", `/orgs/${org}/auth-settings/impact`, undefined,
+      Object.fromEntries(Object.entries(rules).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)]))),
+  revokeBlockedTokens: (org: string) => call<{ revoked: number }>("POST", `/orgs/${org}/auth-settings/revoke-blocked-tokens`),
+  createToken: (org: string, name: string, access: "read" | "write", expires_in_days: number | null, project_ids: string[] | null = null) =>
+    call<ApiToken & { token: string }>("POST", `/orgs/${org}/tokens`, { name, access, expires_in_days, project_ids }),
   revokeToken: (org: string, id: string) => call<null>("DELETE", `/orgs/${org}/tokens/${id}`),
   createOrg: (name: string) => call<Org>("POST", "/orgs", { name }),
   projects: (org_id?: string) => call<Project[]>("GET", "/projects", undefined, org_id ? { org_id } : undefined),
   createProject: (name: string, template: string, org_id: string, description = "") =>
     call<Project>("POST", "/projects", { name, template, description, org_id }),
+  search: (q: string) => call<{ query: string; results: SearchHit[]; total: number }>("GET", "/search", undefined, { q }),
   deleteProject: (pid: string) => call<null>("DELETE", `/projects/${pid}`),
   project: (pid: string, branch: string) =>
     call<{ project: Project; branch: string; branches: Branch[]; head_version: number | null; state: ProjectState;
-      role: Role; ai_available: boolean }>(
+      role: Role; ai_available: boolean; protected: boolean }>(
       "GET", `/projects/${pid}`, undefined, b(branch)),
   ops: (pid: string, branch: string, ops: Op[], actor: string) =>
     call<{ state: ProjectState; summary: string[] }>("POST", `/projects/${pid}/ops`, { ops, actor }, b(branch)),
@@ -332,8 +337,8 @@ export const api = {
   reviewVersion: (pid: string, version: number, action: "request-review" | "approve" | "request-changes", comment = "") =>
     call<VersionReview>("POST", `/projects/${pid}/versions/${version}/${action}`, { comment }),
   approvalPolicy: (org: string) => call<ApprovalPolicy>("GET", `/orgs/${org}/approval-policy`),
-  setApprovalPolicy: (org: string, required_approvals: number, require_for_adopt: boolean) =>
-    call<ApprovalPolicy>("PUT", `/orgs/${org}/approval-policy`, { required_approvals, require_for_adopt }),
+  setApprovalPolicy: (org: string, required_approvals: number, require_for_adopt: boolean, protect_main: boolean) =>
+    call<ApprovalPolicy>("PUT", `/orgs/${org}/approval-policy`, { required_approvals, require_for_adopt, protect_main }),
 
   // ---- architecture decisions ----
   decisions: (pid: string) => call<Decision[]>("GET", `/projects/${pid}/decisions`),

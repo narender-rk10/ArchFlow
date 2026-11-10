@@ -69,11 +69,19 @@ class Principal:
         role = store.get_role(self.org_id, self.user_id) if self.user_id else None
         if role is None:
             raise ToolError("This connection's user is no longer a member of the organization.")
+        # The org's sign-in rules apply to agents too, as to browser sessions: require two-step sign-in, and require
+        # SSO (a token granted from a password session, or before the method was recorded, does not count).
+        blocked = authz.Authz(store).policy_block(
+            {"id": self.user_id, "auth_method": claims.get("auth_method") or "password"}, self.org_id, role)
+        if blocked:
+            raise ToolError(blocked.replace("Sign out, then use Sign in with SSO.",
+                                            "Reconnect this app after signing in to ArchFlow with SSO."))
         account = store.get_user(self.user_id) or {}
         self.role = role
         self.user: str = account.get("name") or claims.get("user_name") or "agent"
         self.client: str = tok.client_id
         self.token_scopes = set(tok.scopes)
+        self.project_ids: set[str] | None = set(claims["project_ids"]) if claims.get("project_ids") else None
         self.org_role = role
         self._needs_write = False
         self.scopes = self.token_scopes & set(authz.role_scopes(role))
@@ -126,7 +134,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
     # ---- helpers ----
     def project_for(p: Principal, project_id: str, branch: str = "main") -> tuple[dict, ProjectState]:
         project = store.get_project(project_id)
-        if not project or project.get("org_id") != p.org_id:
+        if not project or project.get("org_id") != p.org_id or (p.project_ids is not None and project_id not in p.project_ids):
             raise ToolError(f"Project '{project_id}' not found in your organization")
         p.for_project(store, project_id)
         state = store.get_state(project_id, branch)
@@ -170,7 +178,8 @@ def build_remote_mcp(services: Services) -> MCPServer:
     def list_projects() -> list[dict[str, Any]]:
         """Projects in your organization."""
         p = Principal(store)
-        return [{k: x[k] for k in ("id", "name", "description", "created_at")} for x in store.list_projects(p.org_id)]
+        return [{k: x[k] for k in ("id", "name", "description", "created_at")} for x in store.list_projects(p.org_id)
+                if p.project_ids is None or x["id"] in p.project_ids]
 
     @mcp.tool()
     def get_architecture(project_id: str, branch: str = "main") -> dict[str, Any]:
@@ -497,7 +506,7 @@ def build_remote_mcp(services: Services) -> MCPServer:
         p = Principal(store)
         p.require_write()
         project_for(p, project_id, branch)
-        v = await services.commit_version(project_id, branch, message, p.actor)
+        v = await services.commit_version(project_id, branch, message, p.actor, p.user_id)
         return {"version": v["number"], "branch": branch, "message": message}
 
     @mcp.tool()
