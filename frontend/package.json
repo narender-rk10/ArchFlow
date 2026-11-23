@@ -21,7 +21,7 @@
     "mermaid": "^12.1.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "simple-icons": "^16.37.0",
+    "simple-icons": "^16.38.0",
     "yjs": "^13.6.33"
   },
   "devDependencies": {
